@@ -14,6 +14,8 @@ public record CapabilityDefinition(
         RiskClass riskClass,
         String executionMode,
         boolean requiresConfirmation,
+        Map<String, Object> argsSchema,
+        Map<String, Object> resultSchema,
         BiPredicate<ServerPlayerEntity, PlayerRole> visibility,
         CapabilityExecutor executor
 ) {

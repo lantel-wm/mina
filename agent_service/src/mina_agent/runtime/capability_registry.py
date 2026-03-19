@@ -60,8 +60,8 @@ class CapabilityRegistry:
                 execution_mode=bridge_capability.execution_mode,
                 requires_confirmation=bridge_capability.requires_confirmation,
                 budget_cost=1,
-                args_schema={},
-                result_schema={},
+                args_schema=dict(bridge_capability.args_schema),
+                result_schema=dict(bridge_capability.result_schema),
                 description=bridge_capability.description,
             )
             capabilities.append(RuntimeCapability(descriptor=descriptor, handler_kind="bridge"))

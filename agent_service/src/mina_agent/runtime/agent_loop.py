@@ -51,6 +51,7 @@ class AgentLoop:
             "step_index": 0,
             "observations": [],
             "pending_confirmation": pending_confirmation,
+            "block_subject_lock": None,
         }
         self._services.store.create_turn(request.turn_id, request.session_ref, request.user_message, state)
         self._services.audit.record("turn_started", {"turn_id": request.turn_id, "session_ref": request.session_ref})
@@ -76,6 +77,7 @@ class AgentLoop:
         state = continuation.state
         turn_request = TurnStartRequest.model_validate(state["request"])
         observations = state.setdefault("observations", [])
+        state.setdefault("block_subject_lock", None)
         step_index = int(state.get("step_index", 0))
 
         self._services.debug.record_event(
@@ -91,9 +93,10 @@ class AgentLoop:
         )
 
         for result in request.action_results:
+            capability_id = self._lookup_capability_id(state, result.intent_id)
             payload = {
                 "intent_id": result.intent_id,
-                "capability_id": self._lookup_capability_id(state, result.intent_id),
+                "capability_id": capability_id,
                 "status": result.status,
                 "risk_class": self._lookup_risk_class(state, result.intent_id),
                 "observations": result.observations,
@@ -104,6 +107,7 @@ class AgentLoop:
                 "error_message": result.error_message,
             }
             observations.append({"source": "bridge_result", "payload": payload})
+            self._update_block_subject_state(state, capability_id, result.observations)
             self._services.store.log_execution_record(
                 turn_id=continuation.turn_id,
                 intent_id=result.intent_id,
@@ -128,6 +132,8 @@ class AgentLoop:
         return self._advance(turn_request, state)
 
     def _advance(self, request: TurnStartRequest, state: dict[str, Any]) -> TurnResponse:
+        state.setdefault("observations", [])
+        state.setdefault("block_subject_lock", None)
         capabilities = self._services.capability_registry.resolve(request)
         runtime_state = RuntimeState(
             request=request,
@@ -271,18 +277,23 @@ class AgentLoop:
                     },
                 )
 
+            resolved_arguments = self._resolve_capability_arguments(capability, decision.arguments, state)
             self._services.debug.record_event(
                 request.turn_id,
                 "capability_started",
-                self._capability_started_payload(capability, decision),
+                self._capability_started_payload(capability, decision, resolved_arguments),
                 step_index=current_step,
             )
 
             if capability.handler_kind == "internal":
-                trace_events.append(self._internal_start_trace(capability, decision.arguments, current_step))
+                trace_events.append(self._internal_start_trace(capability, resolved_arguments, current_step))
                 started = perf_counter()
                 try:
-                    observation = self._services.capability_registry.execute_internal(capability, decision.arguments, runtime_state)
+                    observation = self._services.capability_registry.execute_internal(
+                        capability,
+                        resolved_arguments,
+                        runtime_state,
+                    )
                 except Exception as exc:
                     latency_ms = int((perf_counter() - started) * 1000)
                     self._services.debug.record_event(
@@ -334,7 +345,7 @@ class AgentLoop:
             continuation_id = str(uuid.uuid4())
             action_request_payload = self._services.capability_registry.bridge_action_request(
                 capability,
-                decision.arguments,
+                resolved_arguments,
                 decision.effect_summary,
                 decision.requires_confirmation,
             )
@@ -489,6 +500,8 @@ class AgentLoop:
                     "requires_confirmation": descriptor.requires_confirmation,
                     "handler_kind": capability.handler_kind,
                     "description": descriptor.description,
+                    "args_schema": descriptor.args_schema,
+                    "result_schema": descriptor.result_schema,
                 }
             )
 
@@ -511,7 +524,12 @@ class AgentLoop:
             "raw_response_preview": provider_result.raw_response_preview,
         }
 
-    def _capability_started_payload(self, capability: Any, decision: Any) -> dict[str, Any]:
+    def _capability_started_payload(
+        self,
+        capability: Any,
+        decision: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
             "capability_id": capability.descriptor.id,
             "handler_kind": capability.handler_kind,
@@ -520,7 +538,7 @@ class AgentLoop:
             "execution_mode": capability.descriptor.execution_mode,
             "requires_confirmation": decision.requires_confirmation or capability.descriptor.requires_confirmation,
             "effect_summary": decision.effect_summary or capability.descriptor.description,
-            "arguments": decision.arguments,
+            "arguments": arguments,
         }
 
     def _internal_capability_finished_payload(
@@ -580,6 +598,107 @@ class AgentLoop:
             "error_message": result.error_message,
             "observations": result.observations,
         }
+
+    def _update_block_subject_state(
+        self,
+        state: dict[str, Any],
+        capability_id: str,
+        observations: dict[str, Any],
+    ) -> None:
+        if not self._bridge_capability_supports_block_pos(state, capability_id):
+            return
+
+        if capability_id == "game.target_block.read":
+            target_found = observations.get("target_found")
+            if target_found is False and state.get("block_subject_lock") is None:
+                return
+
+        pos = observations.get("pos")
+        if not self._is_block_pos(pos):
+            return
+
+        lock = state.get("block_subject_lock")
+
+        if lock is None:
+            lock = {
+                "pos": {"x": int(pos["x"]), "y": int(pos["y"]), "z": int(pos["z"])},
+            }
+            state["block_subject_lock"] = lock
+
+        if not self._same_block_pos(lock.get("pos"), pos):
+            return
+
+        for key in ("block_name", "block_id", "summary"):
+            value = observations.get(key)
+            if isinstance(value, str) and value.strip():
+                lock[key] = value.strip()
+
+        target_found = observations.get("target_found")
+        if isinstance(target_found, bool):
+            lock["target_found"] = target_found
+
+    def _resolve_capability_arguments(
+        self,
+        capability: Any,
+        arguments: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        resolved_arguments = dict(arguments)
+        if not self._capability_supports_block_pos(capability):
+            return resolved_arguments
+        if self._is_block_pos(resolved_arguments.get("block_pos")):
+            return resolved_arguments
+
+        lock = state.get("block_subject_lock")
+        if not isinstance(lock, dict):
+            return resolved_arguments
+
+        locked_pos = lock.get("pos")
+        if not self._is_block_pos(locked_pos):
+            return resolved_arguments
+
+        resolved_arguments["block_pos"] = {
+            "x": int(locked_pos["x"]),
+            "y": int(locked_pos["y"]),
+            "z": int(locked_pos["z"]),
+        }
+        return resolved_arguments
+
+    def _capability_supports_block_pos(self, capability: Any) -> bool:
+        args_schema = getattr(capability.descriptor, "args_schema", {})
+        return isinstance(args_schema, dict) and "block_pos" in args_schema
+
+    def _bridge_capability_supports_block_pos(self, state: dict[str, Any], capability_id: str) -> bool:
+        request_payload = state.get("request", {})
+        if not isinstance(request_payload, dict):
+            return False
+
+        visible_capabilities = request_payload.get("visible_capabilities", [])
+        if not isinstance(visible_capabilities, list):
+            return False
+
+        for capability in visible_capabilities:
+            if not isinstance(capability, dict) or capability.get("id") != capability_id:
+                continue
+            args_schema = capability.get("args_schema", {})
+            return isinstance(args_schema, dict) and "block_pos" in args_schema
+        return False
+
+    def _is_block_pos(self, value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and all(key in value for key in ("x", "y", "z"))
+            and all(isinstance(value[key], (int, float)) for key in ("x", "y", "z"))
+        )
+
+    def _same_block_pos(self, left: Any, right: Any) -> bool:
+        if not self._is_block_pos(left) or not self._is_block_pos(right):
+            return False
+        return (
+            int(left["x"]) == int(right["x"])
+            and int(left["y"]) == int(right["y"])
+            and int(left["z"]) == int(right["z"])
+        )
 
     def _debug_observation(self, capability_id: str, observation: dict[str, Any]) -> dict[str, Any]:
         if capability_id != "retrieval.local_knowledge.search":

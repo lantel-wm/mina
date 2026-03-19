@@ -30,12 +30,17 @@ class ContextBuilder:
             "Do not use keyword routing. "
             "Choose between replying directly or calling one capability at a time. "
             "Treat model outputs as plans with assumptions, not executable commands. "
+            "If the current observations already identify the thing the user asked about, prefer a final reply. "
+            "If an observation already includes a block position and you still need to inspect the same block, "
+            "call a capability with an explicit block_pos instead of re-reading the live target. "
             "Reply with JSON only. "
             "If you want to answer directly, return "
             '{"mode":"final_reply","final_reply":"..."} . '
             "If you need a capability, return "
             '{"mode":"call_capability","capability_id":"...","arguments":{},"effect_summary":"...","requires_confirmation":false}.'
         )
+
+        capability_payloads = [self._capability_context_payload(descriptor) for descriptor in capability_descriptors]
 
         sections = [
             self._section("identity.player", request.player.model_dump(), "request.player", "exact_pass_through"),
@@ -44,9 +49,9 @@ class ContextBuilder:
             self._section("scoped_snapshot", request.scoped_snapshot, "request.scoped_snapshot", "structured_summary_with_preview"),
             self._section(
                 "capabilities",
-                [descriptor.model_dump() for descriptor in capability_descriptors],
+                capability_payloads,
                 "resolved_capability_descriptors",
-                "all_visible_capabilities",
+                "scoped_capability_descriptors",
             ),
             self._section("recent_turns", recent_turns, "store.turns", "tail(limit=6)"),
             self._section("memories", memories, "store.memories", "tail(limit=6)"),
@@ -62,7 +67,7 @@ class ContextBuilder:
             },
             "limits": request.limits.model_dump(),
             "scoped_snapshot": request.scoped_snapshot,
-            "capabilities": [descriptor.model_dump() for descriptor in capability_descriptors],
+            "capabilities": capability_payloads,
             "recent_turns": recent_turns,
             "memories": memories,
             "observations": observations,
@@ -88,11 +93,21 @@ class ContextBuilder:
                 "recent_turns": "tail(limit=6)",
                 "memories": "tail(limit=6)",
                 "observations": "include_all_current_step",
-                "capabilities": "all_visible_capabilities",
+                "capabilities": "scoped_capability_descriptors",
                 "pending_confirmation": "include_if_present",
                 "scoped_snapshot": "structured_summary_with_preview",
             },
         )
+
+    def _capability_context_payload(self, descriptor: CapabilityDescriptor) -> dict[str, Any]:
+        return {
+            "id": descriptor.id,
+            "kind": descriptor.kind,
+            "risk_class": descriptor.risk_class,
+            "execution_mode": descriptor.execution_mode,
+            "requires_confirmation": descriptor.requires_confirmation,
+            "description": descriptor.description,
+        }
 
     def _section(self, name: str, value: Any, source: str, strategy: str) -> dict[str, Any]:
         return {

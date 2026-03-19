@@ -34,6 +34,8 @@ class VisibleCapabilityPayload(MinaBaseModel):
     risk_class: str
     execution_mode: str
     requires_confirmation: bool
+    args_schema: dict[str, Any] = Field(default_factory=dict)
+    result_schema: dict[str, Any] = Field(default_factory=dict)
 
 
 class LimitsPayload(MinaBaseModel):

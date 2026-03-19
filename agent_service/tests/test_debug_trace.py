@@ -207,6 +207,298 @@ class DebugTraceTests(unittest.TestCase):
         self.assertGreater(summary["truncation"]["chars_omitted"], 0)
         self.assertEqual(summary["turn"]["status"], "completed")
 
+    def test_bridge_capability_schema_is_visible_in_debug_but_not_default_model_context(self) -> None:
+        visible_capabilities = [self._target_block_capability()]
+        loop, settings, services = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[self._final_reply_result("Schema loaded.")],
+        )
+        request = self._turn_request(
+            turn_id="turn-block-schema",
+            user_message="mina，这是什么？",
+            visible_capabilities=visible_capabilities,
+        )
+        resolved_capabilities = services.capability_registry.resolve(request)
+        context_result = services.context_builder.build_messages(
+            request=request,
+            recent_turns=[],
+            memories=[],
+            capability_descriptors=[capability.descriptor for capability in resolved_capabilities],
+            observations=[],
+            pending_confirmation=None,
+        )
+        model_payload = json.loads(context_result.messages[1]["content"])
+        target_capability = self._capability_from_payload(model_payload["capabilities"], "game.target_block.read")
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "final_reply")
+        events = self._load_events(settings.debug_dir, "turn-block-schema")
+
+        capabilities_event = self._find_event(events, "capabilities_resolved")
+        target_descriptor = self._capability_from_event(capabilities_event, "game.target_block.read")
+        self.assertIn("block_pos", target_descriptor["args_schema"])
+        self.assertIn("block_name", target_descriptor["result_schema"])
+        self.assertNotIn("args_schema", target_capability)
+        self.assertNotIn("result_schema", target_capability)
+
+    def test_locked_block_position_is_injected_into_follow_up_bridge_request(self) -> None:
+        visible_capabilities = [self._target_block_capability(), self._carpet_block_info_capability()]
+        loop, _, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("carpet.block_info.read"),
+            ],
+        )
+
+        start_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-lock-injection",
+                user_message="mina，这是什么？",
+                visible_capabilities=visible_capabilities,
+            )
+        )
+        first_request = start_response.action_request_batch[0]
+
+        resume_response = loop.resume_turn(
+            start_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-lock-injection",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 13, "y": 83, "z": -25},
+                            "block_id": "minecraft:oak_leaves",
+                            "block_name": "橡树树叶",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read target block.",
+                        timing_ms=6,
+                        state_fingerprint="target-1",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(resume_response.type, "action_request_batch")
+        follow_up_request = resume_response.action_request_batch[0]
+        self.assertEqual(follow_up_request.capability_id, "carpet.block_info.read")
+        self.assertEqual(follow_up_request.arguments["block_pos"], {"x": 13, "y": 83, "z": -25})
+
+    def test_first_locked_block_is_not_overwritten_by_later_drift(self) -> None:
+        visible_capabilities = [self._target_block_capability(), self._carpet_block_info_capability()]
+        loop, _, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("carpet.block_info.read"),
+                self._final_reply_result("你指的是坐标 (13, 83, -25) 处的橡树树叶。"),
+            ],
+        )
+
+        start_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-first-lock-wins",
+                user_message="mina，这是什么？",
+                visible_capabilities=visible_capabilities,
+            )
+        )
+        first_request = start_response.action_request_batch[0]
+
+        second_response = loop.resume_turn(
+            start_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-first-lock-wins",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 13, "y": 83, "z": -25},
+                            "block_id": "minecraft:oak_leaves",
+                            "block_name": "橡树树叶",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read target block.",
+                        timing_ms=6,
+                        state_fingerprint="target-1",
+                    )
+                ],
+            ),
+        )
+        second_request = second_response.action_request_batch[0]
+
+        final_response = loop.resume_turn(
+            second_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-first-lock-wins",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=second_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "pos": {"x": 18, "y": 83, "z": -17},
+                            "summary": "Current target drifted while the player was moving.",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read Carpet block info.",
+                        timing_ms=7,
+                        state_fingerprint="block-info-1",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(final_response.type, "final_reply")
+        self.assertIn("(13, 83, -25)", final_response.final_reply or "")
+        self.assertIn("橡树树叶", final_response.final_reply or "")
+        self.assertNotIn("(18, 83, -17)", final_response.final_reply or "")
+
+    def test_two_consecutive_target_misses_still_require_model_final_reply(self) -> None:
+        visible_capabilities = [self._target_block_capability()]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("game.target_block.read"),
+                self._final_reply_result("我还没看清你指的是哪个方块，请停一下再试一次。"),
+            ],
+        )
+
+        first_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-two-target-misses",
+                user_message="mina，这是什么？",
+                visible_capabilities=visible_capabilities,
+            )
+        )
+        first_request = first_response.action_request_batch[0]
+
+        second_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-two-target-misses",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={"target_found": False},
+                        preconditions_passed=True,
+                        side_effect_summary="Target not found.",
+                        timing_ms=5,
+                        state_fingerprint="miss-1",
+                    )
+                ],
+            ),
+        )
+        second_request = second_response.action_request_batch[0]
+
+        final_response = loop.resume_turn(
+            second_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-two-target-misses",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=second_request.intent_id,
+                        status="succeeded",
+                        observations={"target_found": False},
+                        preconditions_passed=True,
+                        side_effect_summary="Target not found again.",
+                        timing_ms=5,
+                        state_fingerprint="miss-2",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(final_response.type, "final_reply")
+        self.assertIn("没看清", final_response.final_reply or "")
+        events = self._load_events(settings.debug_dir, "turn-two-target-misses")
+        completed_event = self._find_event(events, "turn_completed")
+        self.assertNotIn("reason", completed_event["payload"])
+
+    def test_repeated_locked_block_capability_remains_model_driven(self) -> None:
+        visible_capabilities = [self._target_block_capability()]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("game.target_block.read"),
+                self._final_reply_result("你刚才看的是橡树树叶。"),
+            ],
+        )
+
+        first_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-locked-repeat",
+                user_message="mina，这是什么？",
+                visible_capabilities=visible_capabilities,
+            )
+        )
+        first_request = first_response.action_request_batch[0]
+
+        second_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-locked-repeat",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 13, "y": 83, "z": -25},
+                            "block_id": "minecraft:oak_leaves",
+                            "block_name": "橡树树叶",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read target block.",
+                        timing_ms=6,
+                        state_fingerprint="target-1",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(second_response.type, "action_request_batch")
+        second_request = second_response.action_request_batch[0]
+        self.assertEqual(second_request.capability_id, "game.target_block.read")
+        self.assertEqual(second_request.arguments["block_pos"], {"x": 13, "y": 83, "z": -25})
+
+        final_response = loop.resume_turn(
+            second_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-locked-repeat",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=second_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 13, "y": 83, "z": -25},
+                            "block_id": "minecraft:oak_leaves",
+                            "block_name": "橡树树叶",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read locked target block.",
+                        timing_ms=6,
+                        state_fingerprint="target-2",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(final_response.type, "final_reply")
+        self.assertIn("橡树树叶", final_response.final_reply or "")
+        events = self._load_events(settings.debug_dir, "turn-locked-repeat")
+        completed_event = self._find_event(events, "turn_completed")
+        self.assertNotIn("reason", completed_event["payload"])
+
     def _build_loop(
         self,
         *,
@@ -341,6 +633,77 @@ class DebugTraceTests(unittest.TestCase):
             temperature=0.2,
             message_count=2,
         )
+
+    def _target_block_capability(self) -> VisibleCapabilityPayload:
+        return VisibleCapabilityPayload(
+            id="game.target_block.read",
+            kind="tool",
+            description="Inspect the block the player is targeting.",
+            risk_class="read_only",
+            execution_mode="bridge",
+            requires_confirmation=False,
+            args_schema={
+                "block_pos": {
+                    "type": "object",
+                    "required": False,
+                    "fields": {"x": "integer", "y": "integer", "z": "integer"},
+                }
+            },
+            result_schema={
+                "target_found": "boolean",
+                "pos": "object{x,y,z}",
+                "block_id": "string",
+                "block_name": "string",
+            },
+        )
+
+    def _carpet_block_info_capability(self) -> VisibleCapabilityPayload:
+        return VisibleCapabilityPayload(
+            id="carpet.block_info.read",
+            kind="tool",
+            description="Inspect detailed Carpet block diagnostics.",
+            risk_class="read_only",
+            execution_mode="bridge",
+            requires_confirmation=False,
+            args_schema={
+                "block_pos": {
+                    "type": "object",
+                    "required": False,
+                    "fields": {"x": "integer", "y": "integer", "z": "integer"},
+                }
+            },
+            result_schema={
+                "pos": "object{x,y,z}",
+                "lines": "array<string>",
+                "summary": "string",
+            },
+        )
+
+    def _find_event(self, events: list[dict[str, Any]], event_type: str) -> dict[str, Any]:
+        for event in events:
+            if event["event_type"] == event_type:
+                return event
+        raise AssertionError(f"Event {event_type} not found.")
+
+    def _capability_from_event(self, event: dict[str, Any], capability_id: str) -> dict[str, Any]:
+        return self._capability_from_payload(event["payload"]["capabilities"], capability_id)
+
+    def _capability_from_payload(
+        self,
+        capabilities: Any,
+        capability_id: str,
+    ) -> dict[str, Any]:
+        for capability in self._preview_items(capabilities):
+            if capability["id"] == capability_id:
+                return capability
+        raise AssertionError(f"Capability {capability_id} not found.")
+
+    def _preview_items(self, value: Any) -> list[Any]:
+        if isinstance(value, dict) and "items" in value:
+            return list(value["items"])
+        if isinstance(value, list):
+            return value
+        raise AssertionError(f"Expected preview list structure, got: {value!r}")
 
     def _turn_dir(self, debug_dir: Path, turn_id: str) -> Path:
         matches = list((debug_dir / "turns").glob(f"*/{turn_id}"))

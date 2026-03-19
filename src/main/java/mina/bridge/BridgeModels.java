@@ -69,6 +69,8 @@ public final class BridgeModels {
         public String risk_class;
         public String execution_mode;
         public boolean requires_confirmation;
+        public Map<String, Object> args_schema;
+        public Map<String, Object> result_schema;
 
         public static VisibleCapabilityPayload fromDefinition(CapabilityDefinition definition) {
             VisibleCapabilityPayload payload = new VisibleCapabilityPayload();
@@ -78,6 +80,8 @@ public final class BridgeModels {
             payload.risk_class = definition.riskClass().wireValue();
             payload.execution_mode = definition.executionMode();
             payload.requires_confirmation = definition.requiresConfirmation();
+            payload.args_schema = definition.argsSchema();
+            payload.result_schema = definition.resultSchema();
             return payload;
         }
     }

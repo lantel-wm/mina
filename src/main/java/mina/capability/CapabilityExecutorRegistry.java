@@ -73,6 +73,8 @@ public final class CapabilityExecutorRegistry {
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                Map.of(),
+                Map.of(),
                 (player, role) -> true,
                 (player, arguments) -> new CapabilityResult(collectPlayerSnapshot(player), "Read current player snapshot.")
         ));
@@ -83,6 +85,15 @@ public final class CapabilityExecutorRegistry {
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                blockPosArgSchema("Inspect an explicit block position instead of the live target."),
+                Map.of(
+                        "target_found", "boolean",
+                        "pos", "object{x,y,z}",
+                        "block_id", "string",
+                        "block_name", "string",
+                        "is_air", "boolean",
+                        "luminance", "integer"
+                ),
                 (player, role) -> true,
                 (player, arguments) -> executeTargetBlockRead(player, arguments)
         ));
@@ -93,6 +104,8 @@ public final class CapabilityExecutorRegistry {
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                Map.of(),
+                Map.of(),
                 (player, role) -> true,
                 (player, arguments) -> executeServerRulesRead(player)
         ));
@@ -103,6 +116,12 @@ public final class CapabilityExecutorRegistry {
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                blockPosArgSchema("Inspect Carpet diagnostics for an explicit block position."),
+                Map.of(
+                        "pos", "object{x,y,z}",
+                        "lines", "array<string>",
+                        "summary", "string"
+                ),
                 (player, role) -> carpetAvailable,
                 (player, arguments) -> executeCarpetBlockInfo(player, arguments)
         ));
@@ -113,6 +132,8 @@ public final class CapabilityExecutorRegistry {
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                Map.of(),
+                Map.of(),
                 (player, role) -> carpetAvailable,
                 (player, arguments) -> executeDistanceMeasure(player, arguments)
         ));
@@ -123,10 +144,29 @@ public final class CapabilityExecutorRegistry {
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                Map.of(),
+                Map.of(),
                 (player, role) -> carpetAvailable,
                 (player, arguments) -> executeMobcapsRead(player)
         ));
         return Map.copyOf(map);
+    }
+
+    private Map<String, Object> blockPosArgSchema(String description) {
+        return Map.of(
+                "block_pos",
+                Map.of(
+                        "type", "object",
+                        "required", false,
+                        "description", description,
+                        "fields",
+                        Map.of(
+                                "x", "integer",
+                                "y", "integer",
+                                "z", "integer"
+                        )
+                )
+        );
     }
 
     private CapabilityResult executeTargetBlockRead(ServerPlayerEntity player, Map<String, Object> arguments) {
