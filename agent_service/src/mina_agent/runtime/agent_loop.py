@@ -39,11 +39,11 @@ class AgentServices:
 
 class AgentLoop:
     _INTERNAL_START_STATUS_LABELS = (
-        "占星中",
-        "读牌中",
-        "观测命轨中",
-        "聆听预兆中",
-        "解读星象中",
+        "我在看",
+        "我来核对",
+        "再看一下",
+        "替你比对",
+        "我在确认",
     )
 
     def __init__(self, services: AgentServices) -> None:
@@ -391,8 +391,8 @@ class AgentLoop:
                     action_request_payload,
                 )
                 reply = (
-                    "I have a high-risk action plan ready but it requires confirmation. "
-                    f"Planned effect: {action_request_payload['effect_summary']}"
+                    "这一步我已经替你想好了，不过要先等你确认。"
+                    f" 计划效果：{action_request_payload['effect_summary']}"
                 )
                 trace_events.append(
                     TraceEventPayload(
@@ -826,29 +826,67 @@ class AgentLoop:
 
     def _internal_start_detail(self, capability_id: str, arguments: dict[str, Any]) -> str:
         if capability_id == "retrieval.minecraft_facts.lookup":
-            return "正在查询 SQLite 中的结构化事实。"
+            return random.choice(
+                (
+                    "我在替你一条条看。",
+                    "这里的信息有点多，我再确认一下。",
+                    "先别催，我还在比对。",
+                    "等等，我再看一眼。",
+                )
+            )
         if capability_id == "retrieval.minecraft_semantics.search":
-            return "正在检索 SQLite FTS 中的解释性资料。"
+            return random.choice(
+                (
+                    "我先替你把相关的部分找出来。",
+                    "这里的信息有点多，我再确认一下。",
+                    "先别催，我还在比对。",
+                    "等等，我再看一眼。",
+                )
+            )
         if capability_id == "skill.mina_capability_guide":
-            return "正在整理当前会话可见的能力与限制。"
+            return "我先把现在能用的内容理一下。"
         if capability_id == "script.python_sandbox.execute":
-            return "正在准备受预算控制的沙箱脚本。"
-        return "Mina 正在执行一个内部步骤。"
+            return "我先把这一步该怎么做整理清楚。"
+        return "我先替你确认一下。"
 
     def _internal_finish_detail(self, capability_id: str, observation: dict[str, Any]) -> str:
         if capability_id == "retrieval.minecraft_facts.lookup":
             count = len(observation.get("results", []))
-            return f"已完成结构化事实查询，命中 {count} 条结果。"
+            return random.choice(
+                (
+                    f"已经替你确认好了，找到 {count} 条结果。",
+                    f"这边已经替你看清楚了，一共 {count} 条。",
+                    f"找到 {count} 条结果，这样应该够用了 (｡•̀ᴗ-)",
+                    f"我已经替你对清楚了，一共 {count} 条 >_<",
+                )
+            )
         if capability_id == "retrieval.minecraft_semantics.search":
             count = len(observation.get("results", []))
-            return f"已完成解释性资料检索，找到 {count} 条相关资料。"
+            return random.choice(
+                (
+                    f"相关的内容已经找出来了，一共 {count} 条。",
+                    f"能用的内容我已经替你挑出来了，一共 {count} 条。",
+                    f"这部分已经理出来了，有 {count} 条可看 (￣▽￣)",
+                    f"我先替你把重点捞出来了，一共 {count} 条 ( ´ ` )",
+                )
+            )
         if capability_id == "skill.mina_capability_guide":
             count = len(observation.get("summary", []))
-            return f"已整理 {count} 个当前可见能力。"
+            return random.choice(
+                (
+                    f"我已经把现在能用的内容理好了，一共 {count} 项。",
+                    f"能用的部分已经替你整理好了，一共 {count} 项 (｡•̀ᴗ-)",
+                )
+            )
         if capability_id == "script.python_sandbox.execute":
             count = len(observation.get("actions", []))
-            return f"脚本准备完成，生成了 {count} 个结构化动作意图。"
-        return "内部步骤已完成，结果已返回给 Mina。"
+            return random.choice(
+                (
+                    f"这一步已经准备好了，整理出了 {count} 个后续动作。",
+                    f"后面的动作我已经替你理顺了，一共 {count} 个 (￣▽￣)",
+                )
+            )
+        return "这一步已经处理好了。"
 
     def _observation_count_label(self, capability_id: str, observation: dict[str, Any]) -> str | None:
         if capability_id in {"retrieval.minecraft_facts.lookup", "retrieval.minecraft_semantics.search"}:

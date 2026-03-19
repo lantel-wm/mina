@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 
 public final class TurnCoordinator {
     private final MinaConfig config;
@@ -62,7 +63,7 @@ public final class TurnCoordinator {
         String turnId = UUID.randomUUID().toString();
 
         if (!pendingTurnRegistry.tryOpen(playerId, turnId)) {
-            source.sendError(MinaChatRenderer.commandError("Mina is already handling another request for you."));
+            source.sendError(MinaChatRenderer.commandError("我这边还在看上一件事，先别急。"));
             return false;
         }
 
@@ -124,7 +125,7 @@ public final class TurnCoordinator {
             throw new IllegalStateException("Agent service returned an empty response.");
         } catch (Exception exception) {
             MinaMod.LOGGER.error("Mina turn {} failed", turnId, exception);
-            deliverError(server, playerId, "Mina failed to complete the request: " + exception.getMessage());
+            deliverError(server, playerId, "刚刚这一步有点不对，我再处理也许会更稳。原因：" + exception.getMessage());
         } finally {
             pendingTurnRegistry.close(playerId, turnId);
         }
@@ -257,7 +258,7 @@ public final class TurnCoordinator {
 
         String title = requiresConfirmation ? "需要确认的计划" : buildReplyTitle(executedCapabilityIds);
         String note = requiresConfirmation
-                ? "继续用自然语言确认、拒绝，或修改这个计划。"
+                ? "你点头之后我再继续。也可以直接让我改一下。"
                 : null;
         ChipTone noteTone = requiresConfirmation ? ChipTone.WARNING : ChipTone.MUTED;
 
@@ -271,12 +272,12 @@ public final class TurnCoordinator {
 
         String lastCapabilityId = executedCapabilityIds.get(executedCapabilityIds.size() - 1);
         return switch (lastCapabilityId) {
-            case "game.player_snapshot.read" -> "玩家状态";
-            case "game.target_block.read", "carpet.block_info.read" -> "方块观察结果";
-            case "server.rules.read" -> "服务器规则";
-            case "carpet.distance.measure" -> "距离测量结果";
-            case "carpet.mobcaps.read" -> "生物生成概况";
-            default -> "执行结果";
+            case "game.player_snapshot.read" -> "你的状态";
+            case "game.target_block.read", "carpet.block_info.read" -> "眼前这个方块";
+            case "server.rules.read" -> "服务器这边的规则";
+            case "carpet.distance.measure" -> "距离结果";
+            case "carpet.mobcaps.read" -> "生物生成情况";
+            default -> "我替你看到的结果";
         };
     }
 
@@ -300,7 +301,7 @@ public final class TurnCoordinator {
         }
 
         return new ActionTracePresentation(
-                "执行中",
+                "处理中",
                 ChipTone.INFO,
                 capabilityLabel(actionRequest.capability_id),
                 actionIntentDetail(actionRequest),
@@ -333,25 +334,25 @@ public final class TurnCoordinator {
 
     private String capabilityLabel(String capabilityId) {
         return switch (capabilityId) {
-            case "game.player_snapshot.read" -> "读取玩家状态";
-            case "game.target_block.read" -> "读取目标方块";
-            case "server.rules.read" -> "读取服务器规则";
-            case "carpet.block_info.read" -> "读取 Carpet 方块信息";
+            case "game.player_snapshot.read" -> "看看你的状态";
+            case "game.target_block.read" -> "看看你正在看的方块";
+            case "server.rules.read" -> "看看服务器规则";
+            case "carpet.block_info.read" -> "看看这个方块的详细信息";
             case "carpet.distance.measure" -> "测量距离";
-            case "carpet.mobcaps.read" -> "读取生物上限";
+            case "carpet.mobcaps.read" -> "看看生物生成情况";
             default -> capabilityId;
         };
     }
 
     private String actionIntentDetail(BridgeModels.ActionRequestPayload actionRequest) {
         return switch (actionRequest.capability_id) {
-            case "game.player_snapshot.read" -> "读取你的生命、饥饿、坐标和手持物。";
-            case "game.target_block.read" -> "检查你当前正在看的方块。";
-            case "server.rules.read" -> "读取当前服务器规则和 gamerule 摘要。";
-            case "carpet.block_info.read" -> "读取目标方块的 Carpet 诊断信息。";
-            case "carpet.distance.measure" -> "测量当前位置与目标位置之间的距离。";
-            case "carpet.mobcaps.read" -> "读取当前维度的生物上限报告。";
-            default -> "Mina 正在执行一个结构化能力。";
+            case "game.player_snapshot.read" -> "我会替你看看生命、饥饿、坐标和手里的东西。";
+            case "game.target_block.read" -> "我会替你看看你现在盯着的方块。";
+            case "server.rules.read" -> "我会替你看看服务器这边现在的规则。";
+            case "carpet.block_info.read" -> "我会替你把这个方块的细节看清楚。";
+            case "carpet.distance.measure" -> "我会替你量一下这里到目标位置的距离。";
+            case "carpet.mobcaps.read" -> "我会替你看看这个维度现在的生物生成情况。";
+            default -> "我先替你把这一步看清楚。";
         };
     }
 
@@ -360,16 +361,27 @@ public final class TurnCoordinator {
             BridgeModels.ActionResultPayload actionResult
     ) {
         return switch (actionResult.status) {
-            case "executed" -> "动作已完成，结果已返回给 Mina 继续推理。";
-            case "action_budget_exhausted" -> "本回合的动作预算已耗尽。";
-            case "role_forbidden" -> "你当前的权限等级不允许执行这个动作。";
-            case "confirmation_required" -> "这个动作需要先经过自然语言确认。";
-            case "capability_hidden" -> "当前上下文下，这个能力不可用。";
-            case "precondition_failed" -> "执行前发现状态发生变化，Mina 已停止这一步。";
-            case "player_unavailable" -> "玩家已经离线，动作被取消。";
-            case "execution_failed" -> nonBlank(actionResult.error_message, "动作执行失败。");
+            case "executed" -> nonBlank(actionResult.side_effect_summary, executedResultFallback());
+            case "action_budget_exhausted" -> "这回合我先看到这里，不能再往下做了。";
+            case "role_forbidden" -> "这一步我现在还不能替你做。";
+            case "confirmation_required" -> "这一步要先等你确认，我就先停在这里。";
+            case "capability_hidden" -> "现在这个情况里，我还不能用这一步。";
+            case "precondition_failed" -> "刚刚情况变了，我先不乱动这一步。";
+            case "player_unavailable" -> "你已经不在这里了，这一步就先停下。";
+            case "execution_failed" -> nonBlank(actionResult.error_message, "刚刚这一步没有做好，我再换个办法会更稳。");
             default -> nonBlank(actionResult.error_message, nonBlank(actionResult.side_effect_summary, actionIntentDetail(actionRequest)));
         };
+    }
+
+    private String executedResultFallback() {
+        String[] variants = new String[]{
+                "已经替你处理好了。",
+                "弄好了，这样就可以 (￣▽￣)",
+                "这边已经理顺了 (｡•̀ᴗ-)",
+                "处理好了，没让你白等吧。",
+                "已经看明白了，你可以放心了 >_<",
+        };
+        return variants[ThreadLocalRandom.current().nextInt(variants.length)];
     }
 
     private String statusLabel(String status) {

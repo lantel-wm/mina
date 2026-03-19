@@ -35,11 +35,11 @@ public final class MinaChatRenderer {
     private static final int CHIP_COLOR = 0xB7C6D3;
     private static final int CHIP_SHADOW = 0x243444;
     private static final ProcessingVariant[] PROCESSING_VARIANTS = new ProcessingVariant[]{
-            new ProcessingVariant("少女祈祷中", "Mina 正在向星光低声祈愿，答案很快就会落下来。", "命运的线索正在慢慢显形，请再等我一下下。"),
-            new ProcessingVariant("星盘推演中", "星盘还在缓缓转动，眼前的迹象正在一点点变清楚。", "我正在替你读懂这些征兆，马上就把结果说给你听。"),
-            new ProcessingVariant("月影占卜中", "月影正落在牌面上，合适的答案快要浮现啦。", "让我再听一听夜色里的回响，很快就告诉你下一步。"),
-            new ProcessingVariant("命运解读中", "别急，命运的低语已经传过来了，只差最后一点确认。", "散落的预兆正在拼起来，马上就能读出清楚的方向。"),
-            new ProcessingVariant("星砂凝望中", "星砂还在指尖轻轻流动，Mina 正在捕捉最亮的那一道启示。", "我正在顺着这些细小的征兆往前看，很快就会给你回答。")
+            new ProcessingVariant("查阅中", "先别急，我替你看一下…", "先别急，我替你看一下…"),
+            new ProcessingVariant("确认中", "这种事交给我确认就好 ( ´ ` )", "这种事交给我确认就好 ( ´ ` )"),
+            new ProcessingVariant("处理中", "我先把这里弄清楚，再告诉你。", "我先把这里弄清楚，再告诉你。"),
+            new ProcessingVariant("核对中", "给我一点时间，我在看… >_<", "给我一点时间，我在看… >_<"),
+            new ProcessingVariant("整理中", "我先替你理一下现在的情况… (-_-;)", "我先替你理一下现在的情况… (-_-;)")
     };
 
     private MinaChatRenderer() {
@@ -63,7 +63,7 @@ public final class MinaChatRenderer {
     }
 
     public static void sendErrorReply(ServerPlayerEntity player, String message) {
-        player.sendMessage(error("Error", message), false);
+        player.sendMessage(error("Mina", message), false);
     }
 
     public static Text commandError(String message) {
@@ -76,7 +76,7 @@ public final class MinaChatRenderer {
                 .withColor(USER_PREFIX_COLOR)
                 .withShadowColor(USER_PREFIX_SHADOW)
                 .withBold(true)
-                .withHoverEvent(new HoverEvent.ShowText(Text.literal("Click to reuse this prompt.")))
+                .withHoverEvent(new HoverEvent.ShowText(Text.literal("点一下就能继续用这句话。")))
                 .withClickEvent(new ClickEvent.SuggestCommand(suggestedCommand))
                 .withInsertion(suggestedCommand);
 
@@ -210,7 +210,7 @@ public final class MinaChatRenderer {
         Style chipStyle = Style.EMPTY
                 .withColor(CHIP_COLOR)
                 .withShadowColor(CHIP_SHADOW)
-                .withHoverEvent(new HoverEvent.ShowText(Text.literal("点击复制 Mina 的回复。")))
+                .withHoverEvent(new HoverEvent.ShowText(Text.literal("点一下就帮你复制这句回复。")))
                 .withClickEvent(new ClickEvent.CopyToClipboard(message));
         return badge("复制", chipStyle);
     }
