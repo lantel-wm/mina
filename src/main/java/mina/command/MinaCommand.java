@@ -4,6 +4,7 @@ import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import mina.MinaRuntime;
+import mina.chat.MinaChatRenderer;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.server.command.CommandManager;
@@ -42,8 +43,13 @@ public final class MinaCommand {
             return 0;
         }
 
-        MinaRuntime.getInstance().turnCoordinator().submitTurn(source, message);
-        source.sendFeedback(() -> Text.literal("Mina is processing your request..."), false);
-        return Command.SINGLE_SUCCESS;
+        if (MinaRuntime.getInstance().turnCoordinator().submitTurn(source, message, () -> {
+            MinaChatRenderer.sendUserEcho(source, message);
+            MinaChatRenderer.sendProcessing(source);
+        })) {
+            return Command.SINGLE_SUCCESS;
+        }
+
+        return 0;
     }
 }

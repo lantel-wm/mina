@@ -7,6 +7,7 @@ import mina.bridge.BridgeModels;
 import mina.capability.CapabilityDefinition;
 import mina.capability.CapabilityExecutorRegistry;
 import mina.capability.CapabilityResult;
+import mina.chat.MinaChatRenderer;
 import mina.config.MinaConfig;
 import mina.context.GameContextCollector;
 import mina.context.TurnContext;
@@ -17,7 +18,6 @@ import mina.util.ServerExecutor;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.text.Text;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -52,17 +52,19 @@ public final class TurnCoordinator {
         this.ioExecutor = ioExecutor;
     }
 
-    public void submitTurn(ServerCommandSource source, String userMessage) throws CommandSyntaxException {
+    public boolean submitTurn(ServerCommandSource source, String userMessage, Runnable acceptedCallback) throws CommandSyntaxException {
         ServerPlayerEntity player = source.getPlayerOrThrow();
         UUID playerId = player.getUuid();
         String turnId = UUID.randomUUID().toString();
 
         if (!pendingTurnRegistry.tryOpen(playerId, turnId)) {
-            source.sendError(Text.literal("Mina is already handling another request for you."));
-            return;
+            source.sendError(net.minecraft.text.Text.literal("Mina is already handling another request for you."));
+            return false;
         }
 
+        acceptedCallback.run();
         ioExecutor.submit(() -> runTurn(playerId, turnId, userMessage, source.getServer()));
+        return true;
     }
 
     private void runTurn(UUID playerId, String turnId, String userMessage, net.minecraft.server.MinecraftServer server) {
@@ -220,7 +222,7 @@ public final class TurnCoordinator {
                 return;
             }
 
-            player.sendMessage(Text.literal(message), false);
+            MinaChatRenderer.sendReply(player, message);
         });
     }
 }
