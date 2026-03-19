@@ -1,0 +1,10 @@
+.gradle/
+build/
+run/
+out/
+.idea/
+*.iml
+.venv/
+
+# reference repos for coding agent
+reference

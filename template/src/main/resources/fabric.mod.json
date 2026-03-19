@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "mina",
+  "version": "${version}",
+  "name": "mina",
+  "description": "Mina Fabric mod.",
+  "authors": [
+    "Your Name"
+  ],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "mina.MinaMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.4",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
