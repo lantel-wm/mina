@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import uuid
 from dataclasses import dataclass
 from time import perf_counter
@@ -37,6 +38,14 @@ class AgentServices:
 
 
 class AgentLoop:
+    _INTERNAL_START_STATUS_LABELS = (
+        "占星中",
+        "读牌中",
+        "观测命轨中",
+        "聆听预兆中",
+        "解读星象中",
+    )
+
     def __init__(self, services: AgentServices) -> None:
         self._services = services
 
@@ -723,7 +732,7 @@ class AgentLoop:
         step_index: int,
     ) -> TraceEventPayload:
         return TraceEventPayload(
-            status_label="处理中",
+            status_label=random.choice(self._INTERNAL_START_STATUS_LABELS),
             status_tone="info",
             title=self._capability_title(capability.descriptor.id),
             detail=self._internal_start_detail(capability.descriptor.id, arguments),

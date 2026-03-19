@@ -11,6 +11,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 public final class MinaChatRenderer {
     private static final StyleSpriteSource.Font MINA_FONT = new StyleSpriteSource.Font(Identifier.ofVanilla("uniform"));
@@ -33,6 +34,13 @@ public final class MinaChatRenderer {
     private static final int ERROR_BODY_SHADOW = 0x3A2020;
     private static final int CHIP_COLOR = 0xB7C6D3;
     private static final int CHIP_SHADOW = 0x243444;
+    private static final ProcessingVariant[] PROCESSING_VARIANTS = new ProcessingVariant[]{
+            new ProcessingVariant("少女祈祷中", "Mina 正在向星光低声祈愿，答案很快就会落下来。", "命运的线索正在慢慢显形，请再等我一下下。"),
+            new ProcessingVariant("星盘推演中", "星盘还在缓缓转动，眼前的迹象正在一点点变清楚。", "我正在替你读懂这些征兆，马上就把结果说给你听。"),
+            new ProcessingVariant("月影占卜中", "月影正落在牌面上，合适的答案快要浮现啦。", "让我再听一听夜色里的回响，很快就告诉你下一步。"),
+            new ProcessingVariant("命运解读中", "别急，命运的低语已经传过来了，只差最后一点确认。", "散落的预兆正在拼起来，马上就能读出清楚的方向。"),
+            new ProcessingVariant("星砂凝望中", "星砂还在指尖轻轻流动，Mina 正在捕捉最亮的那一道启示。", "我正在顺着这些细小的征兆往前看，很快就会给你回答。")
+    };
 
     private MinaChatRenderer() {
     }
@@ -85,15 +93,16 @@ public final class MinaChatRenderer {
     }
 
     public static Text processing() {
-        MutableText status = Text.literal("Reading your request and preparing a response...")
+        ProcessingVariant variant = randomProcessingVariant();
+        MutableText status = Text.literal(variant.hoverText())
                 .styled(style -> style.withColor(STATUS_COLOR).withShadowColor(STATUS_SHADOW).withItalic(true));
         return Text.empty()
                 .append(badge("Mina", Style.EMPTY.withColor(MINA_PREFIX_COLOR).withShadowColor(MINA_PREFIX_SHADOW).withBold(true)))
                 .append(Text.literal(" "))
-                .append(statusChip("思考中", status))
+                .append(statusChip(variant.label(), status))
                 .append(Text.literal("\n"))
                 .append(indentedHint(
-                        "正在准备上下文、策略检查与可用能力。",
+                        variant.hint(),
                         STATUS_COLOR,
                         STATUS_SHADOW
                 ));
@@ -273,6 +282,10 @@ public final class MinaChatRenderer {
                         .styled(style -> style.withColor(color).withShadowColor(shadowColor).withItalic(true)));
     }
 
+    private static ProcessingVariant randomProcessingVariant() {
+        return PROCESSING_VARIANTS[ThreadLocalRandom.current().nextInt(PROCESSING_VARIANTS.length)];
+    }
+
     private static TonePalette palette(ChipTone tone) {
         return switch (tone) {
             case SUCCESS -> new TonePalette(0x7BE0A5, 0x173A2A);
@@ -284,6 +297,9 @@ public final class MinaChatRenderer {
     }
 
     private record TonePalette(int textColor, int shadowColor) {
+    }
+
+    private record ProcessingVariant(String label, String hoverText, String hint) {
     }
 
     public enum ChipTone {
