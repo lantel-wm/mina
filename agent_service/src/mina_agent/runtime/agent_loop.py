@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 from mina_agent.audit.logger import AuditLogger
 from mina_agent.config import Settings
+from mina_agent.debug import DebugRecorder
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
-from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
+from mina_agent.providers.openai_compatible import OpenAICompatibleProvider, ProviderDecisionResult, ProviderError
 from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeState
 from mina_agent.runtime.context_builder import ContextBuilder
 from mina_agent.schemas import (
     ActionRequestPayload,
     ActionResultPayload,
-    ModelDecision,
     TraceChipPayload,
     TraceEventPayload,
     TurnResponse,
@@ -28,6 +29,7 @@ class AgentServices:
     settings: Settings
     store: Store
     audit: AuditLogger
+    debug: DebugRecorder
     policy_engine: PolicyEngine
     capability_registry: CapabilityRegistry
     context_builder: ContextBuilder
@@ -52,6 +54,18 @@ class AgentLoop:
         }
         self._services.store.create_turn(request.turn_id, request.session_ref, request.user_message, state)
         self._services.audit.record("turn_started", {"turn_id": request.turn_id, "session_ref": request.session_ref})
+        self._services.debug.record_event(
+            request.turn_id,
+            "turn_started",
+            {
+                "session_ref": request.session_ref,
+                "user_message": request.user_message,
+                "player": request.player.model_dump(),
+                "server_env": request.server_env.model_dump(),
+                "limits": request.limits.model_dump(),
+                "pending_confirmation": pending_confirmation,
+            },
+        )
         return self._advance(request, state)
 
     def resume_turn(self, continuation_id: str, request: TurnResumeRequest) -> TurnResponse:
@@ -62,6 +76,19 @@ class AgentLoop:
         state = continuation.state
         turn_request = TurnStartRequest.model_validate(state["request"])
         observations = state.setdefault("observations", [])
+        step_index = int(state.get("step_index", 0))
+
+        self._services.debug.record_event(
+            continuation.turn_id,
+            "turn_resumed",
+            {
+                "continuation_id": continuation_id,
+                "action_result_count": len(request.action_results),
+                "intent_ids": [result.intent_id for result in request.action_results],
+                "statuses": [result.status for result in request.action_results],
+            },
+            step_index=step_index,
+        )
 
         for result in request.action_results:
             payload = {
@@ -87,7 +114,13 @@ class AgentLoop:
                 side_effect_summary=result.side_effect_summary,
                 timing_ms=result.timing_ms,
             )
-            self._services.store.log_step_event(continuation.turn_id, int(state["step_index"]), "bridge_result", payload)
+            self._services.store.log_step_event(continuation.turn_id, step_index, "bridge_result", payload)
+            self._services.debug.record_event(
+                continuation.turn_id,
+                "bridge_result",
+                self._bridge_result_payload(result, state),
+                step_index=step_index,
+            )
 
         state.pop("pending_action_batch", None)
         self._services.store.clear_continuation(continuation.turn_id, state)
@@ -102,9 +135,15 @@ class AgentLoop:
             pending_confirmation=state.get("pending_confirmation"),
         )
         trace_events: list[TraceEventPayload] = []
+        self._services.debug.record_event(
+            request.turn_id,
+            "capabilities_resolved",
+            self._capabilities_resolved_payload(capabilities),
+        )
 
         while state["step_index"] < min(request.limits.max_agent_steps, self._services.settings.max_agent_steps):
-            messages = self._services.context_builder.build_messages(
+            current_step = int(state["step_index"]) + 1
+            context_result = self._services.context_builder.build_messages(
                 request=request,
                 recent_turns=self._services.store.list_recent_turns(request.session_ref),
                 memories=self._services.store.list_memories(request.session_ref),
@@ -112,32 +151,169 @@ class AgentLoop:
                 observations=runtime_state.local_observations,
                 pending_confirmation=runtime_state.pending_confirmation,
             )
+            self._services.debug.record_event(
+                request.turn_id,
+                "context_built",
+                {
+                    "sections": context_result.sections,
+                    "message_stats": context_result.message_stats,
+                    "composition": context_result.composition,
+                },
+                step_index=current_step,
+            )
+            self._services.debug.record_event(
+                request.turn_id,
+                "model_request",
+                {
+                    "model": self._services.settings.model or "",
+                    "message_count": len(context_result.messages),
+                    "message_stats": context_result.message_stats,
+                    "messages": context_result.messages,
+                },
+                step_index=current_step,
+            )
 
             try:
-                decision = self._services.provider.decide(messages)
-            except Exception as exc:
+                provider_result = self._services.provider.decide(context_result.messages)
+            except ProviderError as exc:
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "model_response",
+                    {
+                        "model": self._services.settings.model or "",
+                        "latency_ms": exc.latency_ms,
+                        "parse_status": exc.parse_status,
+                        "raw_response_preview": exc.raw_response_preview,
+                        "error": str(exc),
+                    },
+                    step_index=current_step,
+                )
                 final_reply = f"Mina agent service is online, but no model decision is available: {exc}"
-                self._finalize(request.turn_id, request.session_ref, final_reply)
-                return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    final_reply,
+                    trace_events,
+                    status="failed",
+                    step_index=current_step,
+                    debug_payload={
+                        "reason": "provider_error",
+                        "parse_status": exc.parse_status,
+                        "latency_ms": exc.latency_ms,
+                        "error": str(exc),
+                        "raw_response_preview": exc.raw_response_preview,
+                    },
+                )
+            except Exception as exc:
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "model_response",
+                    {
+                        "model": self._services.settings.model or "",
+                        "latency_ms": 0,
+                        "parse_status": "unexpected_provider_error",
+                        "raw_response_preview": str(exc),
+                        "error": str(exc),
+                    },
+                    step_index=current_step,
+                )
+                final_reply = f"Mina agent service is online, but no model decision is available: {exc}"
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    final_reply,
+                    trace_events,
+                    status="failed",
+                    step_index=current_step,
+                    debug_payload={
+                        "reason": "unexpected_provider_error",
+                        "error": str(exc),
+                    },
+                )
 
+            self._services.debug.record_event(
+                request.turn_id,
+                "model_response",
+                self._model_response_payload(provider_result),
+                step_index=current_step,
+            )
+
+            decision = provider_result.decision
             self._services.store.log_step_event(request.turn_id, int(state["step_index"]), "model_decision", decision.model_dump())
             self._services.audit.record("model_decision", {"turn_id": request.turn_id, "decision": decision.model_dump()})
+            self._services.debug.record_event(request.turn_id, "model_decision", decision.model_dump(), step_index=current_step)
 
             if decision.mode == "final_reply":
                 final_reply = decision.final_reply or "I do not have a better response yet."
-                self._finalize(request.turn_id, request.session_ref, final_reply)
-                return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    final_reply,
+                    trace_events,
+                    status="completed",
+                    step_index=current_step,
+                )
 
             capability = self._services.capability_registry.get(capabilities, decision.capability_id or "")
             if capability is None:
                 final_reply = f"Mina selected an unknown capability: {decision.capability_id}"
-                self._finalize(request.turn_id, request.session_ref, final_reply)
-                return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    final_reply,
+                    trace_events,
+                    status="failed",
+                    step_index=current_step,
+                    debug_payload={
+                        "reason": "unknown_capability",
+                        "capability_id": decision.capability_id,
+                        "decision": decision.model_dump(),
+                    },
+                )
+
+            self._services.debug.record_event(
+                request.turn_id,
+                "capability_started",
+                self._capability_started_payload(capability, decision),
+                step_index=current_step,
+            )
 
             if capability.handler_kind == "internal":
-                current_step = int(state["step_index"]) + 1
                 trace_events.append(self._internal_start_trace(capability, decision.arguments, current_step))
-                observation = self._services.capability_registry.execute_internal(capability, decision.arguments, runtime_state)
+                started = perf_counter()
+                try:
+                    observation = self._services.capability_registry.execute_internal(capability, decision.arguments, runtime_state)
+                except Exception as exc:
+                    latency_ms = int((perf_counter() - started) * 1000)
+                    self._services.debug.record_event(
+                        request.turn_id,
+                        "capability_finished",
+                        {
+                            "status": "failed",
+                            "capability_id": capability.descriptor.id,
+                            "handler_kind": capability.handler_kind,
+                            "latency_ms": latency_ms,
+                            "error": str(exc),
+                        },
+                        step_index=current_step,
+                    )
+                    final_reply = f"Mina internal capability failed: {exc}"
+                    return self._return_final_reply(
+                        request.turn_id,
+                        request.session_ref,
+                        final_reply,
+                        trace_events,
+                        status="failed",
+                        step_index=current_step,
+                        debug_payload={
+                            "reason": "internal_capability_error",
+                            "capability_id": capability.descriptor.id,
+                            "latency_ms": latency_ms,
+                            "error": str(exc),
+                        },
+                    )
+
+                latency_ms = int((perf_counter() - started) * 1000)
                 runtime_state.local_observations.append(
                     {
                         "source": capability.descriptor.id,
@@ -146,6 +322,12 @@ class AgentLoop:
                 )
                 state["step_index"] += 1
                 self._services.store.log_step_event(request.turn_id, int(state["step_index"]), "internal_capability", observation)
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "capability_finished",
+                    self._internal_capability_finished_payload(capability, observation, latency_ms),
+                    step_index=current_step,
+                )
                 trace_events.append(self._internal_finish_trace(capability, observation, int(state["step_index"])))
                 continue
 
@@ -170,7 +352,6 @@ class AgentLoop:
                     "I have a high-risk action plan ready but it requires confirmation. "
                     f"Planned effect: {action_request_payload['effect_summary']}"
                 )
-                self._finalize(request.turn_id, request.session_ref, reply)
                 trace_events.append(
                     TraceEventPayload(
                         status_label="待确认",
@@ -178,21 +359,48 @@ class AgentLoop:
                         title=self._capability_title(capability.descriptor.id),
                         detail=action_request_payload["effect_summary"],
                         secondary=[
-                            TraceChipPayload(label=f"第 {int(state['step_index']) + 1} 步", tone="muted"),
+                            TraceChipPayload(label=f"第 {current_step} 步", tone="muted"),
                             TraceChipPayload(label="高风险计划", tone="warning"),
                         ],
                     )
                 )
-                return TurnResponse(
-                    type="final_reply",
-                    final_reply=reply,
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "capability_finished",
+                    self._bridge_capability_finished_payload(
+                        capability,
+                        action_request_payload,
+                        "awaiting_confirmation",
+                        current_step,
+                        confirmation_id=confirmation_id,
+                    ),
+                    step_index=current_step,
+                )
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    reply,
+                    trace_events,
+                    status="completed",
+                    step_index=current_step,
                     pending_confirmation_id=confirmation_id,
-                    trace_events=trace_events,
                 )
 
             state["pending_action_batch"] = [action_request_payload]
             state["step_index"] += 1
             self._services.store.put_continuation(continuation_id, request.turn_id, state)
+            self._services.debug.record_event(
+                request.turn_id,
+                "capability_finished",
+                self._bridge_capability_finished_payload(
+                    capability,
+                    action_request_payload,
+                    "awaiting_bridge_result",
+                    current_step,
+                    continuation_id=continuation_id,
+                ),
+                step_index=current_step,
+            )
             return TurnResponse(
                 type="action_request_batch",
                 continuation_id=continuation_id,
@@ -201,13 +409,53 @@ class AgentLoop:
             )
 
         final_reply = "Mina stopped because the configured step budget was exhausted."
-        self._finalize(request.turn_id, request.session_ref, final_reply)
-        return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
+        return self._return_final_reply(
+            request.turn_id,
+            request.session_ref,
+            final_reply,
+            trace_events,
+            status="completed",
+            step_index=int(state["step_index"]),
+            debug_payload={"reason": "step_budget_exhausted"},
+        )
 
-    def _finalize(self, turn_id: str, session_ref: str, final_reply: str) -> None:
-        self._services.store.finish_turn(turn_id, final_reply)
-        self._services.store.add_memory(session_ref, "turn_summary", final_reply)
-        self._services.audit.record("turn_completed", {"turn_id": turn_id, "final_reply": final_reply})
+    def _return_final_reply(
+        self,
+        turn_id: str,
+        session_ref: str,
+        final_reply: str,
+        trace_events: list[TraceEventPayload],
+        *,
+        status: str,
+        step_index: int | None,
+        debug_payload: dict[str, Any] | None = None,
+        pending_confirmation_id: str | None = None,
+    ) -> TurnResponse:
+        self._finalize(turn_id, session_ref, final_reply, status=status)
+        payload = {"final_reply": final_reply}
+        if debug_payload is not None:
+            payload.update(debug_payload)
+        self._services.debug.record_event(
+            turn_id,
+            "turn_completed" if status == "completed" else "turn_failed",
+            payload,
+            step_index=step_index,
+        )
+        return TurnResponse(
+            type="final_reply",
+            final_reply=final_reply,
+            pending_confirmation_id=pending_confirmation_id,
+            trace_events=trace_events,
+        )
+
+    def _finalize(self, turn_id: str, session_ref: str, final_reply: str, *, status: str = "completed") -> None:
+        self._services.store.finish_turn(turn_id, final_reply, status=status)
+        if status == "completed":
+            self._services.store.add_memory(session_ref, "turn_summary", final_reply)
+        self._services.audit.record(
+            "turn_completed" if status == "completed" else "turn_failed",
+            {"turn_id": turn_id, "final_reply": final_reply},
+        )
 
     def _lookup_capability_id(self, state: dict[str, Any], intent_id: str) -> str:
         for payload in state.get("pending_action_batch", []):
@@ -220,6 +468,134 @@ class AgentLoop:
             if payload["intent_id"] == intent_id:
                 return payload["risk_class"]
         return "read_only"
+
+    def _capabilities_resolved_payload(self, capabilities: list[Any]) -> dict[str, Any]:
+        by_kind: dict[str, int] = {}
+        by_risk_class: dict[str, int] = {}
+        by_handler_kind: dict[str, int] = {}
+        descriptors: list[dict[str, Any]] = []
+
+        for capability in capabilities:
+            descriptor = capability.descriptor
+            by_kind[descriptor.kind] = by_kind.get(descriptor.kind, 0) + 1
+            by_risk_class[descriptor.risk_class] = by_risk_class.get(descriptor.risk_class, 0) + 1
+            by_handler_kind[capability.handler_kind] = by_handler_kind.get(capability.handler_kind, 0) + 1
+            descriptors.append(
+                {
+                    "id": descriptor.id,
+                    "kind": descriptor.kind,
+                    "risk_class": descriptor.risk_class,
+                    "execution_mode": descriptor.execution_mode,
+                    "requires_confirmation": descriptor.requires_confirmation,
+                    "handler_kind": capability.handler_kind,
+                    "description": descriptor.description,
+                }
+            )
+
+        return {
+            "total": len(capabilities),
+            "ids": [capability.descriptor.id for capability in capabilities],
+            "by_kind": by_kind,
+            "by_risk_class": by_risk_class,
+            "by_handler_kind": by_handler_kind,
+            "capabilities": descriptors,
+        }
+
+    def _model_response_payload(self, provider_result: ProviderDecisionResult) -> dict[str, Any]:
+        return {
+            "model": provider_result.model,
+            "temperature": provider_result.temperature,
+            "message_count": provider_result.message_count,
+            "latency_ms": provider_result.latency_ms,
+            "parse_status": provider_result.parse_status,
+            "raw_response_preview": provider_result.raw_response_preview,
+        }
+
+    def _capability_started_payload(self, capability: Any, decision: Any) -> dict[str, Any]:
+        return {
+            "capability_id": capability.descriptor.id,
+            "handler_kind": capability.handler_kind,
+            "kind": capability.descriptor.kind,
+            "risk_class": capability.descriptor.risk_class,
+            "execution_mode": capability.descriptor.execution_mode,
+            "requires_confirmation": decision.requires_confirmation or capability.descriptor.requires_confirmation,
+            "effect_summary": decision.effect_summary or capability.descriptor.description,
+            "arguments": decision.arguments,
+        }
+
+    def _internal_capability_finished_payload(
+        self,
+        capability: Any,
+        observation: dict[str, Any],
+        latency_ms: int,
+    ) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "capability_id": capability.descriptor.id,
+            "handler_kind": capability.handler_kind,
+            "kind": capability.descriptor.kind,
+            "latency_ms": latency_ms,
+            "observation": self._debug_observation(capability.descriptor.id, observation),
+        }
+
+    def _bridge_capability_finished_payload(
+        self,
+        capability: Any,
+        action_request_payload: dict[str, Any],
+        status: str,
+        step_index: int,
+        *,
+        continuation_id: str | None = None,
+        confirmation_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "status": status,
+            "step_index": step_index,
+            "capability_id": capability.descriptor.id,
+            "handler_kind": capability.handler_kind,
+            "kind": capability.descriptor.kind,
+            "risk_class": action_request_payload["risk_class"],
+            "effect_summary": action_request_payload["effect_summary"],
+            "requires_confirmation": action_request_payload["requires_confirmation"],
+            "arguments": action_request_payload["arguments"],
+            "preconditions": action_request_payload["preconditions"],
+            "intent_id": action_request_payload["intent_id"],
+        }
+        if continuation_id is not None:
+            payload["continuation_id"] = continuation_id
+        if confirmation_id is not None:
+            payload["confirmation_id"] = confirmation_id
+        return payload
+
+    def _bridge_result_payload(self, result: ActionResultPayload, state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "intent_id": result.intent_id,
+            "capability_id": self._lookup_capability_id(state, result.intent_id),
+            "risk_class": self._lookup_risk_class(state, result.intent_id),
+            "status": result.status,
+            "preconditions_passed": result.preconditions_passed,
+            "side_effect_summary": result.side_effect_summary,
+            "timing_ms": result.timing_ms,
+            "state_fingerprint": result.state_fingerprint,
+            "error_message": result.error_message,
+            "observations": result.observations,
+        }
+
+    def _debug_observation(self, capability_id: str, observation: dict[str, Any]) -> dict[str, Any]:
+        if capability_id != "retrieval.local_knowledge.search":
+            return observation
+        return {
+            "results": [
+                {
+                    "doc_path": item.get("doc_path"),
+                    "title": item.get("title"),
+                    "chunk_index": item.get("chunk_index"),
+                    "score": item.get("score"),
+                    "content_preview": item.get("content", ""),
+                }
+                for item in observation.get("results", [])
+            ]
+        }
 
     def _internal_start_trace(
         self,

@@ -18,6 +18,12 @@ class Settings:
     db_path: Path
     knowledge_dir: Path
     audit_dir: Path
+    debug_enabled: bool
+    debug_dir: Path
+    debug_string_preview_chars: int
+    debug_list_preview_items: int
+    debug_dict_preview_keys: int
+    debug_event_payload_chars: int
     enable_experimental: bool
     enable_dynamic_scripting: bool
     max_agent_steps: int
@@ -37,6 +43,7 @@ class Settings:
         db_path = Path(_read("MINA_AGENT_DB_PATH", config_data, "db_path", str(data_dir / "mina_agent.db")))
         knowledge_dir = Path(_read("MINA_AGENT_KNOWLEDGE_DIR", config_data, "knowledge_dir", str(data_dir / "knowledge")))
         audit_dir = Path(_read("MINA_AGENT_AUDIT_DIR", config_data, "audit_dir", str(data_dir / "audit")))
+        debug_dir = Path(_read("MINA_AGENT_DEBUG_DIR", config_data, "debug_dir", str(data_dir / "debug")))
 
         return cls(
             host=_read("MINA_AGENT_HOST", config_data, "host", "127.0.0.1"),
@@ -49,6 +56,12 @@ class Settings:
             db_path=db_path,
             knowledge_dir=knowledge_dir,
             audit_dir=audit_dir,
+            debug_enabled=_read_bool("MINA_AGENT_DEBUG_ENABLED", config_data, "debug_enabled", False),
+            debug_dir=debug_dir,
+            debug_string_preview_chars=int(_read("MINA_AGENT_DEBUG_STRING_PREVIEW_CHARS", config_data, "debug_string_preview_chars", 600)),
+            debug_list_preview_items=int(_read("MINA_AGENT_DEBUG_LIST_PREVIEW_ITEMS", config_data, "debug_list_preview_items", 5)),
+            debug_dict_preview_keys=int(_read("MINA_AGENT_DEBUG_DICT_PREVIEW_KEYS", config_data, "debug_dict_preview_keys", 20)),
+            debug_event_payload_chars=int(_read("MINA_AGENT_DEBUG_EVENT_PAYLOAD_CHARS", config_data, "debug_event_payload_chars", 2000)),
             enable_experimental=_read_bool("MINA_AGENT_ENABLE_EXPERIMENTAL", config_data, "enable_experimental", False),
             enable_dynamic_scripting=_read_bool("MINA_AGENT_ENABLE_DYNAMIC_SCRIPTING", config_data, "enable_dynamic_scripting", False),
             max_agent_steps=int(_read("MINA_AGENT_MAX_STEPS", config_data, "max_agent_steps", 8)),

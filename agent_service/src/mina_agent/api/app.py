@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 
 from mina_agent.audit.logger import AuditLogger
 from mina_agent.config import Settings
+from mina_agent.debug import build_debug_recorder
 from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
@@ -23,6 +24,7 @@ def create_app() -> FastAPI:
 
     store = Store(settings.db_path)
     audit = AuditLogger(settings.audit_dir)
+    debug = build_debug_recorder(settings)
     policy_engine = PolicyEngine()
     retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
     retrieval_index.refresh()
@@ -36,6 +38,7 @@ def create_app() -> FastAPI:
         settings=settings,
         store=store,
         audit=audit,
+        debug=debug,
         policy_engine=policy_engine,
         capability_registry=capability_registry,
         context_builder=ContextBuilder(),

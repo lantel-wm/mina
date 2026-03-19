@@ -60,6 +60,16 @@ If you want local overrides, copy:
 - `config/mina.properties.example` to `config/mina.properties`
 - `agent_service/config.example.json` to `agent_service/config.local.json`
 
+Python-side agent debug tracing is disabled by default. To enable structured per-turn debug logs for the agent loop, set either:
+
+- `"debug_enabled": true` in `agent_service/config.local.json`
+- or `MINA_AGENT_DEBUG_ENABLED=1` in the service environment
+
+When enabled, the service writes compact debug traces under `agent_service/data/debug/turns/<YYYY-MM-DD>/<turn_id>/`:
+
+- `summary.json` for coding-agent-friendly turn summaries
+- `events.jsonl` for step-by-step structured trace events
+
 ## Local knowledge seed
 
 The repo now seeds a minimal local knowledge base in `agent_service/data/knowledge/` so retrieval can start small instead of waiting for a full Minecraft corpus.

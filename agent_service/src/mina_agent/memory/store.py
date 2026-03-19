@@ -161,15 +161,15 @@ class Store:
                 (json.dumps(runtime_state, ensure_ascii=False), pending_continuation_id, _utc_now(), turn_id),
             )
 
-    def finish_turn(self, turn_id: str, final_reply: str) -> None:
+    def finish_turn(self, turn_id: str, final_reply: str, *, status: str = "completed") -> None:
         with self.connection() as connection:
             connection.execute(
                 """
                 UPDATE turns
-                SET status = 'completed', final_reply = ?, pending_continuation_id = NULL, updated_at = ?
+                SET status = ?, final_reply = ?, pending_continuation_id = NULL, updated_at = ?
                 WHERE turn_id = ?
                 """,
-                (final_reply, _utc_now(), turn_id),
+                (status, final_reply, _utc_now(), turn_id),
             )
 
     def get_turn_state(self, turn_id: str) -> dict[str, Any] | None:
