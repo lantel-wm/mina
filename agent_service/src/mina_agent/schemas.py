@@ -92,12 +92,26 @@ class TurnResumeRequest(MinaBaseModel):
     action_results: list[ActionResultPayload]
 
 
+class TraceChipPayload(MinaBaseModel):
+    label: str
+    tone: str
+
+
+class TraceEventPayload(MinaBaseModel):
+    status_label: str
+    status_tone: str
+    title: str
+    detail: str | None = None
+    secondary: list[TraceChipPayload] = Field(default_factory=list)
+
+
 class TurnResponse(MinaBaseModel):
     type: Literal["final_reply", "action_request_batch"]
     final_reply: str | None = None
     continuation_id: str | None = None
     action_request_batch: list[ActionRequestPayload] | None = None
     pending_confirmation_id: str | None = None
+    trace_events: list[TraceEventPayload] = Field(default_factory=list)
 
 
 class CapabilityDescriptor(MinaBaseModel):

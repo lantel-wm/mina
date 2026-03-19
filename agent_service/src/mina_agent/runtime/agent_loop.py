@@ -11,7 +11,16 @@ from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeState
 from mina_agent.runtime.context_builder import ContextBuilder
-from mina_agent.schemas import ActionRequestPayload, ActionResultPayload, ModelDecision, TurnResponse, TurnResumeRequest, TurnStartRequest
+from mina_agent.schemas import (
+    ActionRequestPayload,
+    ActionResultPayload,
+    ModelDecision,
+    TraceChipPayload,
+    TraceEventPayload,
+    TurnResponse,
+    TurnResumeRequest,
+    TurnStartRequest,
+)
 
 
 @dataclass(slots=True)
@@ -92,6 +101,7 @@ class AgentLoop:
             local_observations=state.setdefault("observations", []),
             pending_confirmation=state.get("pending_confirmation"),
         )
+        trace_events: list[TraceEventPayload] = []
 
         while state["step_index"] < min(request.limits.max_agent_steps, self._services.settings.max_agent_steps):
             messages = self._services.context_builder.build_messages(
@@ -108,7 +118,7 @@ class AgentLoop:
             except Exception as exc:
                 final_reply = f"Mina agent service is online, but no model decision is available: {exc}"
                 self._finalize(request.turn_id, request.session_ref, final_reply)
-                return TurnResponse(type="final_reply", final_reply=final_reply)
+                return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
 
             self._services.store.log_step_event(request.turn_id, int(state["step_index"]), "model_decision", decision.model_dump())
             self._services.audit.record("model_decision", {"turn_id": request.turn_id, "decision": decision.model_dump()})
@@ -116,15 +126,17 @@ class AgentLoop:
             if decision.mode == "final_reply":
                 final_reply = decision.final_reply or "I do not have a better response yet."
                 self._finalize(request.turn_id, request.session_ref, final_reply)
-                return TurnResponse(type="final_reply", final_reply=final_reply)
+                return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
 
             capability = self._services.capability_registry.get(capabilities, decision.capability_id or "")
             if capability is None:
                 final_reply = f"Mina selected an unknown capability: {decision.capability_id}"
                 self._finalize(request.turn_id, request.session_ref, final_reply)
-                return TurnResponse(type="final_reply", final_reply=final_reply)
+                return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
 
             if capability.handler_kind == "internal":
+                current_step = int(state["step_index"]) + 1
+                trace_events.append(self._internal_start_trace(capability, decision.arguments, current_step))
                 observation = self._services.capability_registry.execute_internal(capability, decision.arguments, runtime_state)
                 runtime_state.local_observations.append(
                     {
@@ -134,6 +146,7 @@ class AgentLoop:
                 )
                 state["step_index"] += 1
                 self._services.store.log_step_event(request.turn_id, int(state["step_index"]), "internal_capability", observation)
+                trace_events.append(self._internal_finish_trace(capability, observation, int(state["step_index"])))
                 continue
 
             continuation_id = str(uuid.uuid4())
@@ -158,7 +171,24 @@ class AgentLoop:
                     f"Planned effect: {action_request_payload['effect_summary']}"
                 )
                 self._finalize(request.turn_id, request.session_ref, reply)
-                return TurnResponse(type="final_reply", final_reply=reply, pending_confirmation_id=confirmation_id)
+                trace_events.append(
+                    TraceEventPayload(
+                        status_label="待确认",
+                        status_tone="warning",
+                        title=self._capability_title(capability.descriptor.id),
+                        detail=action_request_payload["effect_summary"],
+                        secondary=[
+                            TraceChipPayload(label=f"第 {int(state['step_index']) + 1} 步", tone="muted"),
+                            TraceChipPayload(label="高风险计划", tone="warning"),
+                        ],
+                    )
+                )
+                return TurnResponse(
+                    type="final_reply",
+                    final_reply=reply,
+                    pending_confirmation_id=confirmation_id,
+                    trace_events=trace_events,
+                )
 
             state["pending_action_batch"] = [action_request_payload]
             state["step_index"] += 1
@@ -167,11 +197,12 @@ class AgentLoop:
                 type="action_request_batch",
                 continuation_id=continuation_id,
                 action_request_batch=[ActionRequestPayload.model_validate(action_request_payload)],
+                trace_events=trace_events,
             )
 
         final_reply = "Mina stopped because the configured step budget was exhausted."
         self._finalize(request.turn_id, request.session_ref, final_reply)
-        return TurnResponse(type="final_reply", final_reply=final_reply)
+        return TurnResponse(type="final_reply", final_reply=final_reply, trace_events=trace_events)
 
     def _finalize(self, turn_id: str, session_ref: str, final_reply: str) -> None:
         self._services.store.finish_turn(turn_id, final_reply)
@@ -189,3 +220,88 @@ class AgentLoop:
             if payload["intent_id"] == intent_id:
                 return payload["risk_class"]
         return "read_only"
+
+    def _internal_start_trace(
+        self,
+        capability: Any,
+        arguments: dict[str, Any],
+        step_index: int,
+    ) -> TraceEventPayload:
+        return TraceEventPayload(
+            status_label="处理中",
+            status_tone="info",
+            title=self._capability_title(capability.descriptor.id),
+            detail=self._internal_start_detail(capability.descriptor.id, arguments),
+            secondary=[
+                TraceChipPayload(label=f"第 {step_index} 步", tone="muted"),
+                TraceChipPayload(label=self._kind_label(capability.descriptor.kind), tone="muted"),
+            ],
+        )
+
+    def _internal_finish_trace(
+        self,
+        capability: Any,
+        observation: dict[str, Any],
+        step_index: int,
+    ) -> TraceEventPayload:
+        secondary = [
+            TraceChipPayload(label=f"第 {step_index} 步", tone="muted"),
+            TraceChipPayload(label=self._kind_label(capability.descriptor.kind), tone="muted"),
+        ]
+
+        result_count = self._observation_count_label(capability.descriptor.id, observation)
+        if result_count is not None:
+            secondary.append(TraceChipPayload(label=result_count, tone="info"))
+
+        return TraceEventPayload(
+            status_label="已完成",
+            status_tone="success",
+            title=self._capability_title(capability.descriptor.id),
+            detail=self._internal_finish_detail(capability.descriptor.id, observation),
+            secondary=secondary,
+        )
+
+    def _capability_title(self, capability_id: str) -> str:
+        return {
+            "retrieval.local_knowledge.search": "检索本地知识",
+            "skill.mina_capability_guide": "整理可见能力",
+            "script.python_sandbox.execute": "准备脚本执行",
+        }.get(capability_id, capability_id)
+
+    def _kind_label(self, kind: str) -> str:
+        return {
+            "retrieval": "检索",
+            "skill": "技能",
+            "script": "脚本",
+            "tool": "工具",
+        }.get(kind, "内部")
+
+    def _internal_start_detail(self, capability_id: str, arguments: dict[str, Any]) -> str:
+        if capability_id == "retrieval.local_knowledge.search":
+            return "正在检索本地知识库。"
+        if capability_id == "skill.mina_capability_guide":
+            return "正在整理当前会话可见的能力与限制。"
+        if capability_id == "script.python_sandbox.execute":
+            return "正在准备受预算控制的沙箱脚本。"
+        return "Mina 正在执行一个内部步骤。"
+
+    def _internal_finish_detail(self, capability_id: str, observation: dict[str, Any]) -> str:
+        if capability_id == "retrieval.local_knowledge.search":
+            count = len(observation.get("results", []))
+            return f"已完成知识检索，找到 {count} 条相关资料。"
+        if capability_id == "skill.mina_capability_guide":
+            count = len(observation.get("summary", []))
+            return f"已整理 {count} 个当前可见能力。"
+        if capability_id == "script.python_sandbox.execute":
+            count = len(observation.get("actions", []))
+            return f"脚本准备完成，生成了 {count} 个结构化动作意图。"
+        return "内部步骤已完成，结果已返回给 Mina。"
+
+    def _observation_count_label(self, capability_id: str, observation: dict[str, Any]) -> str | None:
+        if capability_id == "retrieval.local_knowledge.search":
+            return f"{len(observation.get('results', []))} 条结果"
+        if capability_id == "skill.mina_capability_guide":
+            return f"{len(observation.get('summary', []))} 个能力"
+        if capability_id == "script.python_sandbox.execute":
+            return f"{len(observation.get('actions', []))} 个动作"
+        return None

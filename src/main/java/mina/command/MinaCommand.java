@@ -9,7 +9,6 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
-import net.minecraft.text.Text;
 
 public final class MinaCommand {
     private MinaCommand() {
@@ -34,12 +33,12 @@ public final class MinaCommand {
         String message = StringArgumentType.getString(context, "message").trim();
 
         if (message.isEmpty()) {
-            source.sendError(Text.literal("Usage: /mina <message>"));
+            source.sendError(MinaChatRenderer.commandError("Usage: /mina <message>"));
             return 0;
         }
 
         if (!MinaRuntime.getInstance().isStarted()) {
-            source.sendError(Text.literal("Mina runtime is not started yet."));
+            source.sendError(MinaChatRenderer.commandError("Mina runtime is not started yet."));
             return 0;
         }
 

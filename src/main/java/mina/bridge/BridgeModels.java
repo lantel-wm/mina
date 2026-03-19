@@ -33,6 +33,7 @@ public final class BridgeModels {
         public String continuation_id;
         public List<ActionRequestPayload> action_request_batch;
         public String pending_confirmation_id;
+        public List<TraceEventPayload> trace_events;
 
         public boolean isFinalReply() {
             return "final_reply".equals(type);
@@ -118,5 +119,18 @@ public final class BridgeModels {
         public long timing_ms;
         public String state_fingerprint;
         public String error_message;
+    }
+
+    public static final class TraceEventPayload {
+        public String status_label;
+        public String status_tone;
+        public String title;
+        public String detail;
+        public List<TraceChipPayload> secondary;
+    }
+
+    public static final class TraceChipPayload {
+        public String label;
+        public String tone;
     }
 }
