@@ -1,0 +1,16 @@
+# Java-side Mina bridge config
+mina.agent.base_url=http://127.0.0.1:8787
+mina.agent.connect_timeout_ms=1500
+mina.agent.request_timeout_ms=25000
+mina.io_threads=4
+mina.max_agent_steps=8
+mina.max_bridge_actions_per_turn=8
+mina.max_continuation_depth=8
+mina.target_reach_blocks=6
+mina.inventory_summary_limit=8
+mina.server_rule_summary_limit=12
+mina.enable_experimental=false
+mina.enable_dynamic_scripting=false
+
+# Optional player role overrides:
+# role.override.<player-uuid>=conversation|read_only|low_risk|admin|experimental

@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "",
+  "model": "deepseek-chat",
+  "data_dir": "agent_service/data",
+  "db_path": "agent_service/data/mina_agent.db",
+  "knowledge_dir": "agent_service/data/knowledge",
+  "audit_dir": "agent_service/data/audit",
+  "enable_experimental": false,
+  "enable_dynamic_scripting": false,
+  "max_agent_steps": 8,
+  "max_retrieval_results": 4,
+  "script_timeout_seconds": 5,
+  "script_memory_mb": 128,
+  "script_max_actions": 8
+}

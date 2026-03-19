@@ -8,6 +8,8 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 
+def localCarpetJar = file("run/mods/fabric-carpet-1.21.11-1.4.194+v251223.jar")
+
 base {
     archivesName = project.archives_base_name
 }
@@ -33,6 +35,11 @@ dependencies {
     mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    if (localCarpetJar.exists()) {
+        modImplementation files(localCarpetJar)
+        modRuntimeOnly files(localCarpetJar)
+    }
 }
 
 loom {

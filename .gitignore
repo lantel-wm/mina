@@ -5,6 +5,14 @@ out/
 .idea/
 *.iml
 .venv/
+__pycache__/
+*.pyc
+*.pyo
+config/mina.properties
+agent_service/config.local.json
+agent_service/data/audit/
+agent_service/data/*.db
+agent_service/data/*.sqlite*
 
 # reference repos for coding agent
 reference

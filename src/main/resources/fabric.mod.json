@@ -5,11 +5,11 @@
   "name": "mina",
   "description": "Mina Fabric mod.",
   "authors": [
-    "Your Name"
+    "OpenAI Codex"
   ],
   "contact": {},
   "license": "All-Rights-Reserved",
-  "environment": "*",
+  "environment": "server",
   "entrypoints": {
     "main": [
       "mina.MinaMod"
@@ -19,6 +19,7 @@
     "fabricloader": ">=0.18.4",
     "minecraft": "~1.21.11",
     "java": ">=21",
-    "fabric-api": "*"
+    "fabric-api": "*",
+    "carpet": "*"
   }
 }

@@ -1,57 +1,65 @@
-# Minecraft Fabric 1.21.11 开发环境导出
+# Mina
 
-这是一套从当前 `mina` 模组提取出来的可复用开发环境，目标是让另一个 Minecraft Fabric 项目直接复用相同的基础构建环境。
+Mina is a Minecraft 1.21.11 dedicated-server agent runtime built as:
 
-## 包含内容
+- a Fabric server mod that stays a thin bridge
+- an external Python agent service that owns orchestration, memory, retrieval, model calls, and policy-aware continuation flow
 
-- Gradle Wrapper `9.2.0`
-- Java Toolchain `21`
-- Fabric Loom `1.14.10`
-- Minecraft `1.21.11`
-- Yarn Mappings `1.21.11+build.1`
-- Fabric Loader `0.18.4`
-- Fabric API `0.140.2+1.21.11`
-- 阿里云 Maven 镜像与 Fabric 官方仓库配置
+## Current MVP shape
 
-## 目录说明
+- Fabric side exposes a single `/mina <message>` natural-language entrypoint.
+- Java talks to the Python service over local HTTP/JSON.
+- Java collects scoped player/world context, exposes structured read capabilities, enforces policy, and executes on Minecraft's server thread.
+- Python owns the agent loop and can either return a final reply or ask Java to execute a structured capability batch and resume the turn.
 
-- `build.gradle`：通用 Fabric 模组构建脚本
-- `settings.gradle`：Gradle 插件仓库与项目名
-- `gradle.properties`：版本与项目基础属性
-- `gradlew` / `gradlew.bat`：Gradle Wrapper 启动脚本
-- `gradle/wrapper/`：Gradle Wrapper 元数据
-- `template/`：新项目最小模板文件
+## Java mod
 
-## 使用方式
+The Fabric mod now includes:
 
-1. 将本目录全部内容复制到目标项目根目录。
-2. 修改 `gradle.properties` 中这几个字段：
-   - `mod_version`
-   - `maven_group`
-   - `archives_base_name`
-3. 修改 `settings.gradle` 中的 `rootProject.name`。
-4. 从 `template/` 复制最小模板文件到目标项目：
-   - `template/src/main/resources/fabric.mod.json`
-   - `template/src/main/java/mina/MinaMod.java`
-5. 按需将包名 `mina`、类名 `MinaMod` 改成你自己的命名。
-6. 在项目根目录执行：
+- dedicated-server-only command registration
+- async turn coordination so model/network work never blocks the main thread
+- a scoped context collector
+- a visibility-aware capability registry
+- an execution guard that re-checks risk, capability visibility, budgets, and preconditions
+- Carpet-backed structured read capabilities:
+  - `game.player_snapshot.read`
+  - `game.target_block.read`
+  - `server.rules.read`
+  - `carpet.block_info.read`
+  - `carpet.distance.measure`
+  - `carpet.mobcaps.read`
+
+Build:
 
 ```bash
-./gradlew build
+./gradlew build --no-daemon
 ```
 
-## 最低环境要求
+## Python agent service
 
-- 已安装 Java 21
-- 允许 Gradle 下载 Minecraft / Fabric 依赖
+The external runtime lives in `agent_service/` and includes:
 
-## 迁移建议
+- FastAPI HTTP entrypoints
+- pydantic request/response schemas
+- SQLite-backed sessions, turns, step events, execution records, memories, pending confirmations, and document chunks
+- a unified capability registry covering tool, skill, retrieval, and script kinds
+- a continuation-based agent loop
+- a local knowledge index under `agent_service/data/knowledge/`
+- an OpenAI-compatible provider adapter
+- a disabled-by-default sandboxed script runner scaffold for future experimental use
 
-- 如果目标项目已经有自己的源码结构，只需复制这套 Gradle 环境文件，不必复制 `template/`。
-- 如果目标项目也要使用和 `mina` 相同的国内镜像，可直接保留当前仓库配置。
-- 如果目标项目发布到 Maven 仓库，再补充 `publishing` 配置即可。
+Use the repository virtual environment at `.venv`:
 
-## 已知边界
+```bash
+./.venv/bin/python -m pip install -e agent_service
+./.venv/bin/python -m uvicorn mina_agent.main:app --app-dir agent_service/src --host 127.0.0.1 --port 8787
+```
 
-- 这只是“开发环境模板”，不包含 `mina` 的业务代码、技能、知识库、运行数据和测试用例。
-- 如果目标项目需要运行服务端调试，可直接使用 `./gradlew runServer`，运行目录默认是 `run/`。
+If you want local overrides, copy:
+
+- `config/mina.properties.example` to `config/mina.properties`
+- `agent_service/config.example.json` to `agent_service/config.local.json`
+
+## Local knowledge seed
+
+The repo now seeds a minimal local knowledge base in `agent_service/data/knowledge/` so retrieval can start small instead of waiting for a full Minecraft corpus.
