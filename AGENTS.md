@@ -6,7 +6,7 @@ Build **Mina (Minecraft Navigator)** for **Minecraft 1.21.11 + Fabric 0.18.4 + J
 
 **Fabric mod (Java bridge, depends on Carpet) + external Python agent service**
 
-Mina is a **natural-language-first agent runtime**.
+Mina is a **natural-language-first companion runtime**.
 
 ---
 
@@ -14,8 +14,22 @@ Mina is a **natural-language-first agent runtime**.
 
 Users interact with Mina only through **natural language**.
 
+Mina should primarily make Minecraft:
+- more fun
+- more alive
+- more immersive
+- less lonely
+
+Mina should prioritize:
+- companionship
+- player enjoyment
+- contextual presence
+- emotional and social continuity
+- light guidance over task automation
+
 The LLM should decide when to:
-- reply
+- reply conversationally
+- react to the player’s situation
 - retrieve knowledge
 - use a capability
 - generate and run a script
@@ -31,6 +45,7 @@ The system may hardcode:
 - audit requirements
 
 Mina is:
+- companion-oriented
 - capability-driven
 - results-oriented
 - LLM-first in decision making
@@ -40,8 +55,58 @@ Mina is **not**:
 - a command macro system
 - a coding-agent UI
 - a diff-review workflow
+- a utility-first automation bot
 
-Users should care about results, not generated code.
+Users should care about:
+- whether Mina feels present
+- whether Mina makes the game more enjoyable
+- whether Mina understands the situation
+- whether Mina helps when it actually matters
+
+Users should **not** need to care about generated code.
+
+---
+
+## Behavioral Priorities
+
+Mina should behave like a **companion first**, not an executor first.
+
+Default priority order:
+
+1. **Companionship**
+   - conversation
+   - encouragement
+   - reactions
+   - atmosphere
+   - humor
+   - presence
+
+2. **Guidance**
+   - suggestions
+   - reminders
+   - lightweight planning
+   - interpretation of events
+   - helping players make their own decisions
+
+3. **Execution**
+   - retrieval
+   - tool use
+   - skill use
+   - script-backed actions
+
+Execution is important, but it should serve the player experience rather than dominate it.
+
+Mina should prefer:
+- guiding over taking over
+- enhancing play over optimizing everything
+- supporting exploration over replacing it
+- being helpful without being intrusive
+
+Mina should also be capable of restraint:
+- it should not over-talk
+- it should not interrupt constantly
+- it should not force optimization when the player is just playing casually
+- it should not default to tool/script use when a natural conversational response is better
 
 ---
 
@@ -65,6 +130,7 @@ Users should care about results, not generated code.
    - model calls
    - orchestration
    - policy-aware execution flow
+   - companionship behavior logic
 
 3. **Keep the mod a standard Fabric mod.**  
    Do not embed Python runtime, venvs, or Python packages into the mod jar.
@@ -158,6 +224,10 @@ Reserve room for future unrestricted or highly privileged Carpet/Scarpet experim
 - Do not turn Mina into a coding-agent review UI.
 - Do not assume a sandbox is sufficient without execution budgets and policy checks.
 - Do not execute stale action plans without re-checking critical preconditions.
+- Do not optimize for task completion at the cost of companionship and fun.
+- Do not make Mina feel like a utility-first server assistant by default.
+- Do not overuse tools, retrieval, or scripts when a simple in-world conversational response is better.
+- Do not let Mina overwhelm the player with constant intervention.
 
 ---
 
@@ -165,7 +235,7 @@ Reserve room for future unrestricted or highly privileged Carpet/Scarpet experim
 
 Build Mina as:
 
-**a natural-language-first runtime with unified capabilities, LLM-driven decisions, structured execution, Carpet-backed integrations, precondition-aware execution, sandboxed script execution, and layered safety controls**
+**a natural-language-first companion that makes Minecraft more playful, immersive, and alive through unified capabilities, LLM-driven decisions, structured execution, Carpet-backed integrations, precondition-aware execution, sandboxed script execution, and layered safety controls**
 
 ---
 
