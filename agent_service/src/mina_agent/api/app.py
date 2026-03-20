@@ -6,10 +6,10 @@ from mina_agent.audit.logger import AuditLogger
 from mina_agent.config import Settings
 from mina_agent.debug import build_debug_recorder
 from mina_agent.executors.script_runner import ScriptRunner
-from mina_agent.knowledge.service import KnowledgeService
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
+from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
 from mina_agent.runtime.context_builder import ContextBuilder
@@ -20,20 +20,18 @@ def create_app() -> FastAPI:
     settings = Settings.load()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-    settings.knowledge_cache_dir.mkdir(parents=True, exist_ok=True)
-    settings.knowledge_db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.audit_dir.mkdir(parents=True, exist_ok=True)
 
     store = Store(settings.db_path)
     audit = AuditLogger(settings.audit_dir)
     debug = build_debug_recorder(settings)
     policy_engine = PolicyEngine()
-    knowledge_service = KnowledgeService(settings)
-    knowledge_service.bootstrap_runtime_indexes()
+    retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
+    retrieval_index.refresh()
     capability_registry = CapabilityRegistry(
         settings=settings,
         policy_engine=policy_engine,
-        knowledge_service=knowledge_service,
+        retrieval_index=retrieval_index,
         script_runner=ScriptRunner(settings),
     )
     services = AgentServices(
@@ -58,9 +56,6 @@ def create_app() -> FastAPI:
             "ok": True,
             "db_path": str(settings.db_path),
             "knowledge_dir": str(settings.knowledge_dir),
-            "knowledge_db_path": str(settings.knowledge_db_path),
-            "knowledge_cache_dir": str(settings.knowledge_cache_dir),
-            "knowledge_status": knowledge_service.status(),
             "provider_configured": services.provider.available(),
         }
 

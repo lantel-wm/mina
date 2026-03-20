@@ -259,28 +259,6 @@ class AgentLoop:
             self._services.debug.record_event(request.turn_id, "model_decision", decision.model_dump(), step_index=current_step)
 
             if decision.mode == "final_reply":
-                guard_payload = self._semantic_verification_guard(runtime_state.local_observations)
-                if guard_payload is not None:
-                    runtime_state.local_observations.append(
-                        {
-                            "source": "runtime.guard.semantic_verification",
-                            "payload": guard_payload,
-                        }
-                    )
-                    state["step_index"] += 1
-                    self._services.store.log_step_event(
-                        request.turn_id,
-                        int(state["step_index"]),
-                        "runtime_guard",
-                        guard_payload,
-                    )
-                    self._services.debug.record_event(
-                        request.turn_id,
-                        "runtime_guard",
-                        guard_payload,
-                        step_index=current_step,
-                    )
-                    continue
                 final_reply = decision.final_reply or "I do not have a better response yet."
                 return self._return_final_reply(
                     request.turn_id,
@@ -732,35 +710,15 @@ class AgentLoop:
         )
 
     def _debug_observation(self, capability_id: str, observation: dict[str, Any]) -> dict[str, Any]:
-        if capability_id not in {"retrieval.minecraft_facts.lookup", "retrieval.minecraft_semantics.search"}:
+        if capability_id != "retrieval.local_knowledge.search":
             return observation
-        if capability_id == "retrieval.minecraft_facts.lookup":
-            return {
-                "result_count": observation.get("result_count"),
-                "source_labels": observation.get("source_labels", []),
-                "not_indexed": observation.get("not_indexed", []),
-                "results": [
-                    {
-                        "dataset": item.get("dataset"),
-                        "fact_id": item.get("fact_id"),
-                        "title": item.get("title"),
-                        "source_label": item.get("source_label"),
-                        "match_type": item.get("match_type"),
-                    }
-                    for item in observation.get("results", [])
-                ],
-            }
         return {
             "result_count": observation.get("result_count"),
-            "verification_required": observation.get("verification_required"),
-            "fact_domains": observation.get("fact_domains", []),
             "results": [
                 {
                     "doc_path": item.get("doc_path"),
                     "title": item.get("title"),
-                    "source_kind": item.get("source_kind"),
                     "chunk_index": item.get("chunk_index"),
-                    "verification_required": item.get("verification_required"),
                     "score": item.get("score"),
                     "content_preview": item.get("content", ""),
                 }
@@ -810,8 +768,7 @@ class AgentLoop:
 
     def _capability_title(self, capability_id: str) -> str:
         return {
-            "retrieval.minecraft_facts.lookup": "查询结构化事实",
-            "retrieval.minecraft_semantics.search": "检索解释性资料",
+            "retrieval.local_knowledge.search": "检索本地知识",
             "skill.mina_capability_guide": "整理可见能力",
             "script.python_sandbox.execute": "准备脚本执行",
         }.get(capability_id, capability_id)
@@ -825,24 +782,8 @@ class AgentLoop:
         }.get(kind, "内部")
 
     def _internal_start_detail(self, capability_id: str, arguments: dict[str, Any]) -> str:
-        if capability_id == "retrieval.minecraft_facts.lookup":
-            return random.choice(
-                (
-                    "我在替你一条条看。",
-                    "这里的信息有点多，我再确认一下。",
-                    "先别催，我还在比对。",
-                    "等等，我再看一眼。",
-                )
-            )
-        if capability_id == "retrieval.minecraft_semantics.search":
-            return random.choice(
-                (
-                    "我先替你把相关的部分找出来。",
-                    "这里的信息有点多，我再确认一下。",
-                    "先别催，我还在比对。",
-                    "等等，我再看一眼。",
-                )
-            )
+        if capability_id == "retrieval.local_knowledge.search":
+            return "正在检索本地知识库。"
         if capability_id == "skill.mina_capability_guide":
             return "我先把现在能用的内容理一下。"
         if capability_id == "script.python_sandbox.execute":
@@ -850,26 +791,9 @@ class AgentLoop:
         return "我先替你确认一下。"
 
     def _internal_finish_detail(self, capability_id: str, observation: dict[str, Any]) -> str:
-        if capability_id == "retrieval.minecraft_facts.lookup":
+        if capability_id == "retrieval.local_knowledge.search":
             count = len(observation.get("results", []))
-            return random.choice(
-                (
-                    f"已经替你确认好了，找到 {count} 条结果。",
-                    f"这边已经替你看清楚了，一共 {count} 条。",
-                    f"找到 {count} 条结果，这样应该够用了 (｡•̀ᴗ-)",
-                    f"我已经替你对清楚了，一共 {count} 条 >_<",
-                )
-            )
-        if capability_id == "retrieval.minecraft_semantics.search":
-            count = len(observation.get("results", []))
-            return random.choice(
-                (
-                    f"相关的内容已经找出来了，一共 {count} 条。",
-                    f"能用的内容我已经替你挑出来了，一共 {count} 条。",
-                    f"这部分已经理出来了，有 {count} 条可看 (￣▽￣)",
-                    f"我先替你把重点捞出来了，一共 {count} 条 ( ´ ` )",
-                )
-            )
+            return f"已完成知识检索，找到 {count} 条相关资料。"
         if capability_id == "skill.mina_capability_guide":
             count = len(observation.get("summary", []))
             return random.choice(
@@ -889,29 +813,10 @@ class AgentLoop:
         return "这一步已经处理好了。"
 
     def _observation_count_label(self, capability_id: str, observation: dict[str, Any]) -> str | None:
-        if capability_id in {"retrieval.minecraft_facts.lookup", "retrieval.minecraft_semantics.search"}:
+        if capability_id == "retrieval.local_knowledge.search":
             return f"{len(observation.get('results', []))} 条结果"
         if capability_id == "skill.mina_capability_guide":
             return f"{len(observation.get('summary', []))} 个能力"
         if capability_id == "script.python_sandbox.execute":
             return f"{len(observation.get('actions', []))} 个动作"
         return None
-
-    def _semantic_verification_guard(self, observations: list[dict[str, Any]]) -> dict[str, Any] | None:
-        pending_payload: dict[str, Any] | None = None
-        for observation in observations:
-            source = observation.get("source")
-            payload = observation.get("payload", {})
-            if source == "retrieval.minecraft_semantics.search" and isinstance(payload, dict):
-                if payload.get("verification_required"):
-                    pending_payload = payload
-            elif source == "retrieval.minecraft_facts.lookup" and pending_payload is not None:
-                pending_payload = None
-        if pending_payload is None:
-            return None
-        return {
-            "reason": "semantic_results_require_fact_lookup",
-            "required_capability_id": "retrieval.minecraft_facts.lookup",
-            "fact_domains": pending_payload.get("fact_domains", []),
-            "detail": "解释性检索结果涉及可核验的硬事实，必须先回查 SQLite 事实库。",
-        }

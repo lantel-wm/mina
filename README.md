@@ -41,16 +41,10 @@ The external runtime lives in `agent_service/` and includes:
 
 - FastAPI HTTP entrypoints
 - pydantic request/response schemas
-- SQLite-backed sessions, turns, step events, execution records, memories, pending confirmations, and a separate knowledge database
+- SQLite-backed sessions, turns, step events, execution records, memories, pending confirmations, and document chunks
 - a unified capability registry covering tool, skill, retrieval, and script kinds
 - a continuation-based agent loop
-- a SQLite knowledge service with:
-  - authoritative structured facts in `agent_service/data/knowledge.sqlite`
-  - semantic document chunks indexed with SQLite FTS
-  - a `mina-knowledge` CLI for export/import/fetch/index workflows
-- retrieval capabilities:
-  - `retrieval.minecraft_facts.lookup`
-  - `retrieval.minecraft_semantics.search`
+- a local knowledge index under `agent_service/data/knowledge/`
 - an OpenAI-compatible provider adapter
 - a disabled-by-default sandboxed script runner scaffold for future experimental use
 
@@ -59,13 +53,6 @@ Use the repository virtual environment at `.venv`:
 ```bash
 ./.venv/bin/python -m pip install -e agent_service
 ./.venv/bin/python -m uvicorn mina_agent.main:app --app-dir agent_service/src --host 127.0.0.1 --port 8787
-```
-
-Knowledge CLI:
-
-```bash
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.knowledge.cli index-semantics
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.knowledge.cli import-facts --version 1.21.11
 ```
 
 If you want local overrides, copy:
@@ -85,11 +72,4 @@ When enabled, the service writes compact debug traces under `agent_service/data/
 
 ## Local knowledge seed
 
-The repo now seeds a minimal local knowledge base in `agent_service/data/knowledge/`:
-
-- `local/server_rules.json` for structured local rules
-- `local/server_rules.md` for natural-language local rule explanations
-- `manifests/changelogs.json` for changelog fetch roots
-- `manifests/wiki_roots.json` for wiki category expansion roots
-
-Fetched raw exports and cache data live under `agent_service/data/knowledge_cache/` and are ignored by git.
+The repo now seeds a minimal local knowledge base in `agent_service/data/knowledge/` so retrieval can start small instead of waiting for a full Minecraft corpus.

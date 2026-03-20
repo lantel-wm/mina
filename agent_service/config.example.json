@@ -7,8 +7,6 @@
   "data_dir": "agent_service/data",
   "db_path": "agent_service/data/mina_agent.db",
   "knowledge_dir": "agent_service/data/knowledge",
-  "knowledge_db_path": "agent_service/data/knowledge.sqlite",
-  "knowledge_cache_dir": "agent_service/data/knowledge_cache",
   "audit_dir": "agent_service/data/audit",
   "debug_enabled": false,
   "debug_dir": "agent_service/data/debug",
@@ -20,9 +18,6 @@
   "enable_dynamic_scripting": false,
   "max_agent_steps": 8,
   "max_retrieval_results": 4,
-  "minecraft_version": "1.21.11",
-  "wiki_fetch_max_depth": 2,
-  "wiki_fetch_max_pages_per_root": 20,
   "script_timeout_seconds": 5,
   "script_memory_mb": 128,
   "script_max_actions": 8

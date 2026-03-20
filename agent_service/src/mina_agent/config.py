@@ -17,8 +17,6 @@ class Settings:
     data_dir: Path
     db_path: Path
     knowledge_dir: Path
-    knowledge_db_path: Path
-    knowledge_cache_dir: Path
     audit_dir: Path
     debug_enabled: bool
     debug_dir: Path
@@ -30,9 +28,6 @@ class Settings:
     enable_dynamic_scripting: bool
     max_agent_steps: int
     max_retrieval_results: int
-    minecraft_version: str
-    wiki_fetch_max_depth: int
-    wiki_fetch_max_pages_per_root: int
     script_timeout_seconds: int
     script_memory_mb: int
     script_max_actions: int
@@ -47,12 +42,6 @@ class Settings:
         data_dir = Path(_read("MINA_AGENT_DATA_DIR", config_data, "data_dir", "agent_service/data"))
         db_path = Path(_read("MINA_AGENT_DB_PATH", config_data, "db_path", str(data_dir / "mina_agent.db")))
         knowledge_dir = Path(_read("MINA_AGENT_KNOWLEDGE_DIR", config_data, "knowledge_dir", str(data_dir / "knowledge")))
-        knowledge_db_path = Path(
-            _read("MINA_AGENT_KNOWLEDGE_DB_PATH", config_data, "knowledge_db_path", str(data_dir / "knowledge.sqlite"))
-        )
-        knowledge_cache_dir = Path(
-            _read("MINA_AGENT_KNOWLEDGE_CACHE_DIR", config_data, "knowledge_cache_dir", str(data_dir / "knowledge_cache"))
-        )
         audit_dir = Path(_read("MINA_AGENT_AUDIT_DIR", config_data, "audit_dir", str(data_dir / "audit")))
         debug_dir = Path(_read("MINA_AGENT_DEBUG_DIR", config_data, "debug_dir", str(data_dir / "debug")))
 
@@ -66,8 +55,6 @@ class Settings:
             data_dir=data_dir,
             db_path=db_path,
             knowledge_dir=knowledge_dir,
-            knowledge_db_path=knowledge_db_path,
-            knowledge_cache_dir=knowledge_cache_dir,
             audit_dir=audit_dir,
             debug_enabled=_read_bool("MINA_AGENT_DEBUG_ENABLED", config_data, "debug_enabled", False),
             debug_dir=debug_dir,
@@ -79,11 +66,6 @@ class Settings:
             enable_dynamic_scripting=_read_bool("MINA_AGENT_ENABLE_DYNAMIC_SCRIPTING", config_data, "enable_dynamic_scripting", False),
             max_agent_steps=int(_read("MINA_AGENT_MAX_STEPS", config_data, "max_agent_steps", 8)),
             max_retrieval_results=int(_read("MINA_AGENT_MAX_RETRIEVAL_RESULTS", config_data, "max_retrieval_results", 4)),
-            minecraft_version=str(_read("MINA_AGENT_MINECRAFT_VERSION", config_data, "minecraft_version", "1.21.11")),
-            wiki_fetch_max_depth=int(_read("MINA_AGENT_WIKI_FETCH_MAX_DEPTH", config_data, "wiki_fetch_max_depth", 2)),
-            wiki_fetch_max_pages_per_root=int(
-                _read("MINA_AGENT_WIKI_FETCH_MAX_PAGES_PER_ROOT", config_data, "wiki_fetch_max_pages_per_root", 20)
-            ),
             script_timeout_seconds=int(_read("MINA_AGENT_SCRIPT_TIMEOUT_SECONDS", config_data, "script_timeout_seconds", 5)),
             script_memory_mb=int(_read("MINA_AGENT_SCRIPT_MEMORY_MB", config_data, "script_memory_mb", 128)),
             script_max_actions=int(_read("MINA_AGENT_SCRIPT_MAX_ACTIONS", config_data, "script_max_actions", 8)),

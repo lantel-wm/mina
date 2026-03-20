@@ -6,8 +6,8 @@ from typing import Any, Callable
 
 from mina_agent.config import Settings
 from mina_agent.executors.script_runner import ScriptRunner
-from mina_agent.knowledge.service import KnowledgeService
 from mina_agent.policy.policy_engine import PolicyContext, PolicyEngine
+from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.schemas import CapabilityDescriptor, TurnStartRequest, VisibleCapabilityPayload
 
 
@@ -33,12 +33,12 @@ class CapabilityRegistry:
         self,
         settings: Settings,
         policy_engine: PolicyEngine,
-        knowledge_service: KnowledgeService,
+        retrieval_index: LocalKnowledgeIndex,
         script_runner: ScriptRunner,
     ) -> None:
         self._settings = settings
         self._policy_engine = policy_engine
-        self._knowledge_service = knowledge_service
+        self._retrieval_index = retrieval_index
         self._script_runner = script_runner
         self._local_capabilities = self._build_local_capabilities()
 
@@ -121,25 +121,9 @@ class CapabilityRegistry:
                 handler_kind="internal",
                 executor=self._capability_guide,
             ),
-            "retrieval.minecraft_facts.lookup": RuntimeCapability(
+            "retrieval.local_knowledge.search": RuntimeCapability(
                 descriptor=CapabilityDescriptor(
-                    id="retrieval.minecraft_facts.lookup",
-                    kind="retrieval",
-                    visibility_predicate="read_only_plus",
-                    risk_class="read_only",
-                    execution_mode="internal",
-                    requires_confirmation=False,
-                    budget_cost=1,
-                    args_schema={"query": "string", "domain_hint": "string", "subject_hint": "string"},
-                    result_schema={"results": "array", "source_categories": "array"},
-                    description="Look up authoritative Minecraft facts from SQLite, including recipes, loot tables, tags, commands, registries, block states, and local server rules.",
-                ),
-                handler_kind="internal",
-                executor=self._facts_lookup,
-            ),
-            "retrieval.minecraft_semantics.search": RuntimeCapability(
-                descriptor=CapabilityDescriptor(
-                    id="retrieval.minecraft_semantics.search",
+                    id="retrieval.local_knowledge.search",
                     kind="retrieval",
                     visibility_predicate="read_only_plus",
                     risk_class="read_only",
@@ -147,11 +131,11 @@ class CapabilityRegistry:
                     requires_confirmation=False,
                     budget_cost=1,
                     args_schema={"query": "string"},
-                    result_schema={"results": "array", "verification_required": "boolean"},
-                    description="Search explanatory text in SQLite FTS, including wiki notes, changelogs, and local server guidance. Hard facts still need fact lookup verification.",
+                    result_schema={"results": "array"},
+                    description="Search Mina's local knowledge directory and return the most relevant chunks.",
                 ),
                 handler_kind="internal",
-                executor=self._semantic_search,
+                executor=self._knowledge_search,
             ),
             "script.python_sandbox.execute": RuntimeCapability(
                 descriptor=CapabilityDescriptor(
@@ -185,15 +169,9 @@ class CapabilityRegistry:
             ]
         }
 
-    def _facts_lookup(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+    def _knowledge_search(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
         query = str(arguments.get("query", "")).strip()
-        domain_hint = str(arguments.get("domain_hint", "")).strip() or None
-        subject_hint = str(arguments.get("subject_hint", "")).strip() or None
-        return self._knowledge_service.lookup_facts(query, domain_hint=domain_hint, subject_hint=subject_hint)
-
-    def _semantic_search(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
-        query = str(arguments.get("query", "")).strip()
-        return self._knowledge_service.search_semantics(query)
+        return {"results": self._retrieval_index.search(query, limit=self._settings.max_retrieval_results)}
 
     def _run_script(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
         script = str(arguments.get("script", ""))

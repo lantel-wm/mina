@@ -13,9 +13,6 @@ dependencies = [
   "uvicorn>=0.35.0,<1.0.0"
 ]
 
-[project.scripts]
-mina-knowledge = "mina_agent.knowledge.cli:main"
-
 [project.optional-dependencies]
 dev = [
   "pytest>=9.0.0,<10.0.0"

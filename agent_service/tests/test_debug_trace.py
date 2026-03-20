@@ -10,10 +10,10 @@ from mina_agent.audit.logger import AuditLogger
 from mina_agent.config import Settings
 from mina_agent.debug import build_debug_recorder
 from mina_agent.executors.script_runner import ScriptRunner
-from mina_agent.knowledge.service import KnowledgeService
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import ProviderDecisionResult, ProviderError
+from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
 from mina_agent.runtime.context_builder import ContextBuilder
@@ -206,39 +206,6 @@ class DebugTraceTests(unittest.TestCase):
         self.assertGreater(summary["truncation"]["strings_truncated"], 0)
         self.assertGreater(summary["truncation"]["chars_omitted"], 0)
         self.assertEqual(summary["turn"]["status"], "completed")
-
-    def test_semantic_result_requires_fact_lookup_before_final_reply(self) -> None:
-        loop, settings, _ = self._build_loop(
-            debug_enabled=True,
-            provider_responses=[
-                self._capability_result(
-                    "retrieval.minecraft_semantics.search",
-                    arguments={"query": "rules"},
-                ),
-                self._final_reply_result("我已经看完规则了。"),
-                self._capability_result(
-                    "retrieval.minecraft_facts.lookup",
-                    arguments={"query": "rules"},
-                ),
-                self._final_reply_result("我已经核对完规则了。"),
-            ],
-        )
-
-        response = loop.start_turn(self._turn_request(turn_id="turn-semantic-guard", user_message="服务器规则是什么？"))
-
-        self.assertEqual(response.type, "final_reply")
-        self.assertNotIn("来源类别：", response.final_reply or "")
-        summary = self._load_summary(settings.debug_dir, "turn-semantic-guard")
-        events = self._load_events(settings.debug_dir, "turn-semantic-guard")
-
-        self.assertEqual(summary["turn"]["status"], "completed")
-        self.assertIn("runtime_guard", [event["event_type"] for event in events])
-        capability_started = [
-            event["payload"]["capability_id"]
-            for event in events
-            if event["event_type"] == "capability_started" and "capability_id" in event["payload"]
-        ]
-        self.assertEqual(capability_started[:2], ["retrieval.minecraft_semantics.search", "retrieval.minecraft_facts.lookup"])
 
     def test_bridge_capability_schema_is_visible_in_debug_but_not_default_model_context(self) -> None:
         visible_capabilities = [self._target_block_capability()]
@@ -553,8 +520,6 @@ class DebugTraceTests(unittest.TestCase):
             data_dir=data_dir,
             db_path=data_dir / "mina_agent.db",
             knowledge_dir=data_dir / "knowledge",
-            knowledge_db_path=data_dir / "knowledge.sqlite",
-            knowledge_cache_dir=data_dir / "knowledge_cache",
             audit_dir=data_dir / "audit",
             debug_enabled=debug_enabled,
             debug_dir=data_dir / "debug",
@@ -566,51 +531,21 @@ class DebugTraceTests(unittest.TestCase):
             enable_dynamic_scripting=False,
             max_agent_steps=8,
             max_retrieval_results=4,
-            minecraft_version="1.21.11",
-            wiki_fetch_max_depth=2,
-            wiki_fetch_max_pages_per_root=20,
             script_timeout_seconds=5,
             script_memory_mb=128,
             script_max_actions=8,
-        )
-
-        (settings.knowledge_dir / "local").mkdir(parents=True, exist_ok=True)
-        (settings.knowledge_dir / "local" / "server_rules.json").write_text(
-            json.dumps(
-                {
-                    "rules": [
-                        {
-                            "rule_id": "safe_default_read_only",
-                            "priority": 100,
-                            "scope": "agent",
-                            "effect": "Prefer safe, read-only assistance unless visible capabilities explicitly allow more.",
-                            "applies_to": {"roles": ["read_only"]},
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        (settings.knowledge_dir / "local" / "server_rules.md").write_text(
-            "# Server Rules\n\n- Prefer safe, read-only assistance.\n",
-            encoding="utf-8",
-        )
-        (settings.knowledge_dir / "mina_system.md").write_text(
-            "# Mina System\n\n- Mina is a natural-language-first agent runtime.\n",
-            encoding="utf-8",
         )
 
         store = Store(settings.db_path)
         audit = AuditLogger(settings.audit_dir)
         debug = build_debug_recorder(settings)
         policy_engine = PolicyEngine()
-        knowledge_service = KnowledgeService(settings)
-        knowledge_service.bootstrap_runtime_indexes()
+        retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
+        retrieval_index.refresh()
         capability_registry = CapabilityRegistry(
             settings=settings,
             policy_engine=policy_engine,
-            knowledge_service=knowledge_service,
+            retrieval_index=retrieval_index,
             script_runner=ScriptRunner(settings),
         )
         services = AgentServices(
