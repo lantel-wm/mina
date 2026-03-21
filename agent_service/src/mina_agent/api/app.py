@@ -12,7 +12,11 @@ from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
-from mina_agent.runtime.context_builder import ContextBuilder
+from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
+from mina_agent.runtime.context_engine import ContextEngine
+from mina_agent.runtime.decision_engine import DecisionEngine
+from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
+from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.schemas import TurnResumeRequest, TurnResponse, TurnStartRequest
 
 
@@ -22,7 +26,7 @@ def create_app() -> FastAPI:
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
     settings.audit_dir.mkdir(parents=True, exist_ok=True)
 
-    store = Store(settings.db_path)
+    store = Store(settings.db_path, settings.data_dir)
     audit = AuditLogger(settings.audit_dir)
     debug = build_debug_recorder(settings)
     policy_engine = PolicyEngine()
@@ -30,10 +34,13 @@ def create_app() -> FastAPI:
     retrieval_index.refresh()
     capability_registry = CapabilityRegistry(
         settings=settings,
+        store=store,
         policy_engine=policy_engine,
         retrieval_index=retrieval_index,
         script_runner=ScriptRunner(settings),
     )
+    provider = OpenAICompatibleProvider(settings)
+    memory_policy = MemoryPolicy()
     services = AgentServices(
         settings=settings,
         store=store,
@@ -41,8 +48,11 @@ def create_app() -> FastAPI:
         debug=debug,
         policy_engine=policy_engine,
         capability_registry=capability_registry,
-        context_builder=ContextBuilder(),
-        provider=OpenAICompatibleProvider(settings),
+        context_engine=ContextEngine(settings, store, memory_policy),
+        decision_engine=DecisionEngine(provider),
+        execution_orchestrator=ExecutionOrchestrator(settings, store),
+        memory_policy=memory_policy,
+        confirmation_resolver=ConfirmationResolver(),
     )
     agent_loop = AgentLoop(services)
 
@@ -56,7 +66,7 @@ def create_app() -> FastAPI:
             "ok": True,
             "db_path": str(settings.db_path),
             "knowledge_dir": str(settings.knowledge_dir),
-            "provider_configured": services.provider.available(),
+            "provider_configured": provider.available(),
         }
 
     @app.post("/v1/agent/turns", response_model=TurnResponse)

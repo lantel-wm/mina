@@ -14,6 +14,7 @@ import mina.chat.MinaChatRenderer.ReplyPresentation;
 import mina.chat.MinaChatRenderer.SecondaryChip;
 import mina.config.MinaConfig;
 import mina.context.GameContextCollector;
+import mina.context.RecentEventBuffer;
 import mina.context.TurnContext;
 import mina.policy.ExecutionGuard;
 import mina.policy.ExecutionGuard.Decision;
@@ -37,6 +38,8 @@ public final class TurnCoordinator {
     private final CapabilityExecutorRegistry capabilityRegistry;
     private final ExecutionGuard executionGuard;
     private final PendingTurnRegistry pendingTurnRegistry;
+    private final PendingConfirmationRegistry pendingConfirmationRegistry;
+    private final RecentEventBuffer recentEventBuffer;
     private final ExecutorService ioExecutor;
 
     public TurnCoordinator(
@@ -46,6 +49,8 @@ public final class TurnCoordinator {
             CapabilityExecutorRegistry capabilityRegistry,
             ExecutionGuard executionGuard,
             PendingTurnRegistry pendingTurnRegistry,
+            PendingConfirmationRegistry pendingConfirmationRegistry,
+            RecentEventBuffer recentEventBuffer,
             ExecutorService ioExecutor
     ) {
         this.config = config;
@@ -54,6 +59,8 @@ public final class TurnCoordinator {
         this.capabilityRegistry = capabilityRegistry;
         this.executionGuard = executionGuard;
         this.pendingTurnRegistry = pendingTurnRegistry;
+        this.pendingConfirmationRegistry = pendingConfirmationRegistry;
+        this.recentEventBuffer = recentEventBuffer;
         this.ioExecutor = ioExecutor;
     }
 
@@ -67,6 +74,7 @@ public final class TurnCoordinator {
             return false;
         }
 
+        recentEventBuffer.recordPlayerEvent("mina_user_message", player, Map.of("message", userMessage));
         acceptedCallback.run();
         ioExecutor.submit(() -> runTurn(playerId, turnId, userMessage, source.getServer()));
         return true;
@@ -78,6 +86,7 @@ public final class TurnCoordinator {
             TurnContext turnContext = ServerExecutor.call(server, () -> collectTurnContext(playerId, server)).join();
             BridgeModels.TurnStartRequest startRequest = toStartRequest(turnContext, turnId, userMessage);
             BridgeModels.TurnResponse response = agentServiceClient.startTurn(startRequest);
+            syncPendingConfirmation(turnContext.sessionRef(), response);
 
             int continuationDepth = 0;
             int actionCount = 0;
@@ -120,6 +129,7 @@ public final class TurnCoordinator {
                 }
 
                 response = agentServiceClient.resumeTurn(response.continuation_id, resumeRequest);
+                syncPendingConfirmation(turnContext.sessionRef(), response);
             }
 
             throw new IllegalStateException("Agent service returned an empty response.");
@@ -156,9 +166,24 @@ public final class TurnCoordinator {
         limits.max_bridge_actions_per_turn = config.maxBridgeActionsPerTurn();
         limits.max_continuation_depth = config.maxContinuationDepth();
         request.limits = limits;
-        request.pending_confirmation = null;
+        request.pending_confirmation = pendingConfirmationRegistry.get(context.sessionRef());
         request.user_message = userMessage;
         return request;
+    }
+
+    private void syncPendingConfirmation(String sessionRef, BridgeModels.TurnResponse response) {
+        if (response == null) {
+            return;
+        }
+        if (response.pending_confirmation_id != null && !response.pending_confirmation_id.isBlank()) {
+            String effectSummary = response.pending_confirmation_effect_summary;
+            if (effectSummary == null || effectSummary.isBlank()) {
+                effectSummary = response.final_reply;
+            }
+            pendingConfirmationRegistry.put(sessionRef, response.pending_confirmation_id, effectSummary == null ? "" : effectSummary);
+            return;
+        }
+        pendingConfirmationRegistry.clear(sessionRef);
     }
 
     private BridgeModels.ActionResultPayload executeAction(
@@ -182,6 +207,14 @@ public final class TurnCoordinator {
 
         try {
             CapabilityResult result = capabilityRegistry.execute(actionRequest.capability_id, player, actionRequest.arguments);
+            Map<String, Object> actionEvent = new java.util.LinkedHashMap<>();
+            actionEvent.put("capability_id", actionRequest.capability_id);
+            actionEvent.put("summary", result.sideEffectSummary());
+            recentEventBuffer.recordPlayerEvent(
+                    "mina_action_executed",
+                    player,
+                    actionEvent
+            );
             BridgeModels.ActionResultPayload payload = new BridgeModels.ActionResultPayload();
             payload.intent_id = actionRequest.intent_id;
             payload.status = "executed";
@@ -429,6 +462,10 @@ public final class TurnCoordinator {
                 return;
             }
 
+            Map<String, Object> replyEvent = new java.util.LinkedHashMap<>();
+            replyEvent.put("title", presentation.title());
+            replyEvent.put("body", presentation.body());
+            recentEventBuffer.recordPlayerEvent("mina_reply_sent", player, replyEvent);
             MinaChatRenderer.sendReply(player, presentation);
         });
     }

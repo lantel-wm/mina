@@ -16,7 +16,12 @@ from mina_agent.providers.openai_compatible import ProviderDecisionResult, Provi
 from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
-from mina_agent.runtime.context_builder import ContextBuilder
+from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
+from mina_agent.runtime.context_engine import ContextEngine
+from mina_agent.runtime.decision_engine import DecisionEngine
+from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
+from mina_agent.runtime.memory_policy import MemoryPolicy
+from mina_agent.runtime.models import TaskState, TurnState, WorkingMemory
 from mina_agent.schemas import (
     ActionResultPayload,
     LimitsPayload,
@@ -219,16 +224,27 @@ class DebugTraceTests(unittest.TestCase):
             visible_capabilities=visible_capabilities,
         )
         resolved_capabilities = services.capability_registry.resolve(request)
-        context_result = services.context_builder.build_messages(
+        context_result = services.context_engine.build_messages(
             request=request,
-            recent_turns=[],
-            memories=[],
+            turn_state=TurnState(
+                session_ref=request.session_ref,
+                turn_id=request.turn_id,
+                request=request.model_dump(),
+                task=TaskState(
+                    task_id="task-test",
+                    task_type="user_request",
+                    owner_player=request.player.name,
+                    goal=request.user_message,
+                    status="analyzing",
+                ),
+                working_memory=WorkingMemory(primary_goal=request.user_message),
+            ),
             capability_descriptors=[capability.descriptor for capability in resolved_capabilities],
-            observations=[],
-            pending_confirmation=None,
         )
-        model_payload = json.loads(context_result.messages[1]["content"])
-        target_capability = self._capability_from_payload(model_payload["capabilities"], "game.target_block.read")
+        capability_section = next(
+            section for section in context_result.sections if section["name"] == "capability_catalog"
+        )
+        target_capability = self._capability_from_payload(capability_section["preview"], "game.target_block.read")
 
         response = loop.start_turn(request)
 
@@ -531,12 +547,16 @@ class DebugTraceTests(unittest.TestCase):
             enable_dynamic_scripting=False,
             max_agent_steps=8,
             max_retrieval_results=4,
+            context_char_budget=12000,
+            context_recent_turn_limit=12,
+            context_recent_full_turns=2,
+            artifact_inline_char_budget=1200,
             script_timeout_seconds=5,
             script_memory_mb=128,
             script_max_actions=8,
         )
 
-        store = Store(settings.db_path)
+        store = Store(settings.db_path, settings.data_dir)
         audit = AuditLogger(settings.audit_dir)
         debug = build_debug_recorder(settings)
         policy_engine = PolicyEngine()
@@ -544,10 +564,12 @@ class DebugTraceTests(unittest.TestCase):
         retrieval_index.refresh()
         capability_registry = CapabilityRegistry(
             settings=settings,
+            store=store,
             policy_engine=policy_engine,
             retrieval_index=retrieval_index,
             script_runner=ScriptRunner(settings),
         )
+        memory_policy = MemoryPolicy()
         services = AgentServices(
             settings=settings,
             store=store,
@@ -555,8 +577,11 @@ class DebugTraceTests(unittest.TestCase):
             debug=debug,
             policy_engine=policy_engine,
             capability_registry=capability_registry,
-            context_builder=ContextBuilder(),
-            provider=StubProvider(provider_responses),  # type: ignore[arg-type]
+            context_engine=ContextEngine(settings, store, memory_policy),
+            decision_engine=DecisionEngine(StubProvider(provider_responses)),  # type: ignore[arg-type]
+            execution_orchestrator=ExecutionOrchestrator(settings, store),
+            memory_policy=memory_policy,
+            confirmation_resolver=ConfirmationResolver(),
         )
         return AgentLoop(services), settings, services
 

@@ -33,6 +33,7 @@ public final class BridgeModels {
         public String continuation_id;
         public List<ActionRequestPayload> action_request_batch;
         public String pending_confirmation_id;
+        public String pending_confirmation_effect_summary;
         public List<TraceEventPayload> trace_events;
 
         public boolean isFinalReply() {

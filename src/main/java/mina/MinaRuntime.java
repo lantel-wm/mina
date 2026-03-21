@@ -5,12 +5,21 @@ import mina.capability.CapabilityExecutorRegistry;
 import mina.command.MinaCommand;
 import mina.config.MinaConfig;
 import mina.context.GameContextCollector;
+import mina.context.PlayerSnapshotProvider;
+import mina.context.RecentEventBuffer;
+import mina.context.RecentEventsProvider;
+import mina.context.TargetBlockSnapshotProvider;
 import mina.execution.PendingTurnRegistry;
+import mina.execution.PendingConfirmationRegistry;
 import mina.execution.TurnCoordinator;
 import mina.policy.ExecutionGuard;
 import mina.policy.PermissionResolver;
+import mina.context.WorldSnapshotProvider;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.MinecraftServer;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -21,9 +30,11 @@ public final class MinaRuntime {
     private MinaConfig config;
     private ExecutorService ioExecutor;
     private PendingTurnRegistry pendingTurns;
+    private PendingConfirmationRegistry pendingConfirmations;
     private PermissionResolver permissionResolver;
     private CapabilityExecutorRegistry capabilityRegistry;
     private GameContextCollector contextCollector;
+    private RecentEventBuffer recentEventBuffer;
     private AgentServiceClient agentServiceClient;
     private ExecutionGuard executionGuard;
     private TurnCoordinator turnCoordinator;
@@ -48,9 +59,20 @@ public final class MinaRuntime {
                 new MinaThreadFactory()
         );
         this.pendingTurns = new PendingTurnRegistry();
+        this.pendingConfirmations = new PendingConfirmationRegistry();
         this.permissionResolver = new PermissionResolver(config);
         this.capabilityRegistry = new CapabilityExecutorRegistry(config);
-        this.contextCollector = new GameContextCollector(config, permissionResolver, capabilityRegistry);
+        this.recentEventBuffer = new RecentEventBuffer(24);
+        this.contextCollector = new GameContextCollector(
+                permissionResolver,
+                capabilityRegistry,
+                new PlayerSnapshotProvider(config.inventorySummaryLimit()),
+                new WorldSnapshotProvider(config.serverRuleSummaryLimit()),
+                new TargetBlockSnapshotProvider(config.targetReachBlocks()),
+                new RecentEventsProvider(recentEventBuffer),
+                config.enableExperimentalCapabilities(),
+                config.enableDynamicScripting()
+        );
         this.agentServiceClient = new AgentServiceClient(config);
         this.executionGuard = new ExecutionGuard(config, permissionResolver);
         this.turnCoordinator = new TurnCoordinator(
@@ -60,6 +82,8 @@ public final class MinaRuntime {
                 capabilityRegistry,
                 executionGuard,
                 pendingTurns,
+                pendingConfirmations,
+                recentEventBuffer,
                 ioExecutor
         );
 
@@ -72,6 +96,7 @@ public final class MinaRuntime {
         }
 
         pendingTurns.closeAll();
+        pendingConfirmations.clearAll();
         turnCoordinator = null;
         executionGuard = null;
         agentServiceClient = null;
@@ -79,6 +104,8 @@ public final class MinaRuntime {
         capabilityRegistry = null;
         permissionResolver = null;
         pendingTurns = null;
+        pendingConfirmations = null;
+        recentEventBuffer = null;
 
         if (ioExecutor != null) {
             ioExecutor.shutdownNow();
@@ -99,6 +126,22 @@ public final class MinaRuntime {
 
     public synchronized MinaConfig config() {
         return config;
+    }
+
+    public synchronized void recordPlayerEvent(String kind, ServerPlayerEntity player) {
+        if (recentEventBuffer == null) {
+            return;
+        }
+        recentEventBuffer.recordPlayerEvent(kind, player, Map.of());
+    }
+
+    public synchronized void recordTurnEvent(String kind, ServerPlayerEntity player, String message) {
+        if (recentEventBuffer == null) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("message", message);
+        recentEventBuffer.recordPlayerEvent(kind, player, payload);
     }
 
     private static final class MinaThreadFactory implements ThreadFactory {

@@ -113,12 +113,13 @@ class TurnResponse(MinaBaseModel):
     continuation_id: str | None = None
     action_request_batch: list[ActionRequestPayload] | None = None
     pending_confirmation_id: str | None = None
+    pending_confirmation_effect_summary: str | None = None
     trace_events: list[TraceEventPayload] = Field(default_factory=list)
 
 
 class CapabilityDescriptor(MinaBaseModel):
     id: str
-    kind: Literal["tool", "skill", "retrieval", "script"]
+    kind: Literal["tool", "skill", "retrieval", "script", "agent"]
     visibility_predicate: str
     risk_class: str
     execution_mode: str
@@ -131,6 +132,7 @@ class CapabilityDescriptor(MinaBaseModel):
 
 class ModelDecision(MinaBaseModel):
     mode: Literal["final_reply", "call_capability"]
+    task_selection: Literal["keep_current", "reuse_active"] | None = None
     final_reply: str | None = None
     capability_id: str | None = None
     arguments: dict[str, Any] = Field(default_factory=dict)
