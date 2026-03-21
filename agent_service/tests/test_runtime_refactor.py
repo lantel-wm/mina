@@ -18,10 +18,21 @@ from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
 from mina_agent.runtime.context_engine import ContextEngine
 from mina_agent.runtime.decision_engine import DecisionEngine
 from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
+from mina_agent.runtime.memory_manager import MemoryManager
 from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.runtime.models import TaskState, TaskStepState, TurnState, WorkingMemory
+from mina_agent.runtime.task_manager import TaskManager
 from mina_agent.runtime.turn_service import TurnService
-from mina_agent.schemas import LimitsPayload, ModelDecision, PlayerPayload, ServerEnvPayload, TurnStartRequest, VisibleCapabilityPayload
+from mina_agent.schemas import (
+    CapabilityRequest,
+    ConfirmationRequest,
+    LimitsPayload,
+    ModelDecision,
+    PlayerPayload,
+    ServerEnvPayload,
+    TurnStartRequest,
+    VisibleCapabilityPayload,
+)
 
 
 class RuntimeRefactorTests(unittest.TestCase):
@@ -49,11 +60,10 @@ class RuntimeRefactorTests(unittest.TestCase):
             [
                 "stable_core",
                 "runtime_reminder",
-                "situation_snapshot",
-                "working_memory",
-                "retrieved_long_term_memory",
+                "situation_slice",
+                "task_working_set",
+                "recoverable_recall",
                 "capability_catalog",
-                "recent_conversation_trigger",
             ],
         )
         compact_summary = store.get_session_summary(request.session_ref)
@@ -213,6 +223,163 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIsNotNone(active_task)
         self.assertEqual(active_task["status"], "awaiting_confirmation")
         self.assertEqual(store.list_episodic_memories(request.session_ref, limit=10), [])
+
+    def test_model_await_confirmation_intent_opens_pending_confirmation_flow(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(
+                    _SequenceProvider(
+                        [
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="await_confirmation",
+                                    capability_request=CapabilityRequest(
+                                        capability_id="game.player_snapshot.read",
+                                        arguments={},
+                                        effect_summary="Read the player snapshot after confirmation.",
+                                        requires_confirmation=True,
+                                    ),
+                                    confirmation_request=ConfirmationRequest(
+                                        effect_summary="Read the player snapshot after confirmation.",
+                                        reason="Need explicit approval before continuing.",
+                                    ),
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"await_confirmation"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            )
+                        ]
+                    )
+                ),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        request = self._turn_request(turn_id="turn-await-confirm-intent")
+        request.visible_capabilities = [
+            VisibleCapabilityPayload(
+                id="game.player_snapshot.read",
+                kind="tool",
+                description="Read the current player snapshot.",
+                risk_class="read_only",
+                execution_mode="bridge",
+                requires_confirmation=False,
+            )
+        ]
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "final_reply")
+        self.assertIsNotNone(response.pending_confirmation_id)
+        self.assertEqual(response.pending_confirmation_effect_summary, "Read the player snapshot after confirmation.")
+        pending = store.get_pending_confirmation(request.session_ref)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["action_payload"]["capability_id"], "game.player_snapshot.read")
+        active_task = store.get_active_task(request.session_ref)
+        self.assertIsNotNone(active_task)
+        self.assertEqual(active_task["status"], "awaiting_confirmation")
+
+    def test_internal_capability_requires_confirmation_before_execution(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime(
+            enable_dynamic_scripting=True
+        )
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(
+                    _SequenceProvider(
+                        [
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="execute",
+                                    capability_request=CapabilityRequest(
+                                        capability_id="script.python_sandbox.execute",
+                                        arguments={
+                                            "script": "emit_action({'kind': 'noop'})",
+                                            "inputs": {},
+                                        },
+                                        effect_summary="Execute a sandboxed script.",
+                                        requires_confirmation=True,
+                                    ),
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"execute"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            ),
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="reply",
+                                    final_reply="脚本已经按确认后的计划执行了。",
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"reply"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            ),
+                        ]
+                    )
+                ),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        capability_registry._local_capabilities["script.python_sandbox.execute"].executor = (  # type: ignore[attr-defined]
+            lambda arguments, state: {
+                "summary": "Executed confirmed sandbox script.",
+                "task_patch": {
+                    "summary": {
+                        "next_best_step": "Reply with the script result",
+                        "next_best_companion_move": "explain what changed after the confirmed script run",
+                    }
+                },
+            }
+        )
+        request = self._turn_request(turn_id="turn-internal-confirm-start")
+        request.player.role = "experimental"
+        request.server_env.dynamic_scripting_enabled = True
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "final_reply")
+        self.assertIsNotNone(response.pending_confirmation_id)
+        pending = store.get_pending_confirmation(request.session_ref)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["action_payload"]["capability_id"], "script.python_sandbox.execute")
+
+        confirm_request = self._turn_request(turn_id="turn-internal-confirm-finish")
+        confirm_request.player.role = "experimental"
+        confirm_request.server_env.dynamic_scripting_enabled = True
+        confirm_request.user_message = "确认"
+
+        confirmed = loop.start_turn(confirm_request)
+
+        self.assertEqual(confirmed.type, "final_reply")
+        self.assertEqual(confirmed.final_reply, "脚本已经按确认后的计划执行了。")
+        self.assertIsNone(store.get_pending_confirmation(request.session_ref))
 
     def test_prepare_task_creates_new_task_even_when_active_task_exists(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
@@ -472,8 +639,45 @@ class RuntimeRefactorTests(unittest.TestCase):
             status="completed",
         )
 
-        self.assertEqual(writes.semantic_writes, [])
+        self.assertEqual(len(writes.semantic_writes), 1)
+        self.assertEqual(writes.semantic_writes[0]["memory_type"], "player_preference")
         self.assertEqual(len(writes.episodic_writes), 1)
+
+    def test_memory_policy_uses_stable_preference_memory_key(self) -> None:
+        _, _, _, _, _, _, memory_policy, _ = self._build_runtime()
+        task = TaskState(
+            task_id="task-stable-pref",
+            task_type="user_request",
+            owner_player="Tester",
+            goal="记住以后不要自动移动稀有物品",
+            status="completed",
+        )
+
+        first = memory_policy.derive_writes(
+            session_ref="session-1",
+            task=task,
+            user_message="记住以后不要自动移动稀有物品",
+            final_reply="我记住了，以后先确认。",
+            observations=[],
+            status="completed",
+        )
+        second = memory_policy.derive_writes(
+            session_ref="session-1",
+            task=task,
+            user_message="记住以后不要自动移动稀有物品",
+            final_reply="我记住了，以后先确认。",
+            observations=[],
+            status="completed",
+        )
+
+        self.assertEqual(
+            first.semantic_writes[0]["memory_key"],
+            "pref:8236af63bc5f00bb",
+        )
+        self.assertEqual(
+            first.semantic_writes[0]["memory_key"],
+            second.semantic_writes[0]["memory_key"],
+        )
 
     def test_memory_policy_preserves_artifact_refs_in_retrieved_context(self) -> None:
         _, store, _, _, _, _, memory_policy, _ = self._build_runtime()
@@ -506,6 +710,33 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(len(candidates[0].artifact_refs), 1)
         self.assertEqual(candidates[0].artifact_refs[0].artifact_id, artifact["artifact_id"])
         self.assertEqual(candidates[0].context_entry()["artifact_refs"][0]["path"], artifact["path"])
+
+    def test_add_semantic_memory_upserts_existing_key_instead_of_appending_duplicates(self) -> None:
+        _, store, _, _, _, _, _, _ = self._build_runtime()
+
+        first_id = store.add_semantic_memory(
+            "session-1",
+            "player_preference",
+            "pref:same",
+            "Prefer confirmation before moving rare items.",
+            "Ask before moving rare items.",
+        )
+        second_id = store.add_semantic_memory(
+            "session-1",
+            "player_preference",
+            "pref:same",
+            "Prefer confirmation before moving rare items.",
+            "Always ask before moving rare items.",
+        )
+
+        semantic = [
+            memory
+            for memory in store.list_semantic_memories("session-1", limit=10)
+            if memory["memory_type"] == "player_preference" and memory["memory_key"] == "pref:same"
+        ]
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(len(semantic), 1)
+        self.assertEqual(semantic[0]["summary"], "Always ask before moving rare items.")
 
     def test_memory_policy_does_not_treat_simple_rejection_as_player_preference(self) -> None:
         _, _, _, _, _, _, memory_policy, _ = self._build_runtime()
@@ -573,7 +804,7 @@ class RuntimeRefactorTests(unittest.TestCase):
         )
 
         self.assertLessEqual(result.message_stats["total_chars"], settings.context_char_budget)
-        situation_section = next(section for section in result.sections if section["name"] == "situation_snapshot")
+        situation_section = next(section for section in result.sections if section["name"] == "situation_slice")
         self.assertTrue(situation_section["truncated"])
 
     def test_context_engine_compacts_full_session_history_not_sliding_window(self) -> None:
@@ -599,9 +830,77 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIsNotNone(compact_summary)
         self.assertIn("message 0", compact_summary["summary"])
         self.assertIn("message 17", compact_summary["summary"])
-        history_section = next(section for section in result.sections if section["name"] == "recent_conversation_trigger")
-        recent_turns = history_section["preview"]["history"]["recent_turns"]
+        history_section = next(section for section in result.sections if section["name"] == "recoverable_recall")
+        recent_turns = history_section["preview"]["history"]["recent_tail"]
         self.assertEqual([turn["user_message"] for turn in recent_turns], ["message 18", "message 19"])
+
+    def test_memory_manager_preserves_compact_summary_and_transcript_path(self) -> None:
+        settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-summary-preserve")
+        for index in range(5):
+            store.create_turn(
+                f"past-preserve-{index}",
+                request.session_ref,
+                f"message {index}",
+                {},
+                task_id=f"task_past_preserve_{index}",
+            )
+            store.finish_turn(f"past-preserve-{index}", f"reply {index}")
+
+        turn_state = self._turn_state(request)
+        context_engine.build_messages(
+            request=request,
+            turn_state=turn_state,
+            capability_descriptors=[],
+        )
+        before = store.get_session_summary(request.session_ref)
+        self.assertIsNotNone(before)
+        self.assertIn("Mina Compact Summary", before["summary"])
+        self.assertIsNotNone(before["transcript_path"])
+
+        memory_manager = MemoryManager(store, memory_policy)
+        memory_manager.record_turn_memories(
+            request,
+            turn_state,
+            final_reply="reply",
+            status="completed",
+        )
+
+        after = store.get_session_summary(request.session_ref)
+        self.assertIsNotNone(after)
+        self.assertEqual(after["summary"], before["summary"])
+        self.assertEqual(after["transcript_path"], before["transcript_path"])
+        self.assertEqual(after["metadata"]["topic"], request.user_message)
+
+    def test_memory_manager_updates_plain_session_summary_for_short_sessions(self) -> None:
+        _, store, _, _, _, _, memory_policy, _ = self._build_runtime()
+        memory_manager = MemoryManager(store, memory_policy)
+
+        first_request = self._turn_request(turn_id="turn-short-summary-1")
+        first_request.user_message = "first topic"
+        first_state = self._turn_state(first_request)
+        memory_manager.record_turn_memories(
+            first_request,
+            first_state,
+            final_reply="reply one",
+            status="completed",
+        )
+
+        second_request = self._turn_request(turn_id="turn-short-summary-2")
+        second_request.user_message = "second topic"
+        second_state = self._turn_state(second_request)
+        memory_manager.record_turn_memories(
+            second_request,
+            second_state,
+            final_reply="reply two",
+            status="completed",
+        )
+
+        summary = store.get_session_summary(first_request.session_ref)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["summary"], "second topic")
+        self.assertIsNone(summary["transcript_path"])
+        self.assertEqual(summary["metadata"]["topic"], "second topic")
 
     def test_artifact_search_finds_session_artifacts_from_previous_task(self) -> None:
         settings, store, policy_engine, capability_registry, _, _, _, _ = self._build_runtime()
@@ -649,7 +948,21 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         self.assertIn(artifact["artifact_id"], [item["artifact_id"] for item in result["results"]])
 
-    def _build_runtime(self):
+    def test_prepare_task_uses_neutral_default_type_without_keyword_routing(self) -> None:
+        _, store, _, _, _, _, _, _ = self._build_runtime()
+        manager = TaskManager(store)
+        follow_up_request = self._turn_request(turn_id="turn-follow-up-keyword")
+        follow_up_request.user_message = "继续整理主基地箱子"
+        guidance_request = self._turn_request(turn_id="turn-guidance-keyword")
+        guidance_request.user_message = "帮我看一下这个方块是什么"
+
+        follow_up_task = manager.prepare_task(follow_up_request, None)
+        guidance_task = manager.prepare_task(guidance_request, None)
+
+        self.assertEqual(follow_up_task.task_type, "conversation_thread")
+        self.assertEqual(guidance_task.task_type, "conversation_thread")
+
+    def _build_runtime(self, *, enable_dynamic_scripting: bool = False):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
@@ -672,7 +985,7 @@ class RuntimeRefactorTests(unittest.TestCase):
             debug_dict_preview_keys=20,
             debug_event_payload_chars=4000,
             enable_experimental=False,
-            enable_dynamic_scripting=False,
+            enable_dynamic_scripting=enable_dynamic_scripting,
             max_agent_steps=8,
             max_retrieval_results=4,
             context_char_budget=12000,

@@ -9,8 +9,9 @@ from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyContext, PolicyEngine
 from mina_agent.retrieval.index import LocalKnowledgeIndex
+from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.models import TaskStepState, TurnState
-from mina_agent.schemas import CapabilityDescriptor, TurnStartRequest
+from mina_agent.schemas import CapabilityDescriptor, DelegateRequest, TurnStartRequest
 
 
 InternalExecutor = Callable[[dict[str, Any], "RuntimeState"], dict[str, Any]]
@@ -38,12 +39,14 @@ class CapabilityRegistry:
         policy_engine: PolicyEngine,
         retrieval_index: LocalKnowledgeIndex,
         script_runner: ScriptRunner,
+        delegate_runtime: DelegateRuntime | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._policy_engine = policy_engine
         self._retrieval_index = retrieval_index
         self._script_runner = script_runner
+        self._delegate_runtime = delegate_runtime or DelegateRuntime(store)
         self._local_capabilities = self._build_local_capabilities()
 
     def resolve(self, request: TurnStartRequest) -> list[RuntimeCapability]:
@@ -310,65 +313,27 @@ class CapabilityRegistry:
 
     def _explore_delegate(self, arguments: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
         objective = str(arguments.get("objective", "")).strip() or state.turn_state.task.goal
-        artifacts = self._store.search_artifacts(
-            state.request.session_ref,
-            objective,
-            task_id=state.turn_state.task.task_id,
-            limit=4,
-        )
-        memories = self._store.search_memories(state.request.session_ref, objective, limit=4)
-        findings: list[str] = []
-        for observation in state.turn_state.observations[-4:]:
-            findings.append(observation.summary)
-        for artifact in artifacts[:2]:
-            findings.append(artifact["summary"])
-        for memory in memories[:2]:
-            findings.append(str(memory.get("summary", "")))
-        findings = [finding for finding in findings if finding]
-        summary = (
-            f"Explore summary for {objective}: "
-            + ("; ".join(findings[:6]) if findings else "no additional facts found")
+        result = self._delegate_runtime.run(
+            DelegateRequest(role="explore", objective=objective),
+            state.turn_state,
         )
         return {
-            "summary": summary,
-            "artifact_refs": [
-                {
-                    "artifact_id": artifact["artifact_id"],
-                    "kind": artifact["kind"],
-                    "path": artifact["path"],
-                    "summary": artifact["summary"],
-                }
-                for artifact in artifacts
-            ],
-            "task_patch": {
-                "status": "analyzing",
-                "summary": {
-                    "delegate": "explore",
-                    "objective": objective,
-                    "finding_count": len(findings),
-                },
-            },
+            "summary": result.summary.summary,
+            "delegate_result": result.model_dump(),
+            "artifact_refs": result.artifact_refs,
+            "task_patch": result.task_patch,
         }
 
     def _plan_delegate(self, arguments: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
         objective = str(arguments.get("objective", "")).strip() or state.turn_state.task.goal
-        steps = [
-            TaskStepState(step_key="inspect", title="Inspect live state", status="pending", step_order=0),
-            TaskStepState(step_key="decide", title="Decide the safest next move", status="pending", step_order=1),
-            TaskStepState(step_key="act", title="Execute or reply", status="pending", step_order=2),
-        ]
-        summary = f"Plan summary for {objective}: {', '.join(step.title for step in steps)}."
+        result = self._delegate_runtime.run(
+            DelegateRequest(role="plan", objective=objective),
+            state.turn_state,
+        )
         return {
-            "summary": summary,
-            "task_patch": {
-                "status": "planned",
-                "steps": [step.model_dump() for step in steps],
-                "summary": {
-                    "delegate": "plan",
-                    "objective": objective,
-                    "next_best_step": steps[0].title if steps else "",
-                },
-            },
+            "summary": result.summary.summary,
+            "delegate_result": result.model_dump(),
+            "task_patch": result.task_patch,
         }
 
     def _capability_guide(self, _: dict[str, Any], state: RuntimeState) -> dict[str, Any]:

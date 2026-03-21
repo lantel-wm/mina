@@ -14,9 +14,15 @@ from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
 from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
 from mina_agent.runtime.context_engine import ContextEngine
+from mina_agent.runtime.context_manager import ContextManager
+from mina_agent.runtime.delegate_runtime import DelegateRuntime
+from mina_agent.runtime.deliberation_engine import DeliberationEngine
 from mina_agent.runtime.decision_engine import DecisionEngine
+from mina_agent.runtime.execution_manager import ExecutionManager
 from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
+from mina_agent.runtime.memory_manager import MemoryManager
 from mina_agent.runtime.memory_policy import MemoryPolicy
+from mina_agent.runtime.task_manager import TaskManager
 from mina_agent.schemas import TurnResumeRequest, TurnResponse, TurnStartRequest
 
 
@@ -32,15 +38,24 @@ def create_app() -> FastAPI:
     policy_engine = PolicyEngine()
     retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
     retrieval_index.refresh()
+    delegate_runtime = DelegateRuntime(store)
     capability_registry = CapabilityRegistry(
         settings=settings,
         store=store,
         policy_engine=policy_engine,
         retrieval_index=retrieval_index,
         script_runner=ScriptRunner(settings),
+        delegate_runtime=delegate_runtime,
     )
     provider = OpenAICompatibleProvider(settings)
     memory_policy = MemoryPolicy()
+    task_manager = TaskManager(store)
+    context_manager = ContextManager(settings, store, memory_policy)
+    execution_orchestrator = ExecutionOrchestrator(settings, store)
+    execution_manager = ExecutionManager(capability_registry, execution_orchestrator)
+    decision_engine = DecisionEngine(provider)
+    deliberation_engine = DeliberationEngine(decision_engine)
+    memory_manager = MemoryManager(store, memory_policy)
     services = AgentServices(
         settings=settings,
         store=store,
@@ -49,10 +64,16 @@ def create_app() -> FastAPI:
         policy_engine=policy_engine,
         capability_registry=capability_registry,
         context_engine=ContextEngine(settings, store, memory_policy),
-        decision_engine=DecisionEngine(provider),
-        execution_orchestrator=ExecutionOrchestrator(settings, store),
+        decision_engine=decision_engine,
+        execution_orchestrator=execution_orchestrator,
         memory_policy=memory_policy,
         confirmation_resolver=ConfirmationResolver(),
+        task_manager=task_manager,
+        context_manager=context_manager,
+        deliberation_engine=deliberation_engine,
+        execution_manager=execution_manager,
+        memory_manager=memory_manager,
+        delegate_runtime=delegate_runtime,
     )
     agent_loop = AgentLoop(services)
 

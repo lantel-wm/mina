@@ -49,6 +49,9 @@ class ObservationRef(MinaBaseModel):
     preview: Any | None = None
     keys: list[str] = Field(default_factory=list)
     artifact_ref: ArtifactRef | None = None
+    salience: float = 0.5
+    recovery_hint: str | None = None
+    scope_tags: list[str] = Field(default_factory=list)
     created_at: str | None = None
 
     def context_entry(self) -> dict[str, Any]:
@@ -56,11 +59,16 @@ class ObservationRef(MinaBaseModel):
             "observation_id": self.observation_id,
             "source": self.source,
             "summary": self.summary,
+            "salience": self.salience,
         }
         if self.preview is not None:
             payload["preview"] = self.preview
         if self.keys:
             payload["keys"] = self.keys
+        if self.recovery_hint is not None:
+            payload["recovery_hint"] = self.recovery_hint
+        if self.scope_tags:
+            payload["scope_tags"] = self.scope_tags
         if self.artifact_ref is not None:
             payload["artifact_ref"] = self.artifact_ref.context_ref()
         return payload
@@ -68,6 +76,7 @@ class ObservationRef(MinaBaseModel):
 
 class WorkingMemory(MinaBaseModel):
     primary_goal: str = ""
+    focus: str = ""
     current_status: str = ""
     completed_actions: list[str] = Field(default_factory=list)
     key_facts: list[str] = Field(default_factory=list)
@@ -75,10 +84,16 @@ class WorkingMemory(MinaBaseModel):
     pending_questions: list[str] = Field(default_factory=list)
     next_best_step: str = ""
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    active_observations: list[ObservationRef] = Field(default_factory=list)
+    observation_refs: list[dict[str, Any]] = Field(default_factory=list)
+    recovery_refs: list[dict[str, Any]] = Field(default_factory=list)
+    open_loops: list[str] = Field(default_factory=list)
+    companion_state: dict[str, Any] = Field(default_factory=dict)
 
     def context_entry(self) -> dict[str, Any]:
         return {
             "primary_goal": self.primary_goal,
+            "focus": self.focus or self.primary_goal,
             "current_status": self.current_status,
             "completed_actions": self.completed_actions,
             "key_facts": self.key_facts,
@@ -86,6 +101,11 @@ class WorkingMemory(MinaBaseModel):
             "pending_questions": self.pending_questions,
             "next_best_step": self.next_best_step,
             "artifact_refs": [artifact.context_ref() for artifact in self.artifact_refs],
+            "active_observations": [observation.context_entry() for observation in self.active_observations],
+            "observation_refs": self.observation_refs,
+            "recovery_refs": self.recovery_refs,
+            "open_loops": self.open_loops,
+            "companion_state": self.companion_state,
         }
 
 
@@ -125,6 +145,10 @@ class TaskState(MinaBaseModel):
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     steps: list[TaskStepState] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
+    parent_task_id: str | None = None
+    origin_turn_id: str | None = None
+    continuity_score: float = 0.0
+    last_active_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -141,6 +165,10 @@ class TaskState(MinaBaseModel):
             "steps": [step.model_dump() for step in self.steps],
             "artifacts": [artifact.context_ref() for artifact in self.artifacts],
             "summary": self.summary,
+            "parent_task_id": self.parent_task_id,
+            "origin_turn_id": self.origin_turn_id,
+            "continuity_score": self.continuity_score,
+            "last_active_at": self.last_active_at,
         }
 
 
@@ -199,6 +227,7 @@ class TurnState(MinaBaseModel):
     active_task_candidate: TaskState | None = None
     block_subject_lock: BlockSubjectLock | None = None
     pending_action_batch: list[dict[str, Any]] = Field(default_factory=list)
+    delegate_history: list[dict[str, Any]] = Field(default_factory=list)
     runtime_notes: list[str] = Field(default_factory=list)
 
     def to_runtime_dict(self) -> dict[str, Any]:

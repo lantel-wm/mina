@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,7 @@ from mina_agent.runtime.models import ArtifactRef, MemoryCandidate, TaskState
 class MemoryWriteResult:
     semantic_writes: list[dict[str, Any]]
     episodic_writes: list[dict[str, Any]]
+    session_summary: dict[str, Any] | None = None
 
 
 class MemoryPolicy:
@@ -27,6 +29,10 @@ class MemoryPolicy:
     ) -> MemoryWriteResult:
         semantic_writes: list[dict[str, Any]] = []
         episodic_writes: list[dict[str, Any]] = []
+
+        player_preference = self._extract_player_preference(user_message, final_reply, pending_confirmation_resolved)
+        if player_preference is not None:
+            semantic_writes.append(player_preference)
 
         if task.status in {"completed", "failed", "canceled"}:
             episodic_writes.append(
@@ -50,7 +56,17 @@ class MemoryPolicy:
                 }
             )
 
-        return MemoryWriteResult(semantic_writes=semantic_writes, episodic_writes=episodic_writes)
+        session_summary = {
+            "topic": task.goal,
+            "task_id": task.task_id,
+            "status": status,
+            "next_best_companion_move": task.summary.get("next_best_companion_move") or task.summary.get("next_best_step"),
+        }
+        return MemoryWriteResult(
+            semantic_writes=semantic_writes,
+            episodic_writes=episodic_writes,
+            session_summary=session_summary,
+        )
 
     def summarize_for_context(self, memories: list[dict[str, Any]]) -> list[MemoryCandidate]:
         candidates: list[MemoryCandidate] = []
@@ -88,3 +104,31 @@ class MemoryPolicy:
         if pending_confirmation_resolved == "modified":
             return f"User changed the pending plan for {task.goal}: {user_message}"
         return f"Task {task.goal} finished with status {status}. Reply summary: {final_reply}"
+
+    def _extract_player_preference(
+        self,
+        user_message: str,
+        final_reply: str,
+        pending_confirmation_resolved: str | None,
+    ) -> dict[str, Any] | None:
+        normalized = user_message.strip()
+        if pending_confirmation_resolved == "rejected":
+            return None
+        if normalized in {"不要", "不用", "算了", "停下"}:
+            return None
+        if "规则" in normalized and "?" in normalized:
+            return None
+        if not any(token in normalized for token in ("以后", "记住", "别再", "不要自动", "先确认")):
+            return None
+        return {
+            "memory_type": "player_preference",
+            "memory_key": self._stable_memory_key("pref", normalized),
+            "value": normalized,
+            "summary": final_reply or normalized,
+            "confidence": 0.72,
+            "metadata": {"source": "turn_memory_policy"},
+        }
+
+    def _stable_memory_key(self, prefix: str, value: str) -> str:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+        return f"{prefix}:{digest}"

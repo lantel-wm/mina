@@ -27,6 +27,7 @@ agent_service/data/knowledge_cache/
 agent_service/data/knowledge/changelogs/
 agent_service/data/memory/
 agent_service/data/sessions/
+agent_service/data/tasks/
 
 # reference repos for coding agent
 reference

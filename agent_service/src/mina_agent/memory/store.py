@@ -159,6 +159,10 @@ class Store:
                     priority TEXT NOT NULL,
                     risk_class TEXT NOT NULL,
                     requires_confirmation INTEGER NOT NULL,
+                    parent_task_id TEXT,
+                    origin_turn_id TEXT,
+                    continuity_score REAL NOT NULL DEFAULT 0,
+                    last_active_at TEXT,
                     constraints_json TEXT NOT NULL,
                     artifacts_json TEXT NOT NULL,
                     summary_json TEXT NOT NULL,
@@ -233,6 +237,10 @@ class Store:
             self._ensure_column(connection, "execution_records", "state_fingerprint", "TEXT")
             self._ensure_column(connection, "execution_records", "artifact_refs_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(connection, "pending_confirmations", "task_id", "TEXT")
+            self._ensure_column(connection, "tasks", "parent_task_id", "TEXT")
+            self._ensure_column(connection, "tasks", "origin_turn_id", "TEXT")
+            self._ensure_column(connection, "tasks", "continuity_score", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "tasks", "last_active_at", "TEXT")
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing = {
@@ -576,8 +584,43 @@ class Store:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         now = _utc_now()
-        memory_id = str(uuid.uuid4())
         with self.connection() as connection:
+            existing_rows = connection.execute(
+                """
+                SELECT id, memory_id, created_at
+                FROM semantic_memories
+                WHERE session_ref = ? AND memory_type = ? AND memory_key = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (session_ref, memory_type, memory_key),
+            ).fetchall()
+            if existing_rows:
+                primary = existing_rows[0]
+                connection.execute(
+                    """
+                    UPDATE semantic_memories
+                    SET value = ?, summary = ?, confidence = ?, metadata_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        value,
+                        summary,
+                        confidence,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                        now,
+                        primary["id"],
+                    ),
+                )
+                duplicate_ids = [row["id"] for row in existing_rows[1:]]
+                if duplicate_ids:
+                    placeholders = ", ".join("?" for _ in duplicate_ids)
+                    connection.execute(
+                        f"DELETE FROM semantic_memories WHERE id IN ({placeholders})",
+                        duplicate_ids,
+                    )
+                return str(primary["memory_id"])
+
+            memory_id = str(uuid.uuid4())
             connection.execute(
                 """
                 INSERT INTO semantic_memories(
@@ -741,6 +784,10 @@ class Store:
         priority: str = "normal",
         risk_class: str = "read_only",
         requires_confirmation: bool = False,
+        parent_task_id: str | None = None,
+        origin_turn_id: str | None = None,
+        continuity_score: float = 0.0,
+        last_active_at: str | None = None,
         constraints: list[str] | None = None,
         summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -756,6 +803,10 @@ class Store:
             "priority": priority,
             "risk_class": risk_class,
             "requires_confirmation": requires_confirmation,
+            "parent_task_id": parent_task_id,
+            "origin_turn_id": origin_turn_id,
+            "continuity_score": continuity_score,
+            "last_active_at": last_active_at or now,
             "constraints": constraints or [],
             "artifacts": [],
             "summary": summary or {},
@@ -767,9 +818,10 @@ class Store:
                 """
                 INSERT INTO tasks(
                     task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
-                    requires_confirmation, constraints_json, artifacts_json, summary_json, created_at, updated_at
+                    requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
+                    constraints_json, artifacts_json, summary_json, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -781,6 +833,10 @@ class Store:
                     priority,
                     risk_class,
                     1 if requires_confirmation else 0,
+                    parent_task_id,
+                    origin_turn_id,
+                    continuity_score,
+                    last_active_at or now,
                     json.dumps(constraints or [], ensure_ascii=False),
                     json.dumps([], ensure_ascii=False),
                     json.dumps(summary or {}, ensure_ascii=False),
@@ -799,6 +855,10 @@ class Store:
         priority: str | None = None,
         risk_class: str | None = None,
         requires_confirmation: bool | None = None,
+        parent_task_id: str | None = None,
+        origin_turn_id: str | None = None,
+        continuity_score: float | None = None,
+        last_active_at: str | None = None,
         constraints: list[str] | None = None,
         artifacts: list[dict[str, Any]] | None = None,
         summary: dict[str, Any] | None = None,
@@ -811,6 +871,7 @@ class Store:
                 """
                 UPDATE tasks
                 SET goal = ?, status = ?, priority = ?, risk_class = ?, requires_confirmation = ?,
+                    parent_task_id = ?, origin_turn_id = ?, continuity_score = ?, last_active_at = ?,
                     constraints_json = ?, artifacts_json = ?, summary_json = ?, updated_at = ?
                 WHERE task_id = ?
                 """,
@@ -820,6 +881,10 @@ class Store:
                     priority if priority is not None else current["priority"],
                     risk_class if risk_class is not None else current["risk_class"],
                     1 if (requires_confirmation if requires_confirmation is not None else current["requires_confirmation"]) else 0,
+                    parent_task_id if parent_task_id is not None else current.get("parent_task_id"),
+                    origin_turn_id if origin_turn_id is not None else current.get("origin_turn_id"),
+                    continuity_score if continuity_score is not None else current.get("continuity_score", 0.0),
+                    last_active_at if last_active_at is not None else current.get("last_active_at"),
                     json.dumps(constraints if constraints is not None else current["constraints"], ensure_ascii=False),
                     json.dumps(artifacts if artifacts is not None else current["artifacts"], ensure_ascii=False),
                     json.dumps(summary if summary is not None else current["summary"], ensure_ascii=False),
@@ -833,7 +898,8 @@ class Store:
             row = connection.execute(
                 """
                 SELECT task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
-                       requires_confirmation, constraints_json, artifacts_json, summary_json, created_at, updated_at
+                       requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
+                       constraints_json, artifacts_json, summary_json, created_at, updated_at
                 FROM tasks
                 WHERE task_id = ?
                 """,
@@ -848,7 +914,8 @@ class Store:
             row = connection.execute(
                 """
                 SELECT task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
-                       requires_confirmation, constraints_json, artifacts_json, summary_json, created_at, updated_at
+                       requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
+                       constraints_json, artifacts_json, summary_json, created_at, updated_at
                 FROM tasks
                 WHERE session_ref = ? AND status IN ('pending', 'analyzing', 'planned', 'awaiting_confirmation', 'in_progress', 'blocked')
                 ORDER BY updated_at DESC
@@ -1224,6 +1291,10 @@ class Store:
             "priority": row["priority"],
             "risk_class": row["risk_class"],
             "requires_confirmation": bool(row["requires_confirmation"]),
+            "parent_task_id": row["parent_task_id"],
+            "origin_turn_id": row["origin_turn_id"],
+            "continuity_score": float(row["continuity_score"] or 0.0),
+            "last_active_at": row["last_active_at"],
             "constraints": json.loads(row["constraints_json"]),
             "artifacts": json.loads(row["artifacts_json"]),
             "summary": json.loads(row["summary_json"]),

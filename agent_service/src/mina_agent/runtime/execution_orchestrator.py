@@ -41,12 +41,34 @@ class ExecutionOrchestrator:
             preview=preview,
             keys=sorted(payload.keys())[:12],
             artifact_ref=artifact_ref,
+            salience=self._estimate_salience(source, payload),
+            recovery_hint=artifact_ref.path if artifact_ref is not None else None,
+            scope_tags=self._scope_tags(source, payload),
             created_at=artifact_ref.created_at,
         )
         turn_state.observations.append(observation)
         turn_state.task.artifacts.append(artifact_ref)
         turn_state.working_memory.artifact_refs.append(artifact_ref)
         turn_state.working_memory.completed_actions.append(summary)
+        turn_state.working_memory.active_observations = sorted(
+            turn_state.observations,
+            key=lambda item: item.salience,
+            reverse=True,
+        )[:4]
+        turn_state.working_memory.observation_refs = [
+            {
+                "observation_id": item.observation_id,
+                "source": item.source,
+                "summary": item.summary,
+                "artifact_ref": item.artifact_ref.context_ref() if item.artifact_ref else None,
+            }
+            for item in turn_state.observations[-6:]
+        ]
+        turn_state.working_memory.recovery_refs = [
+            item.artifact_ref.context_ref()
+            for item in turn_state.observations[-6:]
+            if item.artifact_ref is not None
+        ]
         self._update_block_subject_lock(turn_state, source, payload)
         return observation
 
@@ -150,3 +172,25 @@ class ExecutionOrchestrator:
             and int(left["y"]) == int(right["y"])
             and int(left["z"]) == int(right["z"])
         )
+
+    def _estimate_salience(self, source: str, payload: dict[str, Any]) -> float:
+        score = 0.4
+        if source.startswith("agent."):
+            score += 0.25
+        if source.endswith(".read"):
+            score += 0.1
+        if payload.get("task_patch"):
+            score += 0.15
+        if payload.get("error") or payload.get("error_message"):
+            score += 0.2
+        return min(score, 1.0)
+
+    def _scope_tags(self, source: str, payload: dict[str, Any]) -> list[str]:
+        tags = [source.split(".")[0]]
+        if "block_name" in payload or "block_id" in payload:
+            tags.append("block")
+        if "player" in payload:
+            tags.append("player")
+        if "results" in payload:
+            tags.append("retrieval")
+        return tags

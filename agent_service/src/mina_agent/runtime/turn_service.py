@@ -15,21 +15,27 @@ from mina_agent.providers.openai_compatible import ProviderDecisionResult, Provi
 from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeState
 from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
 from mina_agent.runtime.context_engine import ContextEngine
+from mina_agent.runtime.context_manager import ContextManager
+from mina_agent.runtime.deliberation_engine import DeliberationEngine
 from mina_agent.runtime.decision_engine import DecisionEngine
+from mina_agent.runtime.execution_manager import ExecutionManager
 from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
+from mina_agent.runtime.memory_manager import MemoryManager
 from mina_agent.runtime.memory_policy import MemoryPolicy
+from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.models import (
     ArtifactRef,
-    BlockSubjectLock,
     ObservationRef,
     TaskState,
     TaskStepState,
     TurnState,
     WorkingMemory,
 )
+from mina_agent.runtime.task_manager import TaskManager
 from mina_agent.schemas import (
     ActionRequestPayload,
     ActionResultPayload,
+    ModelDecision,
     TraceChipPayload,
     TraceEventPayload,
     TurnResponse,
@@ -51,6 +57,12 @@ class AgentServices:
     execution_orchestrator: ExecutionOrchestrator
     memory_policy: MemoryPolicy
     confirmation_resolver: ConfirmationResolver
+    task_manager: TaskManager | None = None
+    context_manager: ContextManager | None = None
+    deliberation_engine: DeliberationEngine | None = None
+    execution_manager: ExecutionManager | None = None
+    memory_manager: MemoryManager | None = None
+    delegate_runtime: DelegateRuntime | None = None
 
 
 class TurnService:
@@ -64,12 +76,25 @@ class TurnService:
 
     def __init__(self, services: AgentServices) -> None:
         self._services = services
+        self._task_manager = services.task_manager or TaskManager(services.store)
+        self._context_manager = services.context_manager or ContextManager(
+            services.settings,
+            services.store,
+            services.memory_policy,
+        )
+        self._deliberation_engine = services.deliberation_engine or DeliberationEngine(services.decision_engine)
+        self._execution_manager = services.execution_manager or ExecutionManager(
+            services.capability_registry,
+            services.execution_orchestrator,
+        )
+        self._memory_manager = services.memory_manager or MemoryManager(services.store, services.memory_policy)
+        self._delegate_runtime = services.delegate_runtime or DelegateRuntime(services.store)
 
     def start_turn(self, request: TurnStartRequest) -> TurnResponse:
         self._services.store.ensure_session(request.session_ref, request.player.name, request.player.role)
         pending_confirmation = self._services.store.get_pending_confirmation(request.session_ref)
-        active_task_candidate = self._load_active_task_candidate(request, pending_confirmation)
-        task = self._prepare_task(request, pending_confirmation)
+        active_task_candidate = self._task_manager.load_active_task_candidate(request, pending_confirmation)
+        task = self._task_manager.prepare_task(request, pending_confirmation)
         turn_state = TurnState(
             session_ref=request.session_ref,
             turn_id=request.turn_id,
@@ -77,8 +102,10 @@ class TurnService:
             task=task,
             working_memory=WorkingMemory(
                 primary_goal=task.goal,
+                focus=task.goal,
                 current_status="analyzing",
-                next_best_step="Inspect or reply based on the current trigger.",
+                next_best_step="Inspect, guide, or reply based on the current trigger.",
+                companion_state={"stance": "present", "mode": "companion_first"},
             ),
             pending_confirmation=pending_confirmation,
             active_task_candidate=active_task_candidate,
@@ -122,9 +149,22 @@ class TurnService:
             turn_state.pending_confirmation = None
             if resolution.task is not None:
                 turn_state.task = resolution.task
-                self._sync_task(turn_state.task)
+                self._task_manager.sync_task(turn_state.task)
             if resolution.disposition == "confirmed" and resolution.action_payload is not None:
                 action_payload = dict(resolution.action_payload)
+                capabilities = self._services.capability_registry.resolve(request)
+                capability = self._execution_manager.resolve_capability(capabilities, action_payload["capability_id"])
+                if capability is not None and capability.handler_kind == "internal":
+                    execution_response = self._execute_confirmed_internal_capability(
+                        request=request,
+                        turn_state=turn_state,
+                        capability=capability,
+                        action_payload=action_payload,
+                    )
+                    if execution_response is not None:
+                        return execution_response
+                    return self._advance(request, turn_state)
+
                 continuation_id = action_payload["continuation_id"]
                 turn_state.pending_action_batch = [action_payload]
                 turn_state.step_index = 1
@@ -203,7 +243,7 @@ class TurnService:
 
         for result in request.action_results:
             capability_id = self._lookup_capability_id(turn_state, result.intent_id)
-            observation = self._services.execution_orchestrator.register_observation(
+            observation = self._execution_manager.register_observation(
                 turn_state,
                 source=capability_id,
                 payload=result.observations,
@@ -265,7 +305,7 @@ class TurnService:
 
         while turn_state.step_index < min(request.limits.max_agent_steps, self._services.settings.max_agent_steps):
             current_step = turn_state.step_index + 1
-            context_result = self._services.context_engine.build_messages(
+            context_result = self._context_manager.build_messages(
                 request=request,
                 turn_state=turn_state,
                 capability_descriptors=[capability.descriptor for capability in capabilities],
@@ -292,7 +332,7 @@ class TurnService:
                 step_index=current_step,
             )
             try:
-                provider_result = self._services.decision_engine.decide(context_result.messages)
+                provider_result = self._deliberation_engine.decide(context_result.messages)
             except ProviderError as exc:
                 self._services.debug.record_event(
                     request.turn_id,
@@ -359,9 +399,22 @@ class TurnService:
                 {**decision.model_dump(), "task_id": turn_state.task.task_id},
                 step_index=current_step,
             )
-            self._apply_task_selection(request.turn_id, turn_state, decision)
+            selection_payload = self._task_manager.apply_task_selection(request.turn_id, turn_state, decision)
+            if selection_payload is not None:
+                self._services.store.update_turn_state(
+                    request.turn_id,
+                    turn_state.to_runtime_dict(),
+                    task_id=turn_state.task.task_id,
+                )
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "task_selected",
+                    selection_payload,
+                    step_index=turn_state.step_index,
+                )
+            self._task_manager.classify_task_patch(turn_state, decision)
 
-            if decision.mode == "final_reply":
+            if decision.intent in {"reply", "guide"} or decision.mode == "final_reply":
                 final_reply = decision.final_reply or "I do not have a better response yet."
                 return self._return_final_reply(
                     request.turn_id,
@@ -374,27 +427,152 @@ class TurnService:
                     request=request,
                 )
 
-            capability = self._services.capability_registry.get(capabilities, decision.capability_id or "")
+            capability_request = decision.capability_request
+            if decision.intent == "await_confirmation":
+                if capability_request is None or not capability_request.capability_id:
+                    detail = (
+                        decision.confirmation_request.effect_summary
+                        if decision.confirmation_request is not None
+                        else "这一步要先确认，不过我还没把要执行的动作整理成可继续的计划。"
+                    )
+                    return self._return_final_reply(
+                        request.turn_id,
+                        request.session_ref,
+                        detail,
+                        trace_events
+                        + [
+                            TraceEventPayload(
+                                status_label="待确认",
+                                status_tone="warning",
+                                title="需要先确认",
+                                detail=detail,
+                                secondary=[TraceChipPayload(label=f"第 {current_step} 步", tone="muted")],
+                            )
+                        ],
+                        status="completed",
+                        step_index=current_step,
+                        preserve_task_status=True,
+                        turn_state=turn_state,
+                        request=request,
+                    )
+
+                capability = self._execution_manager.resolve_capability(capabilities, capability_request.capability_id)
+                if capability is None or capability.handler_kind != "bridge":
+                    detail = (
+                        decision.confirmation_request.effect_summary
+                        if decision.confirmation_request is not None
+                        else capability_request.effect_summary
+                        or "这一步要先确认。"
+                    )
+                    return self._return_final_reply(
+                        request.turn_id,
+                        request.session_ref,
+                        f"{detail} 不过我现在还不能把这一步安全地挂起继续执行。",
+                        trace_events
+                        + [
+                            TraceEventPayload(
+                                status_label="待确认",
+                                status_tone="warning",
+                                title="需要先确认",
+                                detail=detail,
+                                secondary=[TraceChipPayload(label=f"第 {current_step} 步", tone="muted")],
+                            )
+                        ],
+                        status="completed",
+                        step_index=current_step,
+                        preserve_task_status=True,
+                        turn_state=turn_state,
+                        request=request,
+                    )
+
+                resolved_arguments = self._execution_manager.resolve_arguments(
+                    turn_state,
+                    capability,
+                    capability_request.arguments,
+                )
+                continuation_id = str(uuid.uuid4())
+                action_request_payload = self._execution_manager.bridge_action_request(
+                    capability,
+                    resolved_arguments,
+                    (
+                        decision.confirmation_request.effect_summary
+                        if decision.confirmation_request is not None
+                        else capability_request.effect_summary
+                    ),
+                    True,
+                )
+                action_request_payload["continuation_id"] = continuation_id
+                return self._queue_pending_confirmation(
+                    request=request,
+                    turn_state=turn_state,
+                    trace_events=trace_events,
+                    current_step=current_step,
+                    capability=capability,
+                    action_request_payload=action_request_payload,
+                )
+
+            if decision.intent in {"delegate_explore", "delegate_plan"} and decision.delegate_request is not None:
+                delegate_result = self._delegate_runtime.run(decision.delegate_request, turn_state)
+                self._task_manager.apply_task_patch(turn_state, delegate_result.task_patch)
+                observation = self._execution_manager.register_observation(
+                    turn_state,
+                    source=f"agent.{delegate_result.role}.delegate",
+                    payload={
+                        "summary": delegate_result.summary.summary,
+                        "delegate_result": delegate_result.model_dump(),
+                        "artifact_refs": delegate_result.artifact_refs,
+                        "task_patch": delegate_result.task_patch,
+                    },
+                    kind="delegate_result",
+                )
+                turn_state.delegate_history.append(delegate_result.model_dump())
+                turn_state.step_index += 1
+                turn_state.working_memory.current_status = f"delegate_{delegate_result.role}_completed"
+                self._task_manager.sync_task(turn_state.task)
+                self._services.store.update_turn_state(
+                    request.turn_id,
+                    turn_state.to_runtime_dict(),
+                    task_id=turn_state.task.task_id,
+                )
+                self._services.store.log_step_event(
+                    request.turn_id,
+                    turn_state.step_index,
+                    "delegate_result",
+                    delegate_result.model_dump(),
+                )
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "delegate_result",
+                    {"delegate": delegate_result.model_dump(), "observation": observation.context_entry()},
+                    step_index=current_step,
+                )
+                trace_events.append(self._internal_finish_trace_stub(delegate_result.summary.summary, current_step))
+                continue
+
+            capability = self._execution_manager.resolve_capability(
+                capabilities,
+                capability_request.capability_id if capability_request is not None else (decision.capability_id or ""),
+            )
             if capability is None:
                 return self._return_final_reply(
                     request.turn_id,
                     request.session_ref,
-                    f"Mina selected an unknown capability: {decision.capability_id}",
+                    f"Mina selected an unknown capability: {capability_request.capability_id if capability_request else decision.capability_id}",
                     trace_events,
                     status="failed",
                     step_index=current_step,
                     debug_payload={
                         "reason": "unknown_capability",
-                        "capability_id": decision.capability_id,
+                        "capability_id": capability_request.capability_id if capability_request else decision.capability_id,
                     },
                     turn_state=turn_state,
                     request=request,
                 )
 
-            resolved_arguments = self._services.execution_orchestrator.resolve_capability_arguments(
+            resolved_arguments = self._execution_manager.resolve_arguments(
                 turn_state,
-                capability.descriptor.args_schema,
-                decision.arguments,
+                capability,
+                capability_request.arguments if capability_request is not None else decision.arguments,
             )
             self._services.debug.record_event(
                 request.turn_id,
@@ -403,11 +581,39 @@ class TurnService:
                 step_index=current_step,
             )
 
+            requires_confirmation = (
+                getattr(capability_request, "requires_confirmation", False)
+                or getattr(decision, "requires_confirmation", False)
+                or capability.descriptor.requires_confirmation
+            )
+            effect_summary = (
+                getattr(capability_request, "effect_summary", None)
+                or getattr(decision, "effect_summary", None)
+                or capability.descriptor.description
+            )
+            if requires_confirmation:
+                action_request_payload = self._execution_manager.bridge_action_request(
+                    capability,
+                    resolved_arguments,
+                    effect_summary,
+                    True,
+                )
+                if capability.handler_kind == "bridge":
+                    action_request_payload["continuation_id"] = str(uuid.uuid4())
+                return self._queue_pending_confirmation(
+                    request=request,
+                    turn_state=turn_state,
+                    trace_events=trace_events,
+                    current_step=current_step,
+                    capability=capability,
+                    action_request_payload=action_request_payload,
+                )
+
             if capability.handler_kind == "internal":
                 trace_events.append(self._internal_start_trace(capability, resolved_arguments, current_step))
                 started = perf_counter()
                 try:
-                    observation_payload = self._services.capability_registry.execute_internal(
+                    observation_payload = self._execution_manager.execute_internal(
                         capability,
                         resolved_arguments,
                         runtime_state,
@@ -444,17 +650,17 @@ class TurnService:
                     )
 
                 latency_ms = int((perf_counter() - started) * 1000)
-                observation = self._services.execution_orchestrator.register_observation(
+                observation = self._execution_manager.register_observation(
                     turn_state,
                     source=capability.descriptor.id,
                     payload=observation_payload,
                     kind="internal_capability",
                 )
-                self._apply_task_patch(turn_state, observation_payload.get("task_patch"))
+                self._task_manager.apply_task_patch(turn_state, observation_payload.get("task_patch"))
                 turn_state.step_index += 1
                 turn_state.working_memory.current_status = "internal_capability_completed"
                 turn_state.working_memory.next_best_step = "Continue reasoning with the new observation."
-                self._sync_task(turn_state.task)
+                self._task_manager.sync_task(turn_state.task)
                 self._services.store.update_turn_state(
                     request.turn_id,
                     turn_state.to_runtime_dict(),
@@ -475,71 +681,21 @@ class TurnService:
                 trace_events.append(self._internal_finish_trace(capability, observation, turn_state.step_index))
                 continue
 
-            continuation_id = str(uuid.uuid4())
-            action_request_payload = self._services.capability_registry.bridge_action_request(
+            action_request_payload = self._execution_manager.bridge_action_request(
                 capability,
                 resolved_arguments,
-                decision.effect_summary,
-                decision.requires_confirmation,
+                effect_summary,
+                False,
             )
+            continuation_id = str(uuid.uuid4())
             action_request_payload["continuation_id"] = continuation_id
-            if action_request_payload["requires_confirmation"]:
-                confirmation_id = str(uuid.uuid4())
-                turn_state.task.status = "awaiting_confirmation"
-                turn_state.task.requires_confirmation = True
-                self._sync_task(turn_state.task)
-                self._services.store.put_pending_confirmation(
-                    request.session_ref,
-                    confirmation_id,
-                    action_request_payload["effect_summary"],
-                    action_request_payload,
-                    task_id=turn_state.task.task_id,
-                )
-                self._services.debug.record_event(
-                    request.turn_id,
-                    "capability_finished",
-                    self._bridge_capability_finished_payload(
-                        capability,
-                        action_request_payload,
-                        "awaiting_confirmation",
-                        current_step,
-                        turn_state.task.task_id,
-                        confirmation_id=confirmation_id,
-                    ),
-                    step_index=current_step,
-                )
-                return self._return_final_reply(
-                    request.turn_id,
-                    request.session_ref,
-                    "这一步我已经替你想好了，不过要先等你确认。",
-                    trace_events
-                    + [
-                        TraceEventPayload(
-                            status_label="待确认",
-                            status_tone="warning",
-                            title=self._capability_title(capability.descriptor.id),
-                            detail=action_request_payload["effect_summary"],
-                            secondary=[
-                                TraceChipPayload(label=f"第 {current_step} 步", tone="muted"),
-                                TraceChipPayload(label="高风险计划", tone="warning"),
-                            ],
-                        )
-                    ],
-                    status="completed",
-                    step_index=current_step,
-                    pending_confirmation_id=confirmation_id,
-                    pending_confirmation_effect_summary=action_request_payload["effect_summary"],
-                    preserve_task_status=True,
-                    turn_state=turn_state,
-                    request=request,
-                )
 
             turn_state.pending_action_batch = [action_request_payload]
             turn_state.step_index += 1
             turn_state.task.status = "in_progress"
             turn_state.task.requires_confirmation = False
             turn_state.working_memory.current_status = "awaiting_bridge_result"
-            self._sync_task(turn_state.task)
+            self._task_manager.sync_task(turn_state.task)
             self._services.store.put_continuation(
                 continuation_id,
                 request.turn_id,
@@ -579,100 +735,23 @@ class TurnService:
         )
 
     def _prepare_task(self, request: TurnStartRequest, pending_confirmation: dict[str, Any] | None) -> TaskState:
-        if pending_confirmation is not None and pending_confirmation.get("task_id"):
-            existing = self._services.store.get_task(str(pending_confirmation["task_id"]))
-            if existing is not None:
-                return self._task_state_from_record(existing)
-
-        task_record = self._services.store.create_task(
-            request.session_ref,
-            request.player.name,
-            request.user_message,
-            task_type="user_request",
-            status="analyzing",
-            priority="normal",
-            risk_class="read_only",
-            summary={"created_from": "turn_start"},
-        )
-        return self._task_state_from_record(task_record)
+        return self._task_manager.prepare_task(request, pending_confirmation)
 
     def _load_active_task_candidate(
         self,
         request: TurnStartRequest,
         pending_confirmation: dict[str, Any] | None,
     ) -> TaskState | None:
-        if pending_confirmation is not None:
-            return None
-        active_task = self._services.store.get_active_task(request.session_ref)
-        if active_task is None:
-            return None
-        return self._task_state_from_record(active_task)
+        return self._task_manager.load_active_task_candidate(request, pending_confirmation)
 
     def _task_state_from_record(self, record: dict[str, Any]) -> TaskState:
-        artifacts = [ArtifactRef.model_validate(artifact) for artifact in record.get("artifacts", [])]
-        allowed_step_fields = set(TaskStepState.model_fields.keys())
-        steps = [
-            TaskStepState.model_validate(
-                {
-                    key: value
-                    for key, value in step.items()
-                    if key in allowed_step_fields
-                }
-            )
-            for step in self._services.store.list_task_steps(record["task_id"])
-        ]
-        return TaskState(
-            task_id=record["task_id"],
-            task_type=record["task_type"],
-            owner_player=record["owner_player"],
-            goal=record["goal"],
-            status=record["status"],
-            priority=record["priority"],
-            risk_class=record["risk_class"],
-            requires_confirmation=record["requires_confirmation"],
-            constraints=record.get("constraints", []),
-            artifacts=artifacts,
-            steps=steps,
-            summary=record.get("summary", {}),
-            created_at=record.get("created_at"),
-            updated_at=record.get("updated_at"),
-        )
+        return self._task_manager.task_state_from_record(record)
 
     def _sync_task(self, task: TaskState) -> None:
-        self._services.store.update_task(
-            task.task_id,
-            goal=task.goal,
-            status=task.status,
-            priority=task.priority,
-            risk_class=task.risk_class,
-            requires_confirmation=task.requires_confirmation,
-            constraints=task.constraints,
-            artifacts=[artifact.model_dump() for artifact in task.artifacts],
-            summary=task.summary,
-        )
-        task.steps = [
-            TaskStepState.model_validate(step)
-            for step in self._services.store.replace_task_steps(
-                task.task_id,
-                [step.model_dump() for step in task.steps],
-            )
-        ]
+        self._task_manager.sync_task(task)
 
     def _apply_task_patch(self, turn_state: TurnState, patch: dict[str, Any] | None) -> None:
-        if not isinstance(patch, dict):
-            return
-        status = patch.get("status")
-        if isinstance(status, str):
-            turn_state.task.status = status  # type: ignore[assignment]
-        steps = patch.get("steps")
-        if isinstance(steps, list):
-            turn_state.task.steps = [TaskStepState.model_validate(step) for step in steps]
-        summary = patch.get("summary")
-        if isinstance(summary, dict):
-            turn_state.task.summary.update(summary)
-            next_step = summary.get("next_best_step")
-            if isinstance(next_step, str):
-                turn_state.working_memory.next_best_step = next_step
+        self._task_manager.apply_task_patch(turn_state, patch)
 
     def _record_memory_writes(
         self,
@@ -683,69 +762,18 @@ class TurnService:
         status: str,
         pending_confirmation_resolved: str | None = None,
     ) -> None:
-        writes = self._services.memory_policy.derive_writes(
-            session_ref=request.session_ref,
-            task=turn_state.task,
-            user_message=request.user_message,
+        self._memory_manager.record_turn_memories(
+            request,
+            turn_state,
             final_reply=final_reply,
-            observations=[observation.context_entry() for observation in turn_state.observations],
-            pending_confirmation_resolved=pending_confirmation_resolved,
-            artifact_refs=turn_state.task.artifacts,
             status=status,
+            pending_confirmation_resolved=pending_confirmation_resolved,
         )
-        for semantic in writes.semantic_writes:
-            self._services.store.add_semantic_memory(
-                request.session_ref,
-                semantic["memory_type"],
-                semantic["memory_key"],
-                semantic["value"],
-                semantic["summary"],
-                confidence=float(semantic.get("confidence", 1.0)),
-                metadata=semantic.get("metadata"),
-            )
-        for episode in writes.episodic_writes:
-            self._services.store.add_episodic_memory(
-                request.session_ref,
-                episode["summary"],
-                tags=list(episode.get("tags", [])),
-                task_id=episode.get("task_id"),
-                artifact_refs=list(episode.get("artifact_refs", [])),
-                metadata=episode.get("metadata"),
-            )
 
     def _apply_task_selection(self, turn_id: str, turn_state: TurnState, decision: Any) -> None:
-        selection = getattr(decision, "task_selection", None)
-        if selection != "reuse_active":
-            if selection == "keep_current":
-                turn_state.active_task_candidate = None
+        payload = self._task_manager.apply_task_selection(turn_id, turn_state, decision)
+        if payload is None:
             return
-
-        candidate = turn_state.active_task_candidate
-        if candidate is None or candidate.task_id == turn_state.task.task_id:
-            turn_state.active_task_candidate = None
-            return
-
-        provisional_task = turn_state.task
-        provisional_summary = dict(provisional_task.summary)
-        provisional_summary.update(
-            {
-                "superseded_by_task_id": candidate.task_id,
-                "superseded_reason": "model_selected_active_task",
-            }
-        )
-        self._services.store.update_task(
-            provisional_task.task_id,
-            status="canceled",
-            summary=provisional_summary,
-        )
-
-        turn_state.task = candidate.model_copy(deep=True)
-        turn_state.active_task_candidate = None
-        turn_state.working_memory.primary_goal = turn_state.task.goal
-        turn_state.working_memory.current_status = turn_state.task.status
-        next_best_step = str(turn_state.task.summary.get("next_best_step", "")).strip()
-        if next_best_step:
-            turn_state.working_memory.next_best_step = next_best_step
         self._services.store.update_turn_state(
             turn_id,
             turn_state.to_runtime_dict(),
@@ -754,11 +782,7 @@ class TurnService:
         self._services.debug.record_event(
             turn_id,
             "task_selected",
-            {
-                "selection": "reuse_active",
-                "task_id": turn_state.task.task_id,
-                "superseded_task_id": provisional_task.task_id,
-            },
+            payload,
             step_index=turn_state.step_index,
         )
 
@@ -826,7 +850,7 @@ class TurnService:
             turn_state.task.status = "completed"
         if status == "failed":
             turn_state.task.status = "failed"
-        self._sync_task(turn_state.task)
+        self._task_manager.sync_task(turn_state.task)
         self._services.store.finish_turn(turn_id, final_reply, status=status)
         self._record_memory_writes(
             request,
@@ -851,6 +875,176 @@ class TurnService:
             if payload["intent_id"] == intent_id:
                 return payload["risk_class"]
         return "read_only"
+
+    def _execute_confirmed_internal_capability(
+        self,
+        *,
+        request: TurnStartRequest,
+        turn_state: TurnState,
+        capability: Any,
+        action_payload: dict[str, Any],
+    ) -> TurnResponse | None:
+        resolved_arguments = self._execution_manager.resolve_arguments(
+            turn_state,
+            capability,
+            dict(action_payload.get("arguments", {})),
+        )
+        runtime_state = RuntimeState(
+            request=request,
+            turn_state=turn_state,
+            pending_confirmation=None,
+        )
+        self._services.debug.record_event(
+            request.turn_id,
+            "capability_started",
+            {
+                "capability_id": capability.descriptor.id,
+                "handler_kind": capability.handler_kind,
+                "kind": capability.descriptor.kind,
+                "risk_class": capability.descriptor.risk_class,
+                "execution_mode": capability.descriptor.execution_mode,
+                "requires_confirmation": True,
+                "effect_summary": action_payload.get("effect_summary") or capability.descriptor.description,
+                "arguments": resolved_arguments,
+                "task_id": turn_state.task.task_id,
+                "confirmation_resolution": "confirmed",
+            },
+            step_index=1,
+        )
+        started = perf_counter()
+        try:
+            observation_payload = self._execution_manager.execute_internal(
+                capability,
+                resolved_arguments,
+                runtime_state,
+            )
+        except Exception as exc:
+            latency_ms = int((perf_counter() - started) * 1000)
+            self._services.debug.record_event(
+                request.turn_id,
+                "capability_finished",
+                {
+                    "status": "failed",
+                    "capability_id": capability.descriptor.id,
+                    "handler_kind": capability.handler_kind,
+                    "latency_ms": latency_ms,
+                    "error": str(exc),
+                    "task_id": turn_state.task.task_id,
+                    "confirmation_resolution": "confirmed",
+                },
+                step_index=1,
+            )
+            return self._return_final_reply(
+                request.turn_id,
+                request.session_ref,
+                f"Mina internal capability failed: {exc}",
+                [],
+                status="failed",
+                step_index=1,
+                debug_payload={
+                    "reason": "internal_capability_error",
+                    "capability_id": capability.descriptor.id,
+                    "error": str(exc),
+                    "confirmation_resolution": "confirmed",
+                },
+                turn_state=turn_state,
+                request=request,
+            )
+
+        latency_ms = int((perf_counter() - started) * 1000)
+        observation = self._execution_manager.register_observation(
+            turn_state,
+            source=capability.descriptor.id,
+            payload=observation_payload,
+            kind="internal_capability",
+        )
+        self._task_manager.apply_task_patch(turn_state, observation_payload.get("task_patch"))
+        turn_state.step_index = max(turn_state.step_index, 1)
+        turn_state.working_memory.current_status = "internal_capability_completed"
+        turn_state.working_memory.next_best_step = "Continue reasoning with the new observation."
+        self._task_manager.sync_task(turn_state.task)
+        self._services.store.update_turn_state(
+            request.turn_id,
+            turn_state.to_runtime_dict(),
+            task_id=turn_state.task.task_id,
+        )
+        self._services.store.log_step_event(
+            request.turn_id,
+            turn_state.step_index,
+            "internal_capability",
+            observation.model_dump(),
+        )
+        self._services.debug.record_event(
+            request.turn_id,
+            "capability_finished",
+            self._internal_capability_finished_payload(capability, observation, latency_ms, turn_state.task.task_id),
+            step_index=1,
+        )
+        return None
+
+    def _queue_pending_confirmation(
+        self,
+        *,
+        request: TurnStartRequest,
+        turn_state: TurnState,
+        trace_events: list[TraceEventPayload],
+        current_step: int,
+        capability: Any,
+        action_request_payload: dict[str, Any],
+    ) -> TurnResponse:
+        confirmation_id = str(uuid.uuid4())
+        turn_state.task.status = "awaiting_confirmation"
+        turn_state.task.requires_confirmation = True
+        turn_state.working_memory.current_status = "awaiting_confirmation"
+        turn_state.working_memory.open_loops = [
+            f"Wait for the player's confirmation about: {action_request_payload['effect_summary']}"
+        ]
+        self._task_manager.sync_task(turn_state.task)
+        self._services.store.put_pending_confirmation(
+            request.session_ref,
+            confirmation_id,
+            action_request_payload["effect_summary"],
+            action_request_payload,
+            task_id=turn_state.task.task_id,
+        )
+        self._services.debug.record_event(
+            request.turn_id,
+            "capability_finished",
+            self._bridge_capability_finished_payload(
+                capability,
+                action_request_payload,
+                "awaiting_confirmation",
+                current_step,
+                turn_state.task.task_id,
+                confirmation_id=confirmation_id,
+            ),
+            step_index=current_step,
+        )
+        return self._return_final_reply(
+            request.turn_id,
+            request.session_ref,
+            "这一步我已经替你想好了，不过要先等你确认。",
+            trace_events
+            + [
+                TraceEventPayload(
+                    status_label="待确认",
+                    status_tone="warning",
+                    title=self._capability_title(capability.descriptor.id),
+                    detail=action_request_payload["effect_summary"],
+                    secondary=[
+                        TraceChipPayload(label=f"第 {current_step} 步", tone="muted"),
+                        TraceChipPayload(label="高风险计划", tone="warning"),
+                    ],
+                )
+            ],
+            status="completed",
+            step_index=current_step,
+            pending_confirmation_id=confirmation_id,
+            pending_confirmation_effect_summary=action_request_payload["effect_summary"],
+            preserve_task_status=True,
+            turn_state=turn_state,
+            request=request,
+        )
 
     def _capabilities_resolved_payload(self, capabilities: list[Any]) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
@@ -901,14 +1095,23 @@ class TurnService:
         arguments: dict[str, Any],
         task_id: str,
     ) -> dict[str, Any]:
+        capability_request = getattr(decision, "capability_request", None)
         return {
             "capability_id": capability.descriptor.id,
             "handler_kind": capability.handler_kind,
             "kind": capability.descriptor.kind,
             "risk_class": capability.descriptor.risk_class,
             "execution_mode": capability.descriptor.execution_mode,
-            "requires_confirmation": decision.requires_confirmation or capability.descriptor.requires_confirmation,
-            "effect_summary": decision.effect_summary or capability.descriptor.description,
+            "requires_confirmation": (
+                getattr(capability_request, "requires_confirmation", False)
+                or getattr(decision, "requires_confirmation", False)
+                or capability.descriptor.requires_confirmation
+            ),
+            "effect_summary": (
+                getattr(capability_request, "effect_summary", None)
+                or getattr(decision, "effect_summary", None)
+                or capability.descriptor.description
+            ),
             "arguments": arguments,
             "task_id": task_id,
         }
@@ -989,6 +1192,15 @@ class TurnService:
             title=self._capability_title(capability.descriptor.id),
             detail=observation.summary,
             secondary=secondary,
+        )
+
+    def _internal_finish_trace_stub(self, detail: str, step_index: int) -> TraceEventPayload:
+        return TraceEventPayload(
+            status_label="已完成",
+            status_tone="success",
+            title="委托结果已返回",
+            detail=detail,
+            secondary=[TraceChipPayload(label=f"第 {step_index} 步", tone="muted")],
         )
 
     def _capability_title(self, capability_id: str) -> str:

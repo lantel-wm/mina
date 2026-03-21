@@ -130,13 +130,67 @@ class CapabilityDescriptor(MinaBaseModel):
     description: str
 
 
+AgentRole = Literal["companion", "explore", "plan", "action"]
+DecisionIntent = Literal[
+    "reply",
+    "guide",
+    "inspect",
+    "retrieve",
+    "delegate_explore",
+    "delegate_plan",
+    "execute",
+    "await_confirmation",
+]
+
+
+class CapabilityRequest(MinaBaseModel):
+    capability_id: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    effect_summary: str | None = None
+    requires_confirmation: bool = False
+
+
+class ConfirmationRequest(MinaBaseModel):
+    effect_summary: str
+    reason: str | None = None
+
+
+class DelegateRequest(MinaBaseModel):
+    role: AgentRole
+    objective: str
+    context_hints: list[str] = Field(default_factory=list)
+
+
+class DelegateSummary(MinaBaseModel):
+    summary: str
+    unresolved_questions: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    stop_reason: str | None = None
+
+
+class DelegateResult(MinaBaseModel):
+    role: AgentRole
+    objective: str
+    summary: DelegateSummary
+    task_patch: dict[str, Any] = Field(default_factory=dict)
+    artifact_refs: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ModelDecision(MinaBaseModel):
-    mode: Literal["final_reply", "call_capability"]
+    mode: Literal["final_reply", "call_capability"] | None = None
+    intent: DecisionIntent | None = None
     task_selection: Literal["keep_current", "reuse_active"] | None = None
+    response_style: Literal["companion", "guide", "concise", "neutral"] | None = None
     final_reply: str | None = None
     capability_id: str | None = None
     arguments: dict[str, Any] = Field(default_factory=dict)
     effect_summary: str | None = None
     requires_confirmation: bool = False
+    delegate_role: AgentRole | None = None
+    delegate_objective: str | None = None
+    capability_request: CapabilityRequest | None = None
+    delegate_request: DelegateRequest | None = None
+    task_update: dict[str, Any] = Field(default_factory=dict)
+    confirmation_request: ConfirmationRequest | None = None
     confidence: float | None = None
     notes: str | None = None
