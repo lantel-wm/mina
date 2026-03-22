@@ -117,8 +117,8 @@ class ContextManager:
                     "capability_brief",
                     "user",
                     "resolved_capability_descriptors",
-                    "minimal_capability_catalog",
-                    [self._capability_payload(descriptor) for descriptor in capability_descriptors],
+                    "exact_capability_id_list",
+                    [descriptor.id for descriptor in capability_descriptors],
                     priority=40,
                 ),
             ],
@@ -156,7 +156,9 @@ class ContextManager:
             "Delegate roles are strict: companion decides, explore inspects, plan proposes, bridge actions execute only in the main turn.\n"
             "Delegate turns may not call bridge actions and may not delegate recursively.\n"
             "Do not delegate explore repeatedly when no new facts were found. If live inspection is still needed and a visible read capability matches, call it directly.\n"
+            "capability_brief is the authoritative exact list of callable capability ids for this turn.\n"
             "Never invent capability ids. Use an id from capability_brief exactly.\n"
+            "Unknown capability ids are invalid. If no visible capability matches, do not guess an id; reply, guide, or delegate_plan instead.\n"
             "Return JSON only.\n"
             'Reply/guide with {"intent":"reply","final_reply":"..."} or {"intent":"guide","final_reply":"..."}.\n'
             'Inspect/retrieve/execute with {"intent":"execute","capability_request":{"capability_id":"...","arguments":{},"effect_summary":"...","requires_confirmation":false}}.\n'
@@ -189,12 +191,17 @@ class ContextManager:
                 "Delegate exploration or planning when it reduces uncertainty without polluting the main context.",
                 "Bridge actions remain in the main turn only.",
             ],
+            "runtime_notes": turn_state.runtime_notes[-4:],
         }
 
     def _normalize_snapshot(self, scoped_snapshot: dict[str, Any]) -> dict[str, Any]:
         return {
             "player": self._coerce_mapping(scoped_snapshot.get("player")),
             "world": self._coerce_mapping(scoped_snapshot.get("world")),
+            "scene": self._coerce_mapping(scoped_snapshot.get("scene")),
+            "interactables": self._coerce_mapping(scoped_snapshot.get("interactables")),
+            "social": self._coerce_mapping(scoped_snapshot.get("social")),
+            "technical": self._coerce_mapping(scoped_snapshot.get("technical")),
             "target_block": self._coerce_mapping(scoped_snapshot.get("target_block") or scoped_snapshot.get("target")),
             "recent_events": scoped_snapshot.get("recent_events") if isinstance(scoped_snapshot.get("recent_events"), list) else [],
             "server_rules_refs": self._coerce_mapping(scoped_snapshot.get("server_rules_refs")),
@@ -205,6 +212,10 @@ class ContextManager:
         return {
             "player": self._slice_part(normalized_snapshot.get("player")),
             "world": self._slice_part(normalized_snapshot.get("world")),
+            "scene": self._slice_part(normalized_snapshot.get("scene")),
+            "interactables": self._slice_part(normalized_snapshot.get("interactables")),
+            "social": self._slice_part(normalized_snapshot.get("social")),
+            "technical": self._slice_part(normalized_snapshot.get("technical")),
             "target_block": self._slice_part(normalized_snapshot.get("target_block")),
             "recent_events": self._slice_recent_events(normalized_snapshot.get("recent_events")),
             "server_rules_refs": self._slice_part(normalized_snapshot.get("server_rules_refs")),
@@ -354,16 +365,6 @@ class ContextManager:
             "continuity_hint": continuity_hint,
         }
 
-    def _capability_payload(self, descriptor: CapabilityDescriptor) -> dict[str, Any]:
-        return {
-            "id": descriptor.id,
-            "kind": descriptor.kind,
-            "risk_class": descriptor.risk_class,
-            "execution_mode": descriptor.execution_mode,
-            "requires_confirmation": descriptor.requires_confirmation,
-            "description": descriptor.description,
-        }
-
     def _trim_pack(self, pack: ContextPack) -> ContextPack:
         while pack.total_chars() > self._settings.context_char_budget:
             progressed = False
@@ -383,6 +384,8 @@ class ContextManager:
                 slot = next((item for item in pack.active_slots() if item.name == slot_name), None)
                 if slot is None:
                     continue
+                if slot.name == "capability_brief":
+                    continue
                 self._preview_truncate_slot(slot, pack.trim_policy.hard_floor_chars)
                 if pack.total_chars() <= self._settings.context_char_budget:
                     break
@@ -390,9 +393,7 @@ class ContextManager:
 
     def _reduce_slot(self, slot: ContextSlot) -> bool:
         before = slot.full_chars
-        if slot.name == "capability_brief":
-            slot.content = self._reduce_capability_brief(slot.content)
-        elif slot.name == "recoverable_history":
+        if slot.name == "recoverable_history":
             slot.content = self._reduce_recoverable_history(slot.content)
         elif slot.name == "scene_slice":
             slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=6, max_str_chars=260)
@@ -407,25 +408,6 @@ class ContextManager:
             slot.truncated = True
             return True
         return False
-
-    def _reduce_capability_brief(self, content: Any) -> Any:
-        if not isinstance(content, list):
-            return content
-        if len(content) > 6:
-            return content[:6]
-        reduced: list[dict[str, Any]] = []
-        changed = False
-        for entry in content:
-            if not isinstance(entry, dict):
-                reduced.append(entry)
-                continue
-            description = str(entry.get("description", ""))
-            next_entry = dict(entry)
-            if len(description) > 96:
-                next_entry["description"] = description[:96]
-                changed = True
-            reduced.append(next_entry)
-        return reduced if changed else content
 
     def _reduce_recoverable_history(self, content: Any) -> Any:
         if not isinstance(content, dict):

@@ -37,6 +37,10 @@ class BridgeModelsTest {
                 false,
                 argsSchema,
                 resultSchema,
+                "world",
+                true,
+                "semantic",
+                "ambient",
                 (player, role) -> role == PlayerRole.READ_ONLY,
                 (player, arguments) -> new CapabilityResult(Map.of("target_found", true), "ok")
         );
@@ -51,6 +55,10 @@ class BridgeModelsTest {
         assertFalse(payload.requires_confirmation);
         assertSame(argsSchema, payload.args_schema);
         assertSame(resultSchema, payload.result_schema);
+        assertEquals("world", payload.domain);
+        assertTrue(payload.preferred);
+        assertEquals("semantic", payload.semantic_level);
+        assertEquals("ambient", payload.freshness_hint);
     }
 
     @Test

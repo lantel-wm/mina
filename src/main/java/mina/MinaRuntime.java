@@ -1,22 +1,40 @@
 package mina;
 
 import mina.bridge.AgentServiceClient;
+import mina.capability.CarpetObservationBackend;
 import mina.capability.CapabilityExecutorRegistry;
+import mina.capability.DefaultCarpetObservationBackend;
+import mina.capability.DirectWorldReader;
+import mina.capability.ServerDirectWorldReader;
+import mina.capability.ServerVanillaCommandBackend;
+import mina.capability.VanillaCommandBackend;
 import mina.command.MinaCommand;
 import mina.config.MinaConfig;
+import mina.context.EnvironmentAssessmentProvider;
 import mina.context.GameContextCollector;
-import mina.context.PlayerSnapshotProvider;
-import mina.context.RecentEventBuffer;
-import mina.context.RecentEventsProvider;
+import mina.context.InteractableScanProvider;
+import mina.context.PlayerStateProvider;
+import mina.context.RecentEventTracker;
 import mina.context.TargetBlockSnapshotProvider;
+import mina.context.ThreatAssessmentProvider;
+import mina.context.WorldStateProvider;
 import mina.execution.PendingTurnRegistry;
 import mina.execution.PendingConfirmationRegistry;
 import mina.execution.TurnCoordinator;
 import mina.policy.ExecutionGuard;
 import mina.policy.PermissionResolver;
+import mina.context.RiskStateProvider;
 import mina.context.WorldSnapshotProvider;
+import mina.context.SocialStateProvider;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.item.ItemStack;
+import net.minecraft.server.world.ServerWorld;
+import net.fabricmc.loader.api.FabricLoader;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -34,7 +52,7 @@ public final class MinaRuntime {
     private PermissionResolver permissionResolver;
     private CapabilityExecutorRegistry capabilityRegistry;
     private GameContextCollector contextCollector;
-    private RecentEventBuffer recentEventBuffer;
+    private RecentEventTracker recentEventTracker;
     private AgentServiceClient agentServiceClient;
     private ExecutionGuard executionGuard;
     private TurnCoordinator turnCoordinator;
@@ -61,15 +79,56 @@ public final class MinaRuntime {
         this.pendingTurns = new PendingTurnRegistry();
         this.pendingConfirmations = new PendingConfirmationRegistry();
         this.permissionResolver = new PermissionResolver(config);
-        this.capabilityRegistry = new CapabilityExecutorRegistry(config);
-        this.recentEventBuffer = new RecentEventBuffer(24);
+        this.recentEventTracker = new RecentEventTracker(
+                48,
+                config.entityScanIntervalTicks(),
+                config.longDangerThresholdTicks()
+        );
+        PlayerStateProvider playerStateProvider = new PlayerStateProvider(config.inventorySummaryLimit());
+        WorldStateProvider worldStateProvider = new WorldStateProvider();
+        WorldSnapshotProvider ruleSnapshotProvider = new WorldSnapshotProvider(config.serverRuleSummaryLimit());
+        ThreatAssessmentProvider threatAssessmentProvider = new ThreatAssessmentProvider(
+                config.entityScanRadius(),
+                config.entityScanLimit()
+        );
+        InteractableScanProvider interactableScanProvider = new InteractableScanProvider(
+                config.interactableScanRadius(),
+                config.interactableScanVerticalRange()
+        );
+        SocialStateProvider socialStateProvider = new SocialStateProvider(config.entityScanRadius());
+        EnvironmentAssessmentProvider environmentAssessmentProvider = new EnvironmentAssessmentProvider(config.interactableScanRadius());
+        RiskStateProvider riskStateProvider = new RiskStateProvider();
+        VanillaCommandBackend vanillaCommandBackend = new ServerVanillaCommandBackend();
+        CarpetObservationBackend carpetObservationBackend = new DefaultCarpetObservationBackend(
+                FabricLoader.getInstance().isModLoaded("carpet")
+        );
+        DirectWorldReader directWorldReader = new ServerDirectWorldReader(
+                playerStateProvider,
+                worldStateProvider,
+                threatAssessmentProvider,
+                environmentAssessmentProvider,
+                interactableScanProvider,
+                socialStateProvider,
+                riskStateProvider,
+                recentEventTracker,
+                vanillaCommandBackend,
+                carpetObservationBackend
+        );
+        this.capabilityRegistry = new CapabilityExecutorRegistry(
+                config,
+                directWorldReader,
+                vanillaCommandBackend,
+                carpetObservationBackend
+        );
         this.contextCollector = new GameContextCollector(
                 permissionResolver,
                 capabilityRegistry,
-                new PlayerSnapshotProvider(config.inventorySummaryLimit()),
-                new WorldSnapshotProvider(config.serverRuleSummaryLimit()),
+                playerStateProvider,
+                worldStateProvider,
+                ruleSnapshotProvider,
+                directWorldReader,
                 new TargetBlockSnapshotProvider(config.targetReachBlocks()),
-                new RecentEventsProvider(recentEventBuffer),
+                recentEventTracker,
                 config.enableExperimentalCapabilities(),
                 config.enableDynamicScripting()
         );
@@ -83,7 +142,7 @@ public final class MinaRuntime {
                 executionGuard,
                 pendingTurns,
                 pendingConfirmations,
-                recentEventBuffer,
+                recentEventTracker,
                 ioExecutor
         );
 
@@ -105,7 +164,7 @@ public final class MinaRuntime {
         permissionResolver = null;
         pendingTurns = null;
         pendingConfirmations = null;
-        recentEventBuffer = null;
+        recentEventTracker = null;
 
         if (ioExecutor != null) {
             ioExecutor.shutdownNow();
@@ -129,19 +188,94 @@ public final class MinaRuntime {
     }
 
     public synchronized void recordPlayerEvent(String kind, ServerPlayerEntity player) {
-        if (recentEventBuffer == null) {
+        if (recentEventTracker == null) {
             return;
         }
-        recentEventBuffer.recordPlayerEvent(kind, player, Map.of());
+        recentEventTracker.recordPlayerEvent(kind, player, Map.of());
     }
 
     public synchronized void recordTurnEvent(String kind, ServerPlayerEntity player, String message) {
-        if (recentEventBuffer == null) {
+        if (recentEventTracker == null) {
             return;
         }
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("message", message);
-        recentEventBuffer.recordPlayerEvent(kind, player, payload);
+        recentEventTracker.recordTurnEvent(kind, player, message);
+    }
+
+    public synchronized void onPlayerJoin(ServerPlayerEntity player) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerJoin(player);
+        }
+    }
+
+    public synchronized void onPlayerLeave(ServerPlayerEntity player) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerLeave(player);
+        }
+    }
+
+    public synchronized void onPlayerRespawn(ServerPlayerEntity oldPlayer, ServerPlayerEntity newPlayer, boolean alive) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerRespawn(oldPlayer, newPlayer, alive);
+        }
+    }
+
+    public synchronized void onPlayerAfterDamage(
+            ServerPlayerEntity player,
+            DamageSource source,
+            float baseDamageTaken,
+            float damageTaken,
+            boolean blocked
+    ) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerAfterDamage(player, source, baseDamageTaken, damageTaken, blocked);
+        }
+    }
+
+    public synchronized void onPlayerDeath(ServerPlayerEntity player, DamageSource source) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerDeath(player, source);
+        }
+    }
+
+    public synchronized void onPlayerChangeWorld(ServerPlayerEntity player, ServerWorld origin, ServerWorld destination) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerChangeWorld(player, origin, destination);
+        }
+    }
+
+    public synchronized void onPlayerKilledEntity(ServerPlayerEntity player, LivingEntity killedEntity, DamageSource source) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerKilledEntity(player, killedEntity, source);
+        }
+    }
+
+    public synchronized void onPlayerEquipmentChange(
+            ServerPlayerEntity player,
+            EquipmentSlot slot,
+            ItemStack previous,
+            ItemStack current
+    ) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onPlayerEquipmentChange(player, slot, previous, current);
+        }
+    }
+
+    public synchronized void onEntityLoad(Entity entity, ServerWorld world) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onEntityLoad(entity, world);
+        }
+    }
+
+    public synchronized void onEntityUnload(Entity entity, ServerWorld world) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onEntityUnload(entity, world);
+        }
+    }
+
+    public synchronized void onServerTick(MinecraftServer server) {
+        if (recentEventTracker != null) {
+            recentEventTracker.onServerTick(server);
+        }
     }
 
     private static final class MinaThreadFactory implements ThreadFactory {

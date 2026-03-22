@@ -11,6 +11,7 @@ from mina_agent.policy.policy_engine import PolicyContext, PolicyEngine
 from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.models import TaskStepState, TurnState
+from mina_agent.runtime.semantic_tools import SEMANTIC_BRIDGE_PROXY_SPECS, SemanticBridgeProxySpec
 from mina_agent.schemas import CapabilityDescriptor, DelegateRequest, TurnStartRequest
 
 
@@ -22,6 +23,7 @@ class RuntimeCapability:
     descriptor: CapabilityDescriptor
     handler_kind: str
     executor: InternalExecutor | None = None
+    bridge_target_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -68,7 +70,8 @@ class CapabilityRegistry:
             dynamic_scripting_enabled=request.server_env.dynamic_scripting_enabled,
         )
 
-        capabilities: list[RuntimeCapability] = []
+        bridge_capabilities: list[RuntimeCapability] = []
+        visible_bridge_ids: set[str] = set()
         for bridge_capability in request.visible_capabilities:
             descriptor = CapabilityDescriptor(
                 id=bridge_capability.id,
@@ -81,14 +84,21 @@ class CapabilityRegistry:
                 args_schema=dict(bridge_capability.args_schema),
                 result_schema=dict(bridge_capability.result_schema),
                 description=bridge_capability.description,
+                domain=bridge_capability.domain,
+                preferred=bridge_capability.preferred,
+                semantic_level=bridge_capability.semantic_level,
+                freshness_hint=bridge_capability.freshness_hint,
             )
-            capabilities.append(RuntimeCapability(descriptor=descriptor, handler_kind="bridge"))
+            visible_bridge_ids.add(descriptor.id)
+            bridge_capabilities.append(RuntimeCapability(descriptor=descriptor, handler_kind="bridge"))
 
+        capabilities: list[RuntimeCapability] = self._build_bridge_proxy_capabilities(visible_bridge_ids)
         for capability in self._local_capabilities.values():
             if self._policy_engine.descriptor_visible(context, capability.descriptor.visibility_predicate):
                 capabilities.append(capability)
+        capabilities.extend(bridge_capabilities)
 
-        capabilities.sort(key=lambda item: (item.handler_kind, item.descriptor.id))
+        capabilities.sort(key=self._sort_key)
         return capabilities
 
     def get(self, capabilities: list[RuntimeCapability], capability_id: str) -> RuntimeCapability | None:
@@ -115,16 +125,75 @@ class CapabilityRegistry:
         effect_summary: str | None,
         requires_confirmation: bool,
     ) -> dict[str, Any]:
+        bridge_capability_id = capability.bridge_target_id or capability.descriptor.id
         return {
             "continuation_id": "",
             "intent_id": str(uuid.uuid4()),
-            "capability_id": capability.descriptor.id,
+            "capability_id": bridge_capability_id,
             "risk_class": capability.descriptor.risk_class,
             "effect_summary": effect_summary or capability.descriptor.description,
             "preconditions": [],
             "arguments": arguments,
             "requires_confirmation": requires_confirmation or capability.descriptor.requires_confirmation,
         }
+
+    def _sort_key(self, capability: RuntimeCapability) -> tuple[int, int, str]:
+        handler_priority = {"bridge_proxy": 0, "bridge": 1, "internal": 2}
+        return (
+            handler_priority.get(capability.handler_kind, 9),
+            0 if capability.descriptor.preferred else 1,
+            capability.descriptor.id,
+        )
+
+    def _build_bridge_proxy_capabilities(self, visible_bridge_ids: set[str]) -> list[RuntimeCapability]:
+        capabilities: list[RuntimeCapability] = []
+        for spec in SEMANTIC_BRIDGE_PROXY_SPECS:
+            if spec.bridge_target_id not in visible_bridge_ids:
+                continue
+            capabilities.append(
+                RuntimeCapability(
+                    descriptor=CapabilityDescriptor(
+                        id=spec.capability_id,
+                        kind="tool",
+                        visibility_predicate="always",
+                        risk_class="read_only",
+                        execution_mode="bridge_proxy",
+                        requires_confirmation=False,
+                        budget_cost=1,
+                        args_schema=dict(spec.args_schema),
+                        result_schema=dict(spec.result_schema),
+                        description=spec.description,
+                        domain=spec.domain,
+                        preferred=True,
+                        semantic_level="semantic",
+                        freshness_hint=spec.freshness_hint,  # type: ignore[arg-type]
+                    ),
+                    handler_kind="bridge_proxy",
+                    executor=self._bridge_proxy_executor(spec),
+                    bridge_target_id=spec.bridge_target_id,
+                )
+            )
+        return capabilities
+
+    def _bridge_proxy_executor(self, spec: SemanticBridgeProxySpec) -> InternalExecutor:
+        def _execute(arguments: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
+            snapshot = state.request.scoped_snapshot if isinstance(state.request.scoped_snapshot, dict) else {}
+            if spec.freshness_hint == "ambient":
+                ambient_payload = spec.snapshot_reader(snapshot, arguments)
+                if isinstance(ambient_payload, dict) and ambient_payload:
+                    return {
+                        "_proxy_mode": "observation",
+                        "payload": ambient_payload,
+                        "bridge_target_id": spec.bridge_target_id,
+                    }
+            return {
+                "_proxy_mode": "bridge",
+                "bridge_target_id": spec.bridge_target_id,
+                "arguments": dict(arguments),
+                "effect_summary": spec.description,
+            }
+
+        return _execute
 
     def _build_local_capabilities(self) -> dict[str, RuntimeCapability]:
         return {
@@ -361,6 +430,10 @@ class CapabilityRegistry:
                     "id": capability.descriptor.id,
                     "kind": capability.descriptor.kind,
                     "risk_class": capability.descriptor.risk_class,
+                    "domain": capability.descriptor.domain,
+                    "preferred": capability.descriptor.preferred,
+                    "semantic_level": capability.descriptor.semantic_level,
+                    "freshness_hint": capability.descriptor.freshness_hint,
                     "description": capability.descriptor.description,
                     "args_schema": capability.descriptor.args_schema,
                     "result_schema": capability.descriptor.result_schema,

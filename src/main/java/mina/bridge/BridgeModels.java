@@ -76,6 +76,10 @@ public final class BridgeModels {
         public boolean requires_confirmation;
         public Map<String, Object> args_schema;
         public Map<String, Object> result_schema;
+        public String domain;
+        public boolean preferred;
+        public String semantic_level;
+        public String freshness_hint;
 
         public static VisibleCapabilityPayload fromDefinition(CapabilityDefinition definition) {
             VisibleCapabilityPayload payload = new VisibleCapabilityPayload();
@@ -87,6 +91,10 @@ public final class BridgeModels {
             payload.requires_confirmation = definition.requiresConfirmation();
             payload.args_schema = definition.argsSchema();
             payload.result_schema = definition.resultSchema();
+            payload.domain = definition.domain();
+            payload.preferred = definition.preferred();
+            payload.semantic_level = definition.semanticLevel();
+            payload.freshness_hint = definition.freshnessHint();
             return payload;
         }
     }

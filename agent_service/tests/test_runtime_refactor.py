@@ -671,6 +671,120 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(action_request.arguments["radius"], 32)
         self.assertEqual(action_request.arguments["player_name"], "Tester")
 
+    def test_unknown_capability_replans_once_before_using_visible_capability(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(
+                    _SequenceProvider(
+                        [
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="execute",
+                                    capability_request=CapabilityRequest(
+                                        capability_id="observe.biome",
+                                        arguments={},
+                                        effect_summary="Read the current biome.",
+                                        requires_confirmation=False,
+                                    ),
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"execute","capability_id":"observe.biome"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            ),
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="execute",
+                                    capability_request=CapabilityRequest(
+                                        capability_id="world.scene.read",
+                                        arguments={},
+                                        effect_summary="Read Mina's current structured scene summary.",
+                                        requires_confirmation=False,
+                                    ),
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"execute","capability_id":"world.scene.read"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            ),
+                        ]
+                    )
+                ),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        request = self._turn_request(turn_id="turn-unknown-capability-replan")
+        request.visible_capabilities = [self._world_scene_capability()]
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "action_request_batch")
+        self.assertIsNotNone(response.action_request_batch)
+        action_request = response.action_request_batch[0]
+        self.assertEqual(action_request.capability_id, "world.scene.read")
+        turn_state = store.get_turn_state(request.turn_id)
+        self.assertIsNotNone(turn_state)
+        self.assertIn(
+            "Unknown capability requested: observe.biome. Use an exact id from capability_brief or reply without executing a capability.",
+            turn_state["runtime_notes"],
+        )
+
+    def test_capability_brief_keeps_full_exact_id_list_even_under_budget_pressure(self) -> None:
+        settings, _, _, _, context_engine, _, _, _ = self._build_runtime()
+        settings.context_char_budget = 1100
+        request = self._turn_request(turn_id="turn-capability-brief-ids")
+        request.scoped_snapshot = {
+            "player": {
+                "name": "Tester",
+                "inventory_brief": {
+                    "summary": "A" * 900,
+                    "shortages": {"needs_food": True, "needs_torches": True},
+                },
+            },
+            "world": {"dimension": "minecraft:overworld", "biome": "minecraft:forest"},
+            "scene": {"location_kind": "surface", "hostile_summary": {"summary": "B" * 700}},
+        }
+        request.visible_capabilities = [
+            VisibleCapabilityPayload(
+                id=f"capability.test.{index}",
+                kind="tool",
+                description=f"Capability {index}",
+                risk_class="read_only",
+                execution_mode="bridge",
+                requires_confirmation=False,
+                args_schema={},
+                result_schema={},
+            )
+            for index in range(8)
+        ]
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=request.visible_capabilities,
+        )
+
+        capability_section = next(section for section in result.sections if section["name"] == "capability_brief")
+        self.assertFalse(capability_section["truncated"])
+        self.assertEqual(
+            capability_section["preview"],
+            [f"capability.test.{index}" for index in range(8)],
+        )
+
     def test_sync_task_clears_persisted_steps_when_plan_is_reset(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
         task_record = store.create_task(
@@ -968,6 +1082,139 @@ class RuntimeRefactorTests(unittest.TestCase):
         scene_section = next(section for section in result.sections if section["name"] == "scene_slice")
         self.assertEqual(scene_section["preview"]["target_block"]["block_name"], "橡树树叶")
         self.assertEqual(scene_section["preview"]["server_rules_refs"]["server_properties_path"], "/tmp/server.properties")
+
+    def test_context_engine_includes_new_world_semantic_snapshot_sections(self) -> None:
+        _, _, _, _, context_engine, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-semantic-scene")
+        request.scoped_snapshot = {
+            "player": {"name": "Tester", "inventory_brief": {"shortages": {"needs_food": True}}},
+            "world": {"dimension": "minecraft:overworld"},
+            "scene": {"location_kind": "cave", "worth_alerting": True},
+            "interactables": {"containers": [{"block_id": "minecraft:chest"}]},
+            "social": {"is_alone": False, "nearby_players": [{"name": "Alex"}]},
+            "technical": {"carpet_loaded": True, "logger_count": 2},
+            "risk_state": {"level": "high"},
+        }
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=[],
+        )
+
+        scene_section = next(section for section in result.sections if section["name"] == "scene_slice")
+        self.assertEqual(scene_section["preview"]["scene"]["location_kind"], "cave")
+        self.assertEqual(scene_section["preview"]["interactables"]["containers"][0]["block_id"], "minecraft:chest")
+        self.assertEqual(scene_section["preview"]["social"]["nearby_players"][0]["name"], "Alex")
+        self.assertEqual(scene_section["preview"]["technical"]["logger_count"], 2)
+
+    def test_capability_registry_prefers_observe_tools_before_bridge_and_internal_tools(self) -> None:
+        _, _, _, capability_registry, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-observe-priority")
+        request.visible_capabilities = [
+            self._world_player_state_capability(),
+            self._world_scene_capability(),
+        ]
+
+        resolved = capability_registry.resolve(request)
+        leading_ids = [capability.descriptor.id for capability in resolved[:4]]
+        leading_handlers = [capability.handler_kind for capability in resolved[:4]]
+
+        self.assertEqual(leading_ids[:2], ["observe.player", "observe.scene"])
+        self.assertEqual(leading_handlers[:2], ["bridge_proxy", "bridge_proxy"])
+        self.assertEqual(leading_ids[2:], ["world.player_state.read", "world.scene.read"])
+
+    def test_bridge_proxy_uses_ambient_snapshot_for_observe_player(self) -> None:
+        _, _, _, capability_registry, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-observe-player")
+        request.visible_capabilities = [self._world_player_state_capability()]
+        request.scoped_snapshot = {
+            "player": {
+                "core_status": {"health": 7.0, "hunger": 5},
+                "inventory_brief": {"shortages": {"needs_food": True}},
+            }
+        }
+        runtime_state = RuntimeState(
+            request=request,
+            turn_state=self._turn_state(request),
+            pending_confirmation=None,
+        )
+
+        capability = capability_registry.get(capability_registry.resolve(request), "observe.player")
+        self.assertIsNotNone(capability)
+        result = capability_registry.execute_internal(capability, {}, runtime_state)  # type: ignore[arg-type]
+
+        self.assertEqual(result["_proxy_mode"], "observation")
+        self.assertEqual(result["payload"]["core_status"]["health"], 7.0)
+        self.assertTrue(result["payload"]["inventory_brief"]["shortages"]["needs_food"])
+
+    def test_bridge_proxy_falls_back_to_live_bridge_for_observe_poi(self) -> None:
+        _, _, _, capability_registry, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-observe-poi")
+        request.visible_capabilities = [self._world_poi_capability()]
+        runtime_state = RuntimeState(
+            request=request,
+            turn_state=self._turn_state(request),
+            pending_confirmation=None,
+        )
+
+        capability = capability_registry.get(capability_registry.resolve(request), "observe.poi")
+        self.assertIsNotNone(capability)
+        result = capability_registry.execute_internal(
+            capability,  # type: ignore[arg-type]
+            {"kind": "structure", "query": "minecraft:village", "radius": 256},
+            runtime_state,
+        )
+
+        self.assertEqual(result["_proxy_mode"], "bridge")
+        self.assertEqual(result["bridge_target_id"], "world.poi.read")
+        self.assertEqual(result["arguments"]["query"], "minecraft:village")
+
+    def test_execution_orchestrator_uses_semantic_world_summaries(self) -> None:
+        _, _, _, _, _, orchestrator, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-world-summary")
+        turn_state = self._turn_state(request)
+
+        scene_observation = orchestrator.register_observation(
+            turn_state,
+            source="observe.scene",
+            payload={"risk_state": {"level": "high", "highest_threat": {"name": "Creeper"}}},
+        )
+        inventory_observation = orchestrator.register_observation(
+            turn_state,
+            source="observe.inventory",
+            payload={"shortages": {"needs_food": True, "needs_torches": False}},
+        )
+
+        self.assertEqual(scene_observation.summary, "Scene risk is high; highest nearby threat is Creeper.")
+        self.assertIn("scene", scene_observation.scope_tags)
+        self.assertEqual(inventory_observation.summary, "Inventory pressure detected: food.")
+        self.assertIn("inventory", inventory_observation.scope_tags)
+
+    def test_scene_summary_prefers_environment_summary_with_biome_signals(self) -> None:
+        _, _, _, _, _, orchestrator, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-world-location-summary")
+        turn_state = self._turn_state(request)
+
+        scene_observation = orchestrator.register_observation(
+            turn_state,
+            source="world.scene.read",
+            payload={
+                "location_kind": "surface",
+                "biome": "minecraft:dark_forest",
+                "environment_summary": (
+                    "The player appears to be on surface terrain in minecraft:dark_forest; "
+                    "support block is minecraft:dark_oak_leaves with 12 nearby leaf blocks, "
+                    "2 nearby log blocks, sky visible=true, drop to ground=5."
+                ),
+                "risk_state": {"level": "low"},
+            },
+        )
+
+        self.assertEqual(
+            scene_observation.summary,
+            "The player appears to be on surface terrain in minecraft:dark_forest; support block is minecraft:dark_oak_leaves with 12 nearby leaf blocks, 2 nearby log blocks, sky visible=true, drop to ground=5. Current scene risk is low.",
+        )
 
     def test_memory_manager_preserves_compact_summary_and_transcript_path(self) -> None:
         settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
@@ -1390,6 +1637,54 @@ class RuntimeRefactorTests(unittest.TestCase):
             requires_confirmation=False,
             args_schema={"radius": "number", "entity_type": "string", "limit": "integer"},
             result_schema={"radius": "number", "filter": "string", "count": "integer", "entities": "array<object>"},
+        )
+
+    def _world_player_state_capability(self) -> VisibleCapabilityPayload:
+        return VisibleCapabilityPayload(
+            id="world.player_state.read",
+            kind="tool",
+            description="Read Mina's structured player-state view.",
+            risk_class="read_only",
+            execution_mode="server_main_thread",
+            requires_confirmation=False,
+            args_schema={},
+            result_schema={"player": "object"},
+            domain="world",
+            preferred=True,
+            semantic_level="semantic",
+            freshness_hint="ambient",
+        )
+
+    def _world_scene_capability(self) -> VisibleCapabilityPayload:
+        return VisibleCapabilityPayload(
+            id="world.scene.read",
+            kind="tool",
+            description="Read Mina's structured scene summary.",
+            risk_class="read_only",
+            execution_mode="server_main_thread",
+            requires_confirmation=False,
+            args_schema={},
+            result_schema={"scene": "object"},
+            domain="world",
+            preferred=True,
+            semantic_level="semantic",
+            freshness_hint="ambient",
+        )
+
+    def _world_poi_capability(self) -> VisibleCapabilityPayload:
+        return VisibleCapabilityPayload(
+            id="world.poi.read",
+            kind="tool",
+            description="Locate nearby structures, biomes, or points of interest.",
+            risk_class="read_only",
+            execution_mode="server_main_thread",
+            requires_confirmation=False,
+            args_schema={"kind": "string", "query": "string", "radius": "integer"},
+            result_schema={"poi": "object"},
+            domain="world",
+            preferred=True,
+            semantic_level="semantic",
+            freshness_hint="live",
         )
 
 

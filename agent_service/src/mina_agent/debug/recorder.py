@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,7 +80,7 @@ class FileDebugRecorder(DebugRecorder):
 
     def record_event(self, turn_id: str, event_type: str, payload: dict[str, Any], *, step_index: int | None = None) -> None:
         stamp = datetime.now(timezone.utc)
-        turn_dir = self._resolve_turn_dir(turn_id, stamp)
+        turn_dir = self._resolve_turn_dir(turn_id, stamp, event_type, payload)
         events_path = turn_dir / "events.jsonl"
         summary_path = turn_dir / "summary.json"
 
@@ -98,16 +99,39 @@ class FileDebugRecorder(DebugRecorder):
         self._apply_summary_update(summary, event_type, sanitized_payload, stamp, step_index)
         self._write_json(summary_path, summary)
 
-    def _resolve_turn_dir(self, turn_id: str, stamp: datetime) -> Path:
+    def _resolve_turn_dir(
+        self,
+        turn_id: str,
+        stamp: datetime,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> Path:
         turns_dir = self._debug_dir / "turns"
-        existing = next(turns_dir.glob(f"*/{turn_id}"), None)
+        existing = next((path for path in turns_dir.glob(f"*/*{turn_id}") if path.is_dir()), None)
         if existing is not None:
             existing.mkdir(parents=True, exist_ok=True)
             return existing
 
-        turn_dir = turns_dir / f"{stamp:%Y-%m-%d}" / turn_id
+        turn_dir = turns_dir / f"{stamp:%Y-%m-%d}" / self._turn_dir_name(turn_id, stamp, event_type, payload)
         turn_dir.mkdir(parents=True, exist_ok=True)
         return turn_dir
+
+    def _turn_dir_name(
+        self,
+        turn_id: str,
+        stamp: datetime,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> str:
+        label = "turn"
+        if event_type == "turn_started":
+            label = self._path_segment(str(payload.get("user_message") or "turn"))
+        return f"{stamp:%H%M%S_%f}__{label}__{turn_id}"
+
+    def _path_segment(self, value: str) -> str:
+        normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", value.strip())
+        normalized = normalized.strip("._-")
+        return (normalized[:48] or "turn").lower()
 
     def _load_summary(self, summary_path: Path, turn_id: str, turn_dir: Path) -> dict[str, Any]:
         if summary_path.exists():

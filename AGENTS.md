@@ -152,6 +152,12 @@ Mina should also be capable of restraint:
 8. Context must be **dynamically scoped**.  
    Do not inject full world state, full memory, full rules, or full capability descriptions by default.
 
+9. **Callable capabilities must be exposed as one explicit authoritative id list per turn.**  
+   The agent context should contain a single exact list of callable capability ids for the current turn.
+   Mina may call only ids from that list, using exact matches only.
+   Do not rely on guessed ids, fuzzy matching, hidden aliases, or implicit capability-name translation as the normal path.
+   This list should remain available even when other context is trimmed.
+
 ---
 
 ## Safety
@@ -180,6 +186,9 @@ Additional execution rules:
 - If relevant state has changed, execution should be denied, downgraded, or re-planned.
 - High-risk actions must support **natural-language confirmation** before execution.
 - Users should confirm intended effects, not review code.
+- If Mina selects a capability id that is not in the current authoritative list, runtime must reject it and force re-planning instead of executing, silently remapping, or crashing.
+- The first unknown-capability selection should be treated as a recoverable planning error.
+- Repeated unknown-capability selections may end the turn gracefully, but they must not execute any fallback hidden capability.
 
 Sandboxed script execution must include **resource budgeting**, including limits on:
 - execution time

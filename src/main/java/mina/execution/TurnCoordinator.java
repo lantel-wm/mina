@@ -14,7 +14,7 @@ import mina.chat.MinaChatRenderer.ReplyPresentation;
 import mina.chat.MinaChatRenderer.SecondaryChip;
 import mina.config.MinaConfig;
 import mina.context.GameContextCollector;
-import mina.context.RecentEventBuffer;
+import mina.context.RecentEventTracker;
 import mina.context.TurnContext;
 import mina.policy.ExecutionGuard;
 import mina.policy.ExecutionGuard.Decision;
@@ -39,7 +39,7 @@ public final class TurnCoordinator {
     private final ExecutionGuard executionGuard;
     private final PendingTurnRegistry pendingTurnRegistry;
     private final PendingConfirmationRegistry pendingConfirmationRegistry;
-    private final RecentEventBuffer recentEventBuffer;
+    private final RecentEventTracker recentEventTracker;
     private final ExecutorService ioExecutor;
 
     public TurnCoordinator(
@@ -50,7 +50,7 @@ public final class TurnCoordinator {
             ExecutionGuard executionGuard,
             PendingTurnRegistry pendingTurnRegistry,
             PendingConfirmationRegistry pendingConfirmationRegistry,
-            RecentEventBuffer recentEventBuffer,
+            RecentEventTracker recentEventTracker,
             ExecutorService ioExecutor
     ) {
         this.config = config;
@@ -60,7 +60,7 @@ public final class TurnCoordinator {
         this.executionGuard = executionGuard;
         this.pendingTurnRegistry = pendingTurnRegistry;
         this.pendingConfirmationRegistry = pendingConfirmationRegistry;
-        this.recentEventBuffer = recentEventBuffer;
+        this.recentEventTracker = recentEventTracker;
         this.ioExecutor = ioExecutor;
     }
 
@@ -74,7 +74,7 @@ public final class TurnCoordinator {
             return false;
         }
 
-        recentEventBuffer.recordPlayerEvent("mina_user_message", player, Map.of("message", userMessage));
+        recentEventTracker.recordPlayerEvent("mina_user_message", player, Map.of("message", userMessage));
         acceptedCallback.run();
         ioExecutor.submit(() -> runTurn(playerId, turnId, userMessage, source.getServer()));
         return true;
@@ -221,7 +221,7 @@ public final class TurnCoordinator {
             Map<String, Object> actionEvent = new java.util.LinkedHashMap<>();
             actionEvent.put("capability_id", actionRequest.capability_id);
             actionEvent.put("summary", result.sideEffectSummary());
-            recentEventBuffer.recordPlayerEvent(
+            recentEventTracker.recordPlayerEvent(
                     "mina_action_executed",
                     player,
                     actionEvent
@@ -479,7 +479,7 @@ public final class TurnCoordinator {
             Map<String, Object> replyEvent = new java.util.LinkedHashMap<>();
             replyEvent.put("title", presentation.title());
             replyEvent.put("body", presentation.body());
-            recentEventBuffer.recordPlayerEvent("mina_reply_sent", player, replyEvent);
+            recentEventTracker.recordPlayerEvent("mina_reply_sent", player, replyEvent);
             MinaChatRenderer.sendReply(player, presentation);
         });
     }

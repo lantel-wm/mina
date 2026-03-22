@@ -90,6 +90,20 @@ class DebugTraceTests(unittest.TestCase):
             ],
         )
 
+    def test_debug_turn_directory_uses_time_prefixed_human_readable_name(self) -> None:
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[self._final_reply_result("Ready.")],
+        )
+
+        response = loop.start_turn(self._turn_request(turn_id="turn-readable-dir"))
+
+        self.assertEqual(response.type, "final_reply")
+        turn_dir = self._turn_dir(settings.debug_dir, "turn-readable-dir")
+        self.assertRegex(turn_dir.name, r"^\d{6}_\d{6}__")
+        self.assertIn("hello_mina", turn_dir.name)
+        self.assertTrue(turn_dir.name.endswith("turn-readable-dir"))
+
     def test_internal_capability_trace_records_start_and_finish(self) -> None:
         loop, settings, _ = self._build_loop(
             debug_enabled=True,
@@ -251,7 +265,7 @@ class DebugTraceTests(unittest.TestCase):
         capability_section = next(
             section for section in context_result.sections if section["name"] == "capability_brief"
         )
-        target_capability = self._capability_from_payload(capability_section["preview"], "game.target_block.read")
+        self.assertIn("game.target_block.read", self._preview_items(capability_section["preview"]))
 
         response = loop.start_turn(request)
 
@@ -262,8 +276,6 @@ class DebugTraceTests(unittest.TestCase):
         target_descriptor = self._capability_from_event(capabilities_event, "game.target_block.read")
         self.assertIn("block_pos", target_descriptor["args_schema"])
         self.assertIn("block_name", target_descriptor["result_schema"])
-        self.assertNotIn("args_schema", target_capability)
-        self.assertNotIn("result_schema", target_capability)
 
     def test_locked_block_position_is_injected_into_follow_up_bridge_request(self) -> None:
         visible_capabilities = [self._target_block_capability(), self._carpet_block_info_capability()]
@@ -830,7 +842,7 @@ class DebugTraceTests(unittest.TestCase):
         capability_id: str,
     ) -> dict[str, Any]:
         for capability in self._preview_items(capabilities):
-            if capability["id"] == capability_id:
+            if isinstance(capability, dict) and capability.get("id") == capability_id:
                 return capability
         raise AssertionError(f"Capability {capability_id} not found.")
 
@@ -842,7 +854,7 @@ class DebugTraceTests(unittest.TestCase):
         raise AssertionError(f"Expected preview list structure, got: {value!r}")
 
     def _turn_dir(self, debug_dir: Path, turn_id: str) -> Path:
-        matches = list((debug_dir / "turns").glob(f"*/{turn_id}"))
+        matches = list((debug_dir / "turns").glob(f"*/*{turn_id}"))
         self.assertEqual(len(matches), 1)
         return matches[0]
 

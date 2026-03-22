@@ -36,6 +36,10 @@ class VisibleCapabilityPayload(MinaBaseModel):
     requires_confirmation: bool
     args_schema: dict[str, Any] = Field(default_factory=dict)
     result_schema: dict[str, Any] = Field(default_factory=dict)
+    domain: str = "general"
+    preferred: bool = False
+    semantic_level: Literal["semantic", "raw", "diagnostic"] = "raw"
+    freshness_hint: Literal["ambient", "live"] = "live"
 
 
 class LimitsPayload(MinaBaseModel):
@@ -128,6 +132,10 @@ class CapabilityDescriptor(MinaBaseModel):
     args_schema: dict[str, Any]
     result_schema: dict[str, Any]
     description: str
+    domain: str = "general"
+    preferred: bool = False
+    semantic_level: Literal["semantic", "raw", "diagnostic"] = "raw"
+    freshness_hint: Literal["ambient", "live"] = "live"
 
 
 AgentRole = Literal["companion", "explore", "plan", "action"]

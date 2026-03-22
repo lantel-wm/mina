@@ -227,6 +227,7 @@ class TurnPipeline:
         trace_events: list[TraceEventPayload],
         current_step: int,
         confirmation_resolution: str | None = None,
+        source_capability_id: str | None = None,
     ) -> TurnResponse:
         if turn_state.bridge_action_count >= request.limits.max_bridge_actions_per_turn:
             return self._bridge_budget_reply(
@@ -251,7 +252,10 @@ class TurnPipeline:
 
         continuation_id = action_request_payload.get("continuation_id") or str(uuid.uuid4())
         action_request_payload["continuation_id"] = continuation_id
-        turn_state.pending_action_batch = [action_request_payload]
+        pending_payload = dict(action_request_payload)
+        if source_capability_id is not None:
+            pending_payload["source_capability_id"] = source_capability_id
+        turn_state.pending_action_batch = [pending_payload]
         turn_state.step_index = max(turn_state.step_index + 1, current_step)
         turn_state.continuation_depth += 1
         turn_state.bridge_action_count += 1
@@ -702,20 +706,30 @@ class TurnPipeline:
                 capability_request.capability_id if capability_request is not None else (decision.capability_id or ""),
             )
             if capability is None:
-                return self._return_final_reply(
-                    request.turn_id,
-                    request.session_ref,
-                    f"Mina selected an unknown capability: {capability_request.capability_id if capability_request else decision.capability_id}",
-                    trace_events,
-                    status="failed",
-                    step_index=current_step,
-                    debug_payload={
-                        "reason": "unknown_capability",
-                        "capability_id": capability_request.capability_id if capability_request else decision.capability_id,
-                    },
-                    turn_state=turn_state,
+                unknown_capability_id = capability_request.capability_id if capability_request is not None else (decision.capability_id or "")
+                unknown_attempts = self._record_unknown_capability_attempt(
                     request=request,
+                    turn_state=turn_state,
+                    capability_id=unknown_capability_id,
+                    current_step=current_step,
                 )
+                if unknown_attempts >= 2:
+                    return self._return_final_reply(
+                        request.turn_id,
+                        request.session_ref,
+                        "我不会执行不存在的能力。这一步先停下，我会改用当前确实可见的能力或直接回答。",
+                        trace_events,
+                        status="failed",
+                        step_index=current_step,
+                        debug_payload={
+                            "reason": "unknown_capability",
+                            "capability_id": unknown_capability_id,
+                            "unknown_capability_attempts": unknown_attempts,
+                        },
+                        turn_state=turn_state,
+                        request=request,
+                    )
+                continue
 
             resolved_arguments = self._execution_manager.resolve_arguments(
                 turn_state,
@@ -834,6 +848,110 @@ class TurnPipeline:
                         trace_events=trace_events,
                         current_step=current_step,
                         progress_reason=f"internal_capability:{capability.descriptor.id}",
+                    )
+                continue
+
+            if capability.handler_kind == "bridge_proxy":
+                trace_events.append(self._internal_start_trace(capability, resolved_arguments, current_step))
+                started = perf_counter()
+                try:
+                    proxy_payload = self._execution_manager.execute_internal(
+                        capability,
+                        resolved_arguments,
+                        runtime_state,
+                    )
+                except Exception as exc:
+                    latency_ms = int((perf_counter() - started) * 1000)
+                    self._services.debug.record_event(
+                        request.turn_id,
+                        "capability_finished",
+                        {
+                            "status": "failed",
+                            "capability_id": capability.descriptor.id,
+                            "handler_kind": capability.handler_kind,
+                            "latency_ms": latency_ms,
+                            "error": str(exc),
+                            "task_id": turn_state.task.task_id,
+                        },
+                        step_index=current_step,
+                    )
+                    return self._return_final_reply(
+                        request.turn_id,
+                        request.session_ref,
+                        f"Mina bridge proxy capability failed: {exc}",
+                        trace_events,
+                        status="failed",
+                        step_index=current_step,
+                        debug_payload={
+                            "reason": "bridge_proxy_capability_error",
+                            "capability_id": capability.descriptor.id,
+                            "error": str(exc),
+                        },
+                        turn_state=turn_state,
+                        request=request,
+                    )
+
+                latency_ms = int((perf_counter() - started) * 1000)
+                if proxy_payload.get("_proxy_mode") == "bridge":
+                    action_request_payload = self._execution_manager.bridge_action_request(
+                        capability,
+                        proxy_payload.get("arguments", resolved_arguments),
+                        proxy_payload.get("effect_summary") or effect_summary,
+                        False,
+                    )
+                    return self._emit_bridge_action_batch(
+                        request=request,
+                        turn_state=turn_state,
+                        capability=capability,
+                        action_request_payload=action_request_payload,
+                        trace_events=trace_events,
+                        current_step=current_step,
+                        source_capability_id=capability.descriptor.id,
+                    )
+
+                observation_payload = proxy_payload.get("payload")
+                if not isinstance(observation_payload, dict):
+                    observation_payload = {
+                        key: value
+                        for key, value in proxy_payload.items()
+                        if not str(key).startswith("_")
+                    }
+                observation = self._execution_manager.register_observation(
+                    turn_state,
+                    source=capability.descriptor.id,
+                    payload=observation_payload,
+                    kind="bridge_proxy_capability",
+                )
+                self._task_manager.apply_task_patch(turn_state, observation_payload.get("task_patch"))
+                turn_state.step_index += 1
+                turn_state.working_memory.current_status = "bridge_proxy_capability_completed"
+                turn_state.working_memory.next_best_step = "Continue reasoning with the refreshed or ambient world observation."
+                self._task_manager.sync_task(turn_state.task)
+                self._services.store.update_turn_state(
+                    request.turn_id,
+                    turn_state.to_runtime_dict(),
+                    task_id=turn_state.task.task_id,
+                )
+                self._services.store.log_step_event(
+                    request.turn_id,
+                    turn_state.step_index,
+                    "bridge_proxy_capability",
+                    observation.model_dump(),
+                )
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "capability_finished",
+                    self._internal_capability_finished_payload(capability, observation, latency_ms, turn_state.task.task_id),
+                    step_index=current_step,
+                )
+                trace_events.append(self._internal_finish_trace(capability, observation, turn_state.step_index))
+                if self._services.settings.yield_after_internal_steps:
+                    return self._emit_progress_update(
+                        request=request,
+                        turn_state=turn_state,
+                        trace_events=trace_events,
+                        current_step=current_step,
+                        progress_reason=f"bridge_proxy_capability:{capability.descriptor.id}",
                     )
                 continue
 
@@ -997,7 +1115,7 @@ class TurnPipeline:
     def _lookup_capability_id(self, turn_state: TurnState, intent_id: str) -> str:
         for payload in turn_state.pending_action_batch:
             if payload["intent_id"] == intent_id:
-                return payload["capability_id"]
+                return str(payload.get("source_capability_id") or payload["capability_id"])
         return "unknown"
 
     def _lookup_risk_class(self, turn_state: TurnState, intent_id: str) -> str:
@@ -1005,6 +1123,54 @@ class TurnPipeline:
             if payload["intent_id"] == intent_id:
                 return payload["risk_class"]
         return "read_only"
+
+    def _record_unknown_capability_attempt(
+        self,
+        *,
+        request: TurnStartRequest,
+        turn_state: TurnState,
+        capability_id: str,
+        current_step: int,
+    ) -> int:
+        normalized_id = str(capability_id or "").strip() or "<empty>"
+        note = (
+            f"Unknown capability requested: {normalized_id}. "
+            "Use an exact id from capability_brief or reply without executing a capability."
+        )
+        turn_state.runtime_notes.append(note)
+        turn_state.step_index += 1
+        turn_state.working_memory.current_status = "replanning_after_unknown_capability"
+        turn_state.working_memory.next_best_step = "Choose an exact id from capability_brief or answer without a capability."
+        turn_state.working_memory.open_loops = [note]
+        self._task_manager.sync_task(turn_state.task)
+        self._services.store.update_turn_state(
+            request.turn_id,
+            turn_state.to_runtime_dict(),
+            task_id=turn_state.task.task_id,
+        )
+        self._services.store.log_step_event(
+            request.turn_id,
+            turn_state.step_index,
+            "unknown_capability_rejected",
+            {
+                "capability_id": normalized_id,
+                "note": note,
+                "task_id": turn_state.task.task_id,
+            },
+        )
+        self._services.debug.record_event(
+            request.turn_id,
+            "capability_rejected",
+            {
+                "reason": "unknown_capability",
+                "capability_id": normalized_id,
+                "task_id": turn_state.task.task_id,
+                "runtime_note": note,
+                "step_index": turn_state.step_index,
+            },
+            step_index=current_step,
+        )
+        return sum(1 for runtime_note in turn_state.runtime_notes if runtime_note.startswith("Unknown capability requested:"))
 
     def _execute_confirmed_internal_capability(
         self,
@@ -1201,6 +1367,10 @@ class TurnPipeline:
                     "risk_class": descriptor.risk_class,
                     "execution_mode": descriptor.execution_mode,
                     "requires_confirmation": descriptor.requires_confirmation,
+                    "domain": descriptor.domain,
+                    "preferred": descriptor.preferred,
+                    "semantic_level": descriptor.semantic_level,
+                    "freshness_hint": descriptor.freshness_hint,
                     "handler_kind": capability.handler_kind,
                     "description": descriptor.description,
                     "args_schema": descriptor.args_schema,
@@ -1240,6 +1410,10 @@ class TurnPipeline:
             "kind": capability.descriptor.kind,
             "risk_class": capability.descriptor.risk_class,
             "execution_mode": capability.descriptor.execution_mode,
+            "domain": capability.descriptor.domain,
+            "preferred": capability.descriptor.preferred,
+            "semantic_level": capability.descriptor.semantic_level,
+            "freshness_hint": capability.descriptor.freshness_hint,
             "requires_confirmation": (
                 getattr(capability_request, "requires_confirmation", False)
                 or getattr(decision, "requires_confirmation", False)

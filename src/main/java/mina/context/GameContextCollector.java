@@ -1,6 +1,7 @@
 package mina.context;
 
 import mina.bridge.BridgeModels;
+import mina.capability.DirectWorldReader;
 import mina.capability.CapabilityDefinition;
 import mina.capability.CapabilityExecutorRegistry;
 import mina.policy.PermissionResolver;
@@ -21,29 +22,35 @@ import java.util.Map;
 public final class GameContextCollector {
     private final PermissionResolver permissionResolver;
     private final CapabilityExecutorRegistry capabilityRegistry;
-    private final PlayerSnapshotProvider playerSnapshotProvider;
-    private final WorldSnapshotProvider worldSnapshotProvider;
+    private final PlayerStateProvider playerStateProvider;
+    private final WorldStateProvider worldStateProvider;
+    private final WorldSnapshotProvider ruleSnapshotProvider;
+    private final DirectWorldReader directWorldReader;
     private final TargetBlockSnapshotProvider targetBlockSnapshotProvider;
-    private final RecentEventsProvider recentEventsProvider;
+    private final RecentEventTracker recentEventTracker;
     private final boolean experimentalEnabled;
     private final boolean dynamicScriptingEnabled;
 
     public GameContextCollector(
             PermissionResolver permissionResolver,
             CapabilityExecutorRegistry capabilityRegistry,
-            PlayerSnapshotProvider playerSnapshotProvider,
-            WorldSnapshotProvider worldSnapshotProvider,
+            PlayerStateProvider playerStateProvider,
+            WorldStateProvider worldStateProvider,
+            WorldSnapshotProvider ruleSnapshotProvider,
+            DirectWorldReader directWorldReader,
             TargetBlockSnapshotProvider targetBlockSnapshotProvider,
-            RecentEventsProvider recentEventsProvider,
+            RecentEventTracker recentEventTracker,
             boolean experimentalEnabled,
             boolean dynamicScriptingEnabled
     ) {
         this.permissionResolver = permissionResolver;
         this.capabilityRegistry = capabilityRegistry;
-        this.playerSnapshotProvider = playerSnapshotProvider;
-        this.worldSnapshotProvider = worldSnapshotProvider;
+        this.playerStateProvider = playerStateProvider;
+        this.worldStateProvider = worldStateProvider;
+        this.ruleSnapshotProvider = ruleSnapshotProvider;
+        this.directWorldReader = directWorldReader;
         this.targetBlockSnapshotProvider = targetBlockSnapshotProvider;
-        this.recentEventsProvider = recentEventsProvider;
+        this.recentEventTracker = recentEventTracker;
         this.experimentalEnabled = experimentalEnabled;
         this.dynamicScriptingEnabled = dynamicScriptingEnabled;
     }
@@ -53,17 +60,29 @@ public final class GameContextCollector {
         List<CapabilityDefinition> visibleCapabilities = capabilityRegistry.visibleCapabilities(player, role);
         var world = player.getEntityWorld();
 
-        Map<String, Object> playerSnapshot = playerSnapshotProvider.collect(player, role);
-        Map<String, Object> worldSnapshot = worldSnapshotProvider.collectWorld(player);
+        Map<String, Object> playerSnapshot = playerStateProvider.collect(player, role, recentEventTracker);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> sceneSnapshot = directWorldReader.readScene(player);
+        Map<String, Object> worldSnapshot = worldStateProvider.collectWorld(player, String.valueOf(sceneSnapshot.get("location_kind")));
+        Map<String, Object> interactablesSnapshot = directWorldReader.readInteractables(player);
+        Map<String, Object> socialSnapshot = directWorldReader.readSocial(player);
+        Map<String, Object> technicalSnapshot = capabilityRegistry.ambientTechnicalSnapshot(player);
         Map<String, Object> targetBlockSnapshot = targetBlockSnapshotProvider.collect(player);
-        Map<String, Object> ruleReferences = worldSnapshotProvider.collectRuleReferences(world.getGameRules());
+        Map<String, Object> ruleReferences = ruleSnapshotProvider.collectRuleReferences(world.getGameRules());
+        Map<String, Object> recentEvents = Map.of("events", recentEventTracker.collect(player));
+        Object riskState = sceneSnapshot.get("risk_state");
 
         Map<String, Object> scopedSnapshot = new LinkedHashMap<>();
         scopedSnapshot.put("player", playerSnapshot);
         scopedSnapshot.put("world", worldSnapshot);
+        scopedSnapshot.put("scene", sceneSnapshot);
+        scopedSnapshot.put("interactables", interactablesSnapshot);
+        scopedSnapshot.put("social", socialSnapshot);
+        scopedSnapshot.put("technical", technicalSnapshot);
+        scopedSnapshot.put("risk_state", riskState instanceof Map<?, ?> ? riskState : Map.of());
         scopedSnapshot.put("target_block", targetBlockSnapshot);
         scopedSnapshot.put("server_rules_refs", ruleReferences);
-        scopedSnapshot.put("recent_events", recentEventsProvider.collect(player));
+        scopedSnapshot.put("recent_events", recentEventTracker.collect(player));
         scopedSnapshot.put("visible_capability_ids", visibleCapabilities.stream().map(CapabilityDefinition::id).toList());
 
         BridgeModels.PlayerPayload playerPayload = new BridgeModels.PlayerPayload();

@@ -114,6 +114,9 @@ class ExecutionOrchestrator:
             return f"Inspected task {task.get('task_id', '')}."
         if source in {"agent.explore.delegate", "agent.plan.delegate"}:
             return str(payload.get("summary") or source)
+        semantic_summary = self._semantic_world_summary(source, payload)
+        if semantic_summary is not None:
+            return semantic_summary
         if source.endswith(".read"):
             for key in ("summary", "block_name", "block_id", "message"):
                 value = payload.get(key)
@@ -177,7 +180,9 @@ class ExecutionOrchestrator:
         score = 0.4
         if source.startswith("agent."):
             score += 0.25
-        if source.endswith(".read"):
+        if source.endswith(".read") or source.startswith("observe."):
+            score += 0.1
+        if source in {"observe.scene", "world.scene.read", "world.threats.read", "world.environment.read"}:
             score += 0.1
         if payload.get("task_patch"):
             score += 0.15
@@ -191,6 +196,77 @@ class ExecutionOrchestrator:
             tags.append("block")
         if "player" in payload:
             tags.append("player")
+        if source in {"observe.scene", "world.scene.read", "world.threats.read", "world.environment.read"}:
+            tags.append("scene")
+        if source in {"observe.inventory", "world.inventory.read"}:
+            tags.append("inventory")
+        if source in {"observe.poi", "world.poi.read"}:
+            tags.append("poi")
+        if source in {"observe.technical", "carpet.observability.read", "carpet.fake_player.read", "carpet.rules.read"}:
+            tags.append("technical")
         if "results" in payload:
             tags.append("retrieval")
         return tags
+
+    def _semantic_world_summary(self, source: str, payload: dict[str, Any]) -> str | None:
+        if source in {"observe.scene", "world.scene.read"}:
+            risk_state = payload.get("risk_state")
+            location_kind = payload.get("location_kind")
+            biome = payload.get("biome")
+            environment_summary = payload.get("environment_summary")
+            if isinstance(risk_state, dict):
+                level = str(risk_state.get("level") or "unknown")
+                highest = risk_state.get("highest_threat")
+                if isinstance(environment_summary, str) and environment_summary.strip():
+                    if isinstance(highest, dict) and highest.get("name"):
+                        return f"{environment_summary.strip()} Current scene risk is {level}; highest nearby threat is {highest['name']}."
+                    return f"{environment_summary.strip()} Current scene risk is {level}."
+                location_clause = ""
+                if isinstance(location_kind, str) and location_kind.strip():
+                    location_clause = f" at {location_kind.replace('_', ' ')}"
+                if isinstance(biome, str) and biome.strip():
+                    location_clause += f" in {biome}"
+                if isinstance(highest, dict) and highest.get("name"):
+                    return f"Scene risk is {level}{location_clause}; highest nearby threat is {highest['name']}."
+                return f"Scene risk is {level}{location_clause}."
+        if source in {"world.threats.read", "world.environment.read"}:
+            summary = payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+        if source in {"observe.inventory", "world.inventory.read"}:
+            shortages = payload.get("shortages")
+            if isinstance(shortages, dict):
+                missing = [
+                    key.removeprefix("needs_").replace("_", " ")
+                    for key, needed in shortages.items()
+                    if bool(needed)
+                ]
+                if missing:
+                    return "Inventory pressure detected: " + ", ".join(missing) + "."
+                return "Inventory brief shows no urgent shortage."
+        if source in {"observe.poi", "world.poi.read"}:
+            for key in ("structure", "biome", "poi"):
+                value = payload.get(key)
+                if isinstance(value, dict) and value.get("found"):
+                    label = value.get("tag") or value.get("biome") or value.get("type") or key
+                    return f"Located nearby {key}: {label}."
+            summary = payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+            return "No nearby structure, biome, or point of interest was confirmed."
+        if source in {"observe.social", "world.social.read"}:
+            summary = payload.get("party_summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+        if source in {"observe.technical", "carpet.observability.read", "carpet.fake_player.read", "carpet.rules.read"}:
+            if payload.get("carpet_loaded") is False:
+                return "Carpet observability is unavailable on this server."
+            logger_names = payload.get("logger_names")
+            if isinstance(logger_names, list):
+                fake_player_count = payload.get("fake_player_count") or payload.get("count") or 0
+                return f"Technical observability is available with {len(logger_names)} loggers and {fake_player_count} fake players."
+            summary = payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+            return "Technical observability snapshot captured."
+        return None

@@ -31,21 +31,35 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 
 public final class CapabilityExecutorRegistry {
     private final MinaConfig config;
+    private final DirectWorldReader directWorldReader;
+    private final VanillaCommandBackend vanillaCommandBackend;
+    private final CarpetObservationBackend carpetObservationBackend;
     private final Map<String, CapabilityDefinition> capabilities;
     private final boolean carpetAvailable;
 
-    public CapabilityExecutorRegistry(MinaConfig config) {
+    public CapabilityExecutorRegistry(
+            MinaConfig config,
+            DirectWorldReader directWorldReader,
+            VanillaCommandBackend vanillaCommandBackend,
+            CarpetObservationBackend carpetObservationBackend
+    ) {
         this.config = config;
+        this.directWorldReader = directWorldReader;
+        this.vanillaCommandBackend = vanillaCommandBackend;
+        this.carpetObservationBackend = carpetObservationBackend;
         this.carpetAvailable = FabricLoader.getInstance().isModLoaded("carpet");
         this.capabilities = buildCapabilities();
     }
 
     public boolean isCarpetAvailable() {
         return carpetAvailable;
+    }
+
+    public Map<String, Object> ambientTechnicalSnapshot(ServerPlayerEntity player) {
+        return directWorldReader.readAmbientTechnicalState(player);
     }
 
     public List<CapabilityDefinition> visibleCapabilities(ServerPlayerEntity player, PlayerRole role) {
@@ -72,7 +86,205 @@ public final class CapabilityExecutorRegistry {
 
     private Map<String, CapabilityDefinition> buildCapabilities() {
         Map<String, CapabilityDefinition> map = new LinkedHashMap<>();
-        map.put("game.player_snapshot.read", new CapabilityDefinition(
+
+        register(map, new CapabilityDefinition(
+                "world.player_state.read",
+                "tool",
+                "Read Mina's structured player-state view, including survival pressure, movement flags, hands, experience, and inventory shortages.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("player", "object"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readPlayerState(player), "Read structured player state.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.scene.read",
+                "tool",
+                "Read Mina's structured scene summary, including location kind, biome, threats, hazards, safe spots, and current risk.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("scene", "object"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readScene(player), "Read structured scene state.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.threats.read",
+                "tool",
+                "Read nearby entity threats with Mina's hostile, explosive, and direction-aware threat summary.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("threats", "object"),
+                "world",
+                true,
+                "semantic",
+                "live",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readThreats(player), "Read nearby threat summary.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.environment.read",
+                "tool",
+                "Read Mina's environment summary, including location kind, biome, terrain safety, nearby hazards, and safe spots.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("environment", "object"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readEnvironment(player), "Read environment summary.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.interactables.read",
+                "tool",
+                "Read nearby containers, workstations, shelter markers, and other important utility blocks around the player.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("interactables", "object"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readInteractables(player), "Read nearby interactables.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.inventory.read",
+                "tool",
+                "Read Mina's inventory brief, including armor, shortages, and readiness for exploration.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("inventory", "object"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readInventory(player), "Read inventory brief.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.poi.read",
+                "tool",
+                "Locate nearby structures, biomes, or points of interest in a typed, structured format.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(
+                        "kind", "string",
+                        "query", "string",
+                        "radius", "integer"
+                ),
+                Map.of("poi", "object"),
+                "world",
+                true,
+                "semantic",
+                "live",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readPoi(player, arguments), "Located nearby points of interest.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.social.read",
+                "tool",
+                "Read nearby players and companionship context, including whether the player is currently alone.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("social", "object"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readSocial(player), "Read nearby social context.")
+        ));
+        register(map, new CapabilityDefinition(
+                "world.events.read",
+                "tool",
+                "Read recent important continuity events, including damage, death, respawn, dimension changes, and nearby notable events.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("recent_events", "array<object>"),
+                "world",
+                true,
+                "semantic",
+                "ambient",
+                (player, role) -> true,
+                (player, arguments) -> new CapabilityResult(directWorldReader.readEvents(player), "Read recent world events.")
+        ));
+        register(map, new CapabilityDefinition(
+                "carpet.rules.read",
+                "tool",
+                "Read a structured summary of important Carpet and Scarpet rule toggles.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("rules", "object"),
+                "technical",
+                true,
+                "diagnostic",
+                "live",
+                (player, role) -> carpetAvailable,
+                (player, arguments) -> new CapabilityResult(carpetObservationBackend.readRules(player), "Read Carpet rules.")
+        ));
+        register(map, new CapabilityDefinition(
+                "carpet.observability.read",
+                "tool",
+                "Read structured Carpet observability state, including loggers, script-server visibility, and hopper counters.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("technical", "object"),
+                "technical",
+                true,
+                "diagnostic",
+                "live",
+                (player, role) -> carpetAvailable,
+                (player, arguments) -> new CapabilityResult(carpetObservationBackend.readObservability(player), "Read Carpet observability state.")
+        ));
+        register(map, new CapabilityDefinition(
+                "carpet.fake_player.read",
+                "tool",
+                "Read the current fake-player roster and their basic in-world status.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(),
+                Map.of("fake_players", "array<object>"),
+                "technical",
+                true,
+                "diagnostic",
+                "live",
+                (player, role) -> carpetAvailable,
+                (player, arguments) -> new CapabilityResult(carpetObservationBackend.readFakePlayers(player), "Read Carpet fake players.")
+        ));
+
+        register(map, new CapabilityDefinition(
                 "game.player_snapshot.read",
                 "tool",
                 "Read the current player's server-side snapshot, including health, hunger, hands, position, and a small inventory summary.",
@@ -81,10 +293,14 @@ public final class CapabilityExecutorRegistry {
                 false,
                 Map.of(),
                 Map.of(),
+                "world",
+                false,
+                "raw",
+                "live",
                 (player, role) -> true,
                 (player, arguments) -> new CapabilityResult(collectPlayerSnapshot(player), "Read current player snapshot.")
         ));
-        map.put("game.nearby_entities.read", new CapabilityDefinition(
+        register(map, new CapabilityDefinition(
                 "game.nearby_entities.read",
                 "tool",
                 "List nearby entities around the player within a radius, optionally filtered by a category such as monster, hostile, living, player, or a specific entity id.",
@@ -103,10 +319,14 @@ public final class CapabilityExecutorRegistry {
                         "entities", "array<object>",
                         "summary", "string"
                 ),
+                "world",
+                false,
+                "raw",
+                "live",
                 (player, role) -> true,
                 this::executeNearbyEntitiesRead
         ));
-        map.put("game.target_block.read", new CapabilityDefinition(
+        register(map, new CapabilityDefinition(
                 "game.target_block.read",
                 "tool",
                 "Inspect the block the player is currently targeting, or a supplied block position if present.",
@@ -122,10 +342,14 @@ public final class CapabilityExecutorRegistry {
                         "is_air", "boolean",
                         "luminance", "integer"
                 ),
+                "world",
+                false,
+                "raw",
+                "live",
                 (player, role) -> true,
-                (player, arguments) -> executeTargetBlockRead(player, arguments)
+                this::executeTargetBlockRead
         ));
-        map.put("server.rules.read", new CapabilityDefinition(
+        register(map, new CapabilityDefinition(
                 "server.rules.read",
                 "tool",
                 "Read a summary of current gamerules plus server.properties when available.",
@@ -134,10 +358,14 @@ public final class CapabilityExecutorRegistry {
                 false,
                 Map.of(),
                 Map.of(),
+                "server",
+                false,
+                "diagnostic",
+                "live",
                 (player, role) -> true,
                 (player, arguments) -> executeServerRulesRead(player)
         ));
-        map.put("carpet.block_info.read", new CapabilityDefinition(
+        register(map, new CapabilityDefinition(
                 "carpet.block_info.read",
                 "tool",
                 "Read Carpet block diagnostics for the targeted block or a supplied block position.",
@@ -150,22 +378,33 @@ public final class CapabilityExecutorRegistry {
                         "lines", "array<string>",
                         "summary", "string"
                 ),
+                "technical",
+                false,
+                "diagnostic",
+                "live",
                 (player, role) -> carpetAvailable,
-                (player, arguments) -> executeCarpetBlockInfo(player, arguments)
+                this::executeCarpetBlockInfo
         ));
-        map.put("carpet.distance.measure", new CapabilityDefinition(
+        register(map, new CapabilityDefinition(
                 "carpet.distance.measure",
                 "tool",
                 "Measure distance between two positions using structured metrics instead of raw Carpet commands.",
                 RiskClass.READ_ONLY,
                 "server_main_thread",
                 false,
+                Map.of(
+                        "from", "object{x,y,z}",
+                        "to", "object{x,y,z}"
+                ),
                 Map.of(),
-                Map.of(),
+                "technical",
+                false,
+                "raw",
+                "live",
                 (player, role) -> carpetAvailable,
-                (player, arguments) -> executeDistanceMeasure(player, arguments)
+                this::executeDistanceMeasure
         ));
-        map.put("carpet.mobcaps.read", new CapabilityDefinition(
+        register(map, new CapabilityDefinition(
                 "carpet.mobcaps.read",
                 "tool",
                 "Read Carpet's current mobcap report for the player's dimension.",
@@ -174,10 +413,18 @@ public final class CapabilityExecutorRegistry {
                 false,
                 Map.of(),
                 Map.of(),
+                "technical",
+                false,
+                "diagnostic",
+                "live",
                 (player, role) -> carpetAvailable,
                 (player, arguments) -> executeMobcapsRead(player)
         ));
         return Map.copyOf(map);
+    }
+
+    private void register(Map<String, CapabilityDefinition> map, CapabilityDefinition definition) {
+        map.put(definition.id(), definition);
     }
 
     private Map<String, Object> blockPosArgSchema(String description) {
@@ -219,19 +466,21 @@ public final class CapabilityExecutorRegistry {
         payload.put("block_name", blockState.getBlock().getName().getString());
         payload.put("is_air", blockState.isAir());
         payload.put("luminance", blockState.getLuminance());
+        payload.put("block_data", vanillaCommandBackend.readBlockData(player, blockPos));
         return new CapabilityResult(payload, "Read targeted block state.");
     }
 
     private CapabilityResult executeServerRulesRead(ServerPlayerEntity player) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        GameRules gameRules = player.getEntityWorld().getGameRules();
+        ServerWorld world = player.getEntityWorld();
+        GameRules gameRules = world.getGameRules();
         Map<String, Object> gamerules = new LinkedHashMap<>();
         for (GameRule<?> rule : gameRules.streamRules().toList()) {
             gamerules.put(Registries.GAME_RULE.getId(rule).toString(), gameRules.getRuleValueName(rule));
         }
         payload.put("gamerules", gamerules);
 
-        var serverPropertiesPath = player.getEntityWorld().getServer().getRunDirectory().resolve("server.properties");
+        var serverPropertiesPath = world.getServer().getRunDirectory().resolve("server.properties");
         if (Files.exists(serverPropertiesPath)) {
             payload.put("server_properties_path", serverPropertiesPath.toString());
             payload.put("server_properties", CarpetCapabilitySupport.readPropertiesFile(serverPropertiesPath));
@@ -338,6 +587,7 @@ public final class CapabilityExecutorRegistry {
         payload.put("entities", entities);
         payload.put("truncated", matches.size() > entities.size());
         payload.put("summary", buildNearbyEntitiesSummary(normalizedFilter, radius, entities.size(), matches.size() > entities.size()));
+        payload.put("selector_backend", vanillaCommandBackend.executeProbe(player, Map.of("entity_type", normalizedFilter, "radius", radius)));
         return new CapabilityResult(payload, "Scanned nearby entities around the player.");
     }
 
@@ -382,6 +632,7 @@ public final class CapabilityExecutorRegistry {
         if (entity instanceof LivingEntity livingEntity) {
             payload.put("health", livingEntity.getHealth());
         }
+        payload.put("tags", new ArrayList<>(entity.getCommandTags()));
         return payload;
     }
 

@@ -9,6 +9,13 @@ mina.max_continuation_depth=8
 mina.target_reach_blocks=6
 mina.inventory_summary_limit=8
 mina.server_rule_summary_limit=12
+mina.entity_scan_radius=24
+mina.entity_scan_limit=32
+mina.entity_scan_interval_ticks=20
+mina.interactable_scan_radius=12
+mina.interactable_scan_vertical_range=4
+mina.interactable_scan_interval_ticks=40
+mina.long_danger_threshold_ticks=200
 mina.enable_experimental=false
 mina.enable_dynamic_scripting=false
 
