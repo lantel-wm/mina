@@ -66,6 +66,7 @@ class RuntimeRefactorTests(unittest.TestCase):
                 "stable_core",
                 "runtime_policy",
                 "scene_slice",
+                "observation_brief",
                 "task_focus",
                 "confirmation_loop",
                 "dialogue_continuity",
@@ -1470,6 +1471,79 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIn("需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？", user_content)
         self.assertIn('"turns"', user_content)
         self.assertIn('"assistant_reply"', user_content)
+
+    def test_explicit_new_question_does_not_activate_dialogue_continuity(self) -> None:
+        _, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
+        memory_manager = MemoryManager(store, memory_policy)
+
+        first_request = self._turn_request(turn_id="turn-dialogue-new-question-1")
+        first_request.user_message = "where am i"
+        first_state = self._turn_state(first_request)
+        first_state.task.status = "completed"
+        memory_manager.record_turn_memories(
+            first_request,
+            first_state,
+            final_reply="你在黑森林里。需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
+            status="completed",
+        )
+
+        second_request = self._turn_request(turn_id="turn-dialogue-new-question-2")
+        second_request.user_message = "what is this"
+        context_result = context_engine.build_messages(
+            request=second_request,
+            turn_state=self._turn_state(second_request),
+            capability_descriptors=[],
+        )
+
+        continuity_section = next(section for section in context_result.sections if section["name"] == "dialogue_continuity")
+        self.assertFalse(continuity_section["preview"]["available"])
+        self.assertEqual(
+            continuity_section["preview"]["suppressed_reason"],
+            "current_message_looks_like_a_new_request",
+        )
+        user_content = context_result.messages[1]["content"]
+        self.assertNotIn('"active_dialogue_loop"', user_content)
+        self.assertIn("[dialogue_history]", user_content)
+        self.assertIn("what is this", user_content)
+
+    def test_observation_brief_exposes_latest_target_read_for_answering(self) -> None:
+        _, _, _, _, context_engine, orchestrator, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-observation-brief")
+        request.user_message = "what is this"
+        turn_state = self._turn_state(request)
+        turn_state.task.goal = "what is this"
+
+        orchestrator.register_observation(
+            turn_state,
+            source="game.target_block.read",
+            payload={
+                "target_found": True,
+                "pos": {"x": -3, "y": 84, "z": 2},
+                "block_id": "minecraft:dark_oak_leaves",
+                "block_name": "Dark Oak Leaves",
+            },
+            kind="bridge_result",
+        )
+
+        context_result = context_engine.build_messages(
+            request=request,
+            turn_state=turn_state,
+            capability_descriptors=[],
+        )
+
+        observation_section = next(section for section in context_result.sections if section["name"] == "observation_brief")
+        self.assertTrue(observation_section["preview"]["available"])
+        self.assertEqual(
+            observation_section["preview"]["block_subject_lock"]["block_name"],
+            "Dark Oak Leaves",
+        )
+        self.assertEqual(
+            observation_section["preview"]["latest_observations"][0]["summary"],
+            "Dark Oak Leaves",
+        )
+        user_content = context_result.messages[1]["content"]
+        self.assertIn("[observation_brief]", user_content)
+        self.assertIn("Dark Oak Leaves", user_content)
 
     def test_model_sees_recent_dialogue_memory_for_brief_follow_up_turn(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import uuid
 from time import perf_counter
@@ -258,6 +259,12 @@ class TurnPipeline:
         continuation_id = action_request_payload.get("continuation_id") or str(uuid.uuid4())
         action_request_payload["continuation_id"] = continuation_id
         pending_payload = dict(action_request_payload)
+        decision_capability_id = str(source_capability_id or capability.descriptor.id)
+        self._record_capability_call(
+            turn_state,
+            capability_id=decision_capability_id,
+            arguments=action_request_payload["arguments"],
+        )
         if source_capability_id is not None:
             pending_payload["source_capability_id"] = source_capability_id
         turn_state.pending_action_batch = [pending_payload]
@@ -415,12 +422,20 @@ class TurnPipeline:
         if request.action_results:
             for result in request.action_results:
                 capability_id = self._lookup_capability_id(turn_state, result.intent_id)
+                action_payload = self._lookup_action_payload(turn_state, result.intent_id)
                 observation = self._execution_manager.register_observation(
                     turn_state,
                     source=capability_id,
                     payload=result.observations,
                     kind="bridge_result",
                 )
+                if action_payload is not None:
+                    self._record_capability_observation(
+                        turn_state,
+                        capability_id=capability_id,
+                        arguments=action_payload.get("arguments", {}),
+                        observations=result.observations,
+                    )
                 payload = {
                     "intent_id": result.intent_id,
                     "capability_id": capability_id,
@@ -661,6 +676,16 @@ class TurnPipeline:
                 )
 
             if decision.intent in {"delegate_explore", "delegate_plan"} and decision.delegate_request is not None:
+                delegate_blocked, delegate_response = self._handle_repeated_delegate(
+                    request=request,
+                    turn_state=turn_state,
+                    delegate_request=decision.delegate_request.model_dump(),
+                    current_step=current_step,
+                )
+                if delegate_response is not None:
+                    return delegate_response
+                if delegate_blocked:
+                    continue
                 delegate_result = self._delegate_runtime.run(decision.delegate_request, turn_state)
                 self._task_manager.apply_task_patch(turn_state, delegate_result.task_patch)
                 observation = self._execution_manager.register_observation(
@@ -675,6 +700,8 @@ class TurnPipeline:
                     kind="delegate_result",
                 )
                 turn_state.delegate_history.append(delegate_result.model_dump())
+                turn_state.last_delegate_role = delegate_result.role
+                turn_state.last_delegate_fact_revision = self._non_delegate_fact_revision(turn_state)
                 turn_state.step_index += 1
                 turn_state.working_memory.current_status = f"delegate_{delegate_result.role}_completed"
                 self._task_manager.sync_task(turn_state.task)
@@ -741,6 +768,17 @@ class TurnPipeline:
                 capability,
                 capability_request.arguments if capability_request is not None else decision.arguments,
             )
+            capability_blocked, capability_response = self._handle_repeated_capability(
+                request=request,
+                turn_state=turn_state,
+                capability=capability,
+                resolved_arguments=resolved_arguments,
+                current_step=current_step,
+            )
+            if capability_response is not None:
+                return capability_response
+            if capability_blocked:
+                continue
             self._services.debug.record_event(
                 request.turn_id,
                 "capability_started",
@@ -777,6 +815,11 @@ class TurnPipeline:
                 )
 
             if capability.handler_kind == "internal":
+                self._record_capability_call(
+                    turn_state,
+                    capability_id=capability.descriptor.id,
+                    arguments=resolved_arguments,
+                )
                 trace_events.append(self._internal_start_trace(capability, resolved_arguments, current_step))
                 started = perf_counter()
                 try:
@@ -823,6 +866,12 @@ class TurnPipeline:
                     payload=observation_payload,
                     kind="internal_capability",
                 )
+                self._record_capability_observation(
+                    turn_state,
+                    capability_id=capability.descriptor.id,
+                    arguments=resolved_arguments,
+                    observations=observation_payload,
+                )
                 self._task_manager.apply_task_patch(turn_state, observation_payload.get("task_patch"))
                 turn_state.step_index += 1
                 turn_state.working_memory.current_status = "internal_capability_completed"
@@ -857,6 +906,11 @@ class TurnPipeline:
                 continue
 
             if capability.handler_kind == "bridge_proxy":
+                self._record_capability_call(
+                    turn_state,
+                    capability_id=capability.descriptor.id,
+                    arguments=resolved_arguments,
+                )
                 trace_events.append(self._internal_start_trace(capability, resolved_arguments, current_step))
                 started = perf_counter()
                 try:
@@ -926,6 +980,12 @@ class TurnPipeline:
                     source=capability.descriptor.id,
                     payload=observation_payload,
                     kind="bridge_proxy_capability",
+                )
+                self._record_capability_observation(
+                    turn_state,
+                    capability_id=capability.descriptor.id,
+                    arguments=resolved_arguments,
+                    observations=observation_payload,
                 )
                 self._task_manager.apply_task_patch(turn_state, observation_payload.get("task_patch"))
                 turn_state.step_index += 1
@@ -1129,11 +1189,218 @@ class TurnPipeline:
                 return str(payload.get("source_capability_id") or payload["capability_id"])
         return "unknown"
 
+    def _lookup_action_payload(self, turn_state: TurnState, intent_id: str) -> dict[str, Any] | None:
+        for payload in turn_state.pending_action_batch:
+            if payload["intent_id"] == intent_id:
+                return payload
+        return None
+
     def _lookup_risk_class(self, turn_state: TurnState, intent_id: str) -> str:
         for payload in turn_state.pending_action_batch:
             if payload["intent_id"] == intent_id:
                 return payload["risk_class"]
         return "read_only"
+
+    def _non_delegate_fact_revision(self, turn_state: TurnState) -> int:
+        return sum(1 for observation in turn_state.observations if not observation.source.startswith("agent."))
+
+    def _capability_fingerprint(self, capability_id: str, arguments: dict[str, Any]) -> str:
+        return f"{capability_id}::{json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
+
+    def _record_capability_call(
+        self,
+        turn_state: TurnState,
+        *,
+        capability_id: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        fingerprint = self._capability_fingerprint(capability_id, arguments)
+        turn_state.capability_call_counts[fingerprint] = turn_state.capability_call_counts.get(fingerprint, 0) + 1
+        return fingerprint
+
+    def _record_capability_observation(
+        self,
+        turn_state: TurnState,
+        *,
+        capability_id: str,
+        arguments: dict[str, Any],
+        observations: dict[str, Any],
+    ) -> None:
+        fingerprint = self._capability_fingerprint(capability_id, arguments)
+        turn_state.capability_latest_observations[fingerprint] = dict(observations)
+
+    def _capability_observation_is_ambiguous(self, capability_id: str, observations: dict[str, Any] | None) -> bool:
+        if not isinstance(observations, dict) or not observations:
+            return True
+        if capability_id == "game.target_block.read":
+            if observations.get("target_found") is False:
+                return True
+            if observations.get("target_found") is True:
+                return False
+        if isinstance(observations.get("summary"), str) and observations["summary"].strip():
+            return False
+        if isinstance(observations.get("message"), str) and observations["message"].strip():
+            return False
+        if isinstance(observations.get("block_name"), str) and observations["block_name"].strip():
+            return False
+        if isinstance(observations.get("block_id"), str) and observations["block_id"].strip():
+            return False
+        results = observations.get("results")
+        if isinstance(results, list) and results:
+            return False
+        return True
+
+    def _handle_repeated_capability(
+        self,
+        *,
+        request: TurnStartRequest,
+        turn_state: TurnState,
+        capability: Any,
+        resolved_arguments: dict[str, Any],
+        current_step: int,
+    ) -> tuple[bool, TurnResponse | None]:
+        capability_id = capability.descriptor.id
+        fingerprint = self._capability_fingerprint(capability_id, resolved_arguments)
+        prior_count = turn_state.capability_call_counts.get(fingerprint, 0)
+        latest_observation = turn_state.capability_latest_observations.get(fingerprint)
+        if prior_count <= 0:
+            return False, None
+        allow_one_retry = self._capability_observation_is_ambiguous(capability_id, latest_observation)
+        if allow_one_retry and prior_count == 1:
+            return False, None
+
+        loop_hits = turn_state.capability_replan_counts.get(fingerprint, 0) + 1
+        turn_state.capability_replan_counts[fingerprint] = loop_hits
+        note = (
+            f"Repeated capability blocked: {capability_id} with identical resolved arguments. "
+            "Use the fresh observation you already have, change strategy, or reply directly."
+        )
+        turn_state.runtime_notes.append(note)
+
+        if loop_hits == 1:
+            turn_state.step_index += 1
+            turn_state.working_memory.current_status = "replanning_after_repeated_capability"
+            turn_state.working_memory.next_best_step = "Answer from the existing observation or choose a different capability."
+            turn_state.working_memory.open_loops = [note]
+            self._task_manager.sync_task(turn_state.task)
+            self._services.store.update_turn_state(
+                request.turn_id,
+                turn_state.to_runtime_dict(),
+                task_id=turn_state.task.task_id,
+            )
+            payload = {
+                "reason": "repeated_capability_same_fingerprint",
+                "capability_id": capability_id,
+                "arguments": resolved_arguments,
+                "task_id": turn_state.task.task_id,
+                "runtime_note": note,
+                "loop_hits": loop_hits,
+            }
+            self._services.store.log_step_event(
+                request.turn_id,
+                turn_state.step_index,
+                "capability_repeat_rejected",
+                payload,
+            )
+            self._services.debug.record_event(
+                request.turn_id,
+                "capability_rejected",
+                payload,
+                step_index=current_step,
+            )
+            return True, None
+
+        return True, self._return_final_reply(
+            request.turn_id,
+            request.session_ref,
+            "我已经拒绝了重复的同一读取请求，但模型仍然没有改用已有观察或换一种方式。这一轮先停下，避免继续空转。",
+            [],
+            status="failed",
+            step_index=current_step,
+            debug_payload={
+                "reason": "repeated_capability_loop_guard",
+                "capability_id": capability_id,
+                "arguments": resolved_arguments,
+                "loop_hits": loop_hits,
+            },
+            turn_state=turn_state,
+            request=request,
+        )
+
+    def _handle_repeated_delegate(
+        self,
+        *,
+        request: TurnStartRequest,
+        turn_state: TurnState,
+        delegate_request: dict[str, Any],
+        current_step: int,
+    ) -> tuple[bool, TurnResponse | None]:
+        role = str(delegate_request.get("role") or "").strip()
+        if not role:
+            return False, None
+        current_fact_revision = self._non_delegate_fact_revision(turn_state)
+        if turn_state.last_delegate_role != role or current_fact_revision != turn_state.last_delegate_fact_revision:
+            return False, None
+
+        loop_hits = turn_state.delegate_replan_counts.get(role, 0) + 1
+        turn_state.delegate_replan_counts[role] = loop_hits
+        note = (
+            f"Repeated delegate blocked: {role} was requested again without new live facts. "
+            "Use the delegate result you already have or switch to a visible read capability."
+        )
+        turn_state.runtime_notes.append(note)
+
+        if loop_hits == 1:
+            turn_state.step_index += 1
+            turn_state.working_memory.current_status = "replanning_after_repeated_delegate"
+            turn_state.working_memory.next_best_step = "Use the existing delegate result or inspect live state directly."
+            turn_state.working_memory.open_loops = [note]
+            self._task_manager.sync_task(turn_state.task)
+            self._services.store.update_turn_state(
+                request.turn_id,
+                turn_state.to_runtime_dict(),
+                task_id=turn_state.task.task_id,
+            )
+            payload = {
+                "reason": "repeated_delegate_without_new_facts",
+                "delegate_role": role,
+                "task_id": turn_state.task.task_id,
+                "runtime_note": note,
+                "loop_hits": loop_hits,
+            }
+            self._services.store.log_step_event(
+                request.turn_id,
+                turn_state.step_index,
+                "delegate_repeat_rejected",
+                payload,
+            )
+            self._services.debug.record_event(
+                request.turn_id,
+                "delegate_rejected",
+                payload,
+                step_index=current_step,
+            )
+            return True, None
+
+        final_reply = (
+            "我已经拒绝了没有新事实支撑的重复委托，但模型仍然没有改用现有结果或换一种办法。"
+            " 这一轮先停下，避免继续空转。"
+        )
+        return True, self._return_final_reply(
+            request.turn_id,
+            request.session_ref,
+            final_reply,
+            [],
+            status="failed",
+            step_index=current_step,
+            debug_payload={
+                "reason": "repeated_delegate_loop_guard",
+                "delegate_role": role,
+                "loop_hits": loop_hits,
+            },
+            turn_state=turn_state,
+            request=request,
+        )
 
     def _record_unknown_capability_attempt(
         self,

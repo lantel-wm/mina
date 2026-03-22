@@ -719,6 +719,141 @@ class DebugTraceTests(unittest.TestCase):
         completed_event = self._find_event(events, "turn_completed")
         self.assertNotIn("reason", completed_event["payload"])
 
+    def test_repeated_same_locked_capability_is_replanned_then_stopped(self) -> None:
+        visible_capabilities = [self._target_block_capability()]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("game.target_block.read"),
+                self._capability_result("game.target_block.read"),
+                self._capability_result("game.target_block.read"),
+            ],
+        )
+
+        first_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-repeat-loop-guard",
+                user_message="what is this",
+                visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=8, max_bridge_actions_per_turn=6, max_continuation_depth=6),
+            )
+        )
+        first_request = first_response.action_request_batch[0]
+
+        second_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-repeat-loop-guard",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 0, "y": 77, "z": 25},
+                            "block_id": "minecraft:red_mushroom_block",
+                            "block_name": "Red Mushroom Block",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read targeted block state.",
+                        timing_ms=6,
+                        state_fingerprint="target-1",
+                    )
+                ],
+            ),
+        )
+        self.assertEqual(second_response.type, "action_request_batch")
+        second_request = second_response.action_request_batch[0]
+        self.assertEqual(second_request.arguments["block_pos"], {"x": 0, "y": 77, "z": 25})
+
+        final_response = loop.resume_turn(
+            second_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-repeat-loop-guard",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=second_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 0, "y": 77, "z": 25},
+                            "block_id": "minecraft:red_mushroom_block",
+                            "block_name": "Red Mushroom Block",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read locked target block.",
+                        timing_ms=5,
+                        state_fingerprint="target-2",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(final_response.type, "final_reply")
+        self.assertIn("重复的同一读取请求", final_response.final_reply or "")
+        events = self._load_events(settings.debug_dir, "turn-repeat-loop-guard")
+        rejected_event = self._find_event(events, "capability_rejected")
+        self.assertEqual(rejected_event["payload"]["reason"], "repeated_capability_same_fingerprint")
+        failed_event = self._find_event(events, "turn_failed")
+        self.assertEqual(failed_event["payload"]["reason"], "repeated_capability_loop_guard")
+
+    def test_repeated_delegate_without_new_facts_forces_model_to_choose_new_step(self) -> None:
+        visible_capabilities = [self._target_block_capability()]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                ProviderDecisionResult(
+                    decision=ModelDecision(
+                        intent="delegate_explore",
+                        delegate_role="explore",
+                        delegate_objective="先看看玩家指着什么",
+                    ),
+                    latency_ms=10,
+                    raw_response_preview='{"intent":"delegate_explore"}',
+                    parse_status="ok",
+                    model="test-model",
+                    temperature=0.2,
+                    message_count=2,
+                ),
+                ProviderDecisionResult(
+                    decision=ModelDecision(
+                        intent="delegate_explore",
+                        delegate_role="explore",
+                        delegate_objective="再委托一次看看玩家指着什么",
+                    ),
+                    latency_ms=10,
+                    raw_response_preview='{"intent":"delegate_explore"}',
+                    parse_status="ok",
+                    model="test-model",
+                    temperature=0.2,
+                    message_count=2,
+                ),
+                self._capability_result("game.target_block.read"),
+            ],
+        )
+
+        first_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-repeat-delegate-guard",
+                user_message="what is this",
+                visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=6, max_bridge_actions_per_turn=2, max_continuation_depth=2),
+            )
+        )
+
+        self.assertEqual(first_response.type, "progress_update")
+        second_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(turn_id="turn-repeat-delegate-guard", action_results=[]),
+        )
+
+        self.assertEqual(second_response.type, "action_request_batch")
+        self.assertEqual(second_response.action_request_batch[0].capability_id, "game.target_block.read")
+        events = self._load_events(settings.debug_dir, "turn-repeat-delegate-guard")
+        rejected_event = self._find_event(events, "delegate_rejected")
+        self.assertEqual(rejected_event["payload"]["reason"], "repeated_delegate_without_new_facts")
+
     def _build_loop(
         self,
         *,

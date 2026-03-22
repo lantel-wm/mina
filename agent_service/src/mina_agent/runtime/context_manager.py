@@ -90,6 +90,14 @@ class ContextManager:
                     priority=85,
                 ),
                 self._slot(
+                    "observation_brief",
+                    "user",
+                    "turn_state.observations+block_subject_lock",
+                    "structured_live_observation_brief",
+                    self._build_observation_brief(turn_state),
+                    priority=82,
+                ),
+                self._slot(
                     "task_focus",
                     "user",
                     "turn_state.working_memory+task",
@@ -110,7 +118,7 @@ class ContextManager:
                     "user",
                     "session_summary.active_dialogue_loop",
                     "structured_dialogue_continuity",
-                    self._build_dialogue_continuity(recent_dialogue_memory),
+                    self._build_dialogue_continuity(recent_dialogue_memory, request.user_message),
                     priority=57,
                 ),
                 self._slot(
@@ -181,8 +189,13 @@ class ContextManager:
             "capability_brief is the authoritative exact list of callable capability ids for this turn.\n"
             "dialogue_history is the authoritative recent conversation history sourced from persisted DB turns.\n"
             "If dialogue_continuity includes an active open question and the current user message is brief or elliptical, treat it as a continuation of that question before treating it as a new request.\n"
+            "If the current player message is already a complete new question or request, do not reinterpret it as a reply to the previous open follow-up.\n"
+            "observation_brief contains the latest live read results and any locked target subject for this turn.\n"
             "Never invent capability ids. Use an id from capability_brief exactly.\n"
             "Unknown capability ids are invalid. If no visible capability matches, do not guess an id; reply, guide, or delegate_plan instead.\n"
+            "Do not call the same capability again with the same resolved arguments after you already have a fresh result. Answer from that observation or change strategy.\n"
+            "When a direct target inspection capability is visible and the player is asking what they are currently looking at, prefer that live read before delegate_explore.\n"
+            "If observation_brief already identifies the current target block or entity, answer directly instead of rereading the same target.\n"
             "Return JSON only.\n"
             'Reply/guide with {"intent":"reply","final_reply":"..."} or {"intent":"guide","final_reply":"..."}.\n'
             'Inspect/retrieve/execute with {"intent":"execute","capability_request":{"capability_id":"...","arguments":{},"effect_summary":"...","requires_confirmation":false}}.\n'
@@ -262,6 +275,26 @@ class ContextManager:
                 "user_message": TurnStartRequest.model_validate(turn_state.request).user_message,
                 "pending_confirmation": turn_state.pending_confirmation,
             },
+        }
+
+    def _build_observation_brief(self, turn_state: TurnState) -> dict[str, Any]:
+        latest_observations: list[dict[str, Any]] = []
+        for observation in reversed(turn_state.observations[-3:]):
+            latest_observations.append(
+                {
+                    "source": observation.source,
+                    "summary": observation.summary,
+                    "preview": observation.preview,
+                    "scope_tags": observation.scope_tags,
+                    "created_at": observation.created_at,
+                }
+            )
+        block_subject_lock = turn_state.block_subject_lock.model_dump() if turn_state.block_subject_lock is not None else None
+        return {
+            "available": bool(latest_observations or block_subject_lock or turn_state.runtime_notes),
+            "latest_observations": latest_observations,
+            "block_subject_lock": block_subject_lock,
+            "runtime_notes": turn_state.runtime_notes[-4:],
         }
 
     def _build_confirmation_loop(self, turn_state: TurnState) -> dict[str, Any]:
@@ -388,12 +421,18 @@ class ContextManager:
             "continuity_hint": continuity_hint,
         }
 
-    def _build_dialogue_continuity(self, recent_dialogue_memory: dict[str, Any]) -> dict[str, Any]:
+    def _build_dialogue_continuity(self, recent_dialogue_memory: dict[str, Any], user_message: str) -> dict[str, Any]:
         if not isinstance(recent_dialogue_memory, dict) or not recent_dialogue_memory.get("available"):
             return {"available": False}
         active_dialogue_loop = recent_dialogue_memory.get("active_dialogue_loop")
         if not isinstance(active_dialogue_loop, dict):
             return {"available": False}
+        expects_brief_reply = bool(active_dialogue_loop.get("expects_brief_reply"))
+        if expects_brief_reply and not self._memory_policy.should_treat_as_brief_follow_up(user_message):
+            return {
+                "available": False,
+                "suppressed_reason": "current_message_looks_like_a_new_request",
+            }
         payload = {
             "available": True,
             "active_dialogue_loop": active_dialogue_loop,
@@ -453,7 +492,7 @@ class ContextManager:
                 slot = next((item for item in pack.active_slots() if item.name == slot_name), None)
                 if slot is None:
                     continue
-                if slot.name in {"capability_brief", "dialogue_continuity", "dialogue_history"}:
+                if slot.name in {"capability_brief", "dialogue_continuity", "dialogue_history", "observation_brief"}:
                     continue
                 self._preview_truncate_slot(slot, pack.trim_policy.hard_floor_chars)
                 if pack.total_chars() <= self._settings.context_char_budget:
@@ -470,6 +509,8 @@ class ContextManager:
             slot.content = self._shrink_nested(slot.content, max_list_items=3, max_dict_keys=6, max_str_chars=220)
         elif slot.name == "scene_slice":
             slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=6, max_str_chars=260)
+        elif slot.name == "observation_brief":
+            slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=6, max_str_chars=220)
         elif slot.name == "task_focus":
             slot.content = self._shrink_nested(slot.content, max_list_items=3, max_dict_keys=6, max_str_chars=220)
         elif slot.name == "confirmation_loop":

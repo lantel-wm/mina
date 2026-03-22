@@ -230,6 +230,12 @@ class TurnState(MinaBaseModel):
     pending_action_batch: list[dict[str, Any]] = Field(default_factory=list)
     delegate_history: list[dict[str, Any]] = Field(default_factory=list)
     runtime_notes: list[str] = Field(default_factory=list)
+    capability_call_counts: dict[str, int] = Field(default_factory=dict)
+    capability_latest_observations: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    capability_replan_counts: dict[str, int] = Field(default_factory=dict)
+    last_delegate_role: str | None = None
+    last_delegate_fact_revision: int = 0
+    delegate_replan_counts: dict[str, int] = Field(default_factory=dict)
 
     def to_runtime_dict(self) -> dict[str, Any]:
         return self.model_dump()
