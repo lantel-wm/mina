@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -8,22 +9,46 @@ from mina_agent.config import Settings
 from mina_agent.memory.store import Store
 from mina_agent.runtime.context_pack import ContextPack, ContextSlot, TrimPolicy
 from mina_agent.runtime.memory_policy import MemoryPolicy
+from mina_agent.runtime.prompt_token_estimator import PromptTokenEstimator
 from mina_agent.runtime.models import TurnState
-from mina_agent.schemas import CapabilityDescriptor, TurnStartRequest
+from mina_agent.schemas import CapabilityDescriptor, ContextCompactionResult, TurnStartRequest
 
 
 @dataclass(slots=True)
 class ContextBuildResult:
     messages: list[dict[str, str]]
     sections: list[dict[str, Any]]
-    message_stats: dict[str, int]
+    message_stats: dict[str, Any]
     composition: dict[str, str]
     recovery_refs: list[dict[str, Any]]
-    budget_report: dict[str, int]
+    budget_report: dict[str, Any]
     active_context_slots: list[str]
+    pack: ContextPack
+    protected_slots: list[str]
+
+
+class ContextOverflowError(RuntimeError):
+    def __init__(self, *, budget_tokens: int, used_tokens: int, protected_slots: list[str]) -> None:
+        super().__init__("Context overflow: required context exceeds hard budget.")
+        self.budget_tokens = budget_tokens
+        self.used_tokens = used_tokens
+        self.protected_slots = protected_slots
 
 
 class ContextManager:
+    _PROTECTED_SLOT_NAMES = (
+        "capability_brief",
+        "dialogue_history",
+        "dialogue_continuity",
+        "observation_brief",
+    )
+    _SCENE_SLICE_PROTECTED_KEYS = ("player", "world", "target_block", "risk_state")
+    _COMPACTION_CANDIDATE_SLOT_NAMES = (
+        "recoverable_history",
+        "runtime_policy",
+        "scene_slice",
+        "task_focus",
+    )
     _TRIM_POLICY = TrimPolicy(
         priority_order=(
             "capability_brief",
@@ -42,6 +67,10 @@ class ContextManager:
         self._settings = settings
         self._store = store
         self._memory_policy = memory_policy
+        self._token_estimator = PromptTokenEstimator(
+            settings.model,
+            settings.context_tokenizer_encoding_override,
+        )
 
     def build_messages(
         self,
@@ -118,7 +147,7 @@ class ContextManager:
                     "user",
                     "session_summary.active_dialogue_loop",
                     "structured_dialogue_continuity",
-                    self._build_dialogue_continuity(recent_dialogue_memory, request.user_message),
+                    self._build_dialogue_continuity(recent_dialogue_memory),
                     priority=57,
                 ),
                 self._slot(
@@ -154,27 +183,208 @@ class ContextManager:
             ],
             trim_policy=self._TRIM_POLICY,
         )
-        trimmed_pack = self._trim_pack(pack)
+        return self._render_context_pack(pack, recovery_refs=recovery_refs, compaction_passes=0)
 
-        system_content = self._render_slots([slot for slot in trimmed_pack.active_slots() if slot.role == "system"])
-        user_content = self._render_slots([slot for slot in trimmed_pack.active_slots() if slot.role == "user"])
+    def build_compaction_messages(
+        self,
+        context_result: ContextBuildResult,
+        *,
+        current_tokens: int,
+        target_tokens: int,
+        pass_index: int,
+    ) -> list[dict[str, str]]:
+        compactable_slots = self._select_compactable_slots(
+            context_result,
+            current_tokens=current_tokens,
+            target_tokens=target_tokens,
+        )
+
+        system_content = (
+            "You are Mina's context compactor.\n"
+            "Your only job is to reduce token usage in non-core context while preserving factual meaning.\n"
+            "You may only modify or drop slots listed in compactable_slots.\n"
+            "Never modify or drop protected slots.\n"
+            "Never invent new facts, capabilities, coordinates, identities, or live observations.\n"
+            "Preserve exact capability ids and any live target-identification facts.\n"
+            "Prefer shrinking recoverable_history first, then runtime_policy, then non-core scene branches, then non-critical task_focus lists.\n"
+            "Return JSON only matching ContextCompactionResult."
+        )
+        user_content = json.dumps(
+            {
+                "pass_index": pass_index,
+                "budget_tokens": self._settings.context_token_budget,
+                "current_tokens": current_tokens,
+                "target_tokens": target_tokens,
+                "protected_slots": list(context_result.protected_slots),
+                "compactable_slots": compactable_slots,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+
+    def _select_compactable_slots(
+        self,
+        context_result: ContextBuildResult,
+        *,
+        current_tokens: int,
+        target_tokens: int,
+    ) -> dict[str, Any]:
+        candidates: list[tuple[str, Any, int]] = []
+        for slot in context_result.pack.active_slots():
+            payload = self._compaction_payload_for_slot(slot)
+            if payload is None:
+                continue
+            serialized = self._serialize_compaction_payload(payload)
+            estimated_tokens = self._estimate_text_tokens(serialized)
+            candidates.append((slot.name, payload, estimated_tokens))
+
+        if not candidates:
+            return {}
+
+        estimated_overflow_tokens = max(current_tokens - target_tokens, 0)
+        selected_payloads: dict[str, Any] = {}
+        selected_tokens = 0
+        target_compactable_tokens = max(2048, int(estimated_overflow_tokens * 1.5))
+
+        for slot_name, payload, estimated_tokens in candidates:
+            selected_payloads[slot_name] = payload
+            selected_tokens += max(estimated_tokens, 1)
+            if selected_tokens >= target_compactable_tokens:
+                break
+
+        return selected_payloads
+
+    def _compaction_payload_for_slot(self, slot: ContextSlot) -> Any | None:
+        if slot.name == "scene_slice" and isinstance(slot.content, dict):
+            payload = {
+                key: slot.content.get(key)
+                for key in ("scene", "technical", "social", "interactables", "recent_events", "server_rules_refs")
+                if key in slot.content
+            }
+            return payload or None
+        if slot.name not in self._COMPACTION_CANDIDATE_SLOT_NAMES:
+            return None
+        return slot.content
+
+    def _serialize_compaction_payload(self, payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        estimate = self._token_estimator.estimate_messages([{"role": "user", "content": text}])
+        return estimate.total_tokens
+
+    def apply_compaction_result(
+        self,
+        context_result: ContextBuildResult,
+        compaction: ContextCompactionResult,
+        *,
+        compaction_passes: int,
+    ) -> ContextBuildResult:
+        pack = copy.deepcopy(context_result.pack)
+        slot_by_name = {slot.name: slot for slot in pack.slots}
+
+        for slot_name in compaction.dropped_slots:
+            if slot_name in self._PROTECTED_SLOT_NAMES:
+                continue
+            slot = slot_by_name.get(slot_name)
+            if slot is None:
+                continue
+            slot.included = False
+            slot.truncated = True
+            slot.strategy = f"{slot.strategy}+llm_compacted"
+
+        for slot_name, replacement in compaction.slot_replacements.items():
+            if slot_name in self._PROTECTED_SLOT_NAMES:
+                continue
+            slot = slot_by_name.get(slot_name)
+            if slot is None or not slot.included:
+                continue
+            if slot_name == "scene_slice":
+                replacement = self._merge_scene_slice_compaction(slot.content, replacement)
+            slot.content = replacement
+            slot.truncated = True
+            slot.strategy = f"{slot.strategy}+llm_compacted"
+
+        return self._render_context_pack(
+            pack,
+            recovery_refs=context_result.recovery_refs,
+            compaction_passes=compaction_passes,
+        )
+
+    def _render_context_pack(
+        self,
+        pack: ContextPack,
+        *,
+        recovery_refs: list[dict[str, Any]],
+        compaction_passes: int,
+    ) -> ContextBuildResult:
+        active_slots = pack.active_slots()
+        system_content = self._render_slots([slot for slot in active_slots if slot.role == "system"])
+        user_content = self._render_slots([slot for slot in active_slots if slot.role == "user"])
         messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
-        total_chars = len(system_content) + len(user_content)
+        char_stats = {
+            "message_count": len(messages),
+            "system_chars": len(system_content),
+            "user_chars": len(user_content),
+            "total_chars": len(system_content) + len(user_content),
+        }
+        token_estimate = self._token_estimator.estimate_messages(messages)
+        message_tokens = token_estimate.per_message_tokens + [0, 0]
+        system_tokens = message_tokens[0]
+        user_tokens = message_tokens[1]
+        total_tokens = token_estimate.total_tokens
 
         return ContextBuildResult(
             messages=messages,
-            sections=[slot.summary_entry() for slot in trimmed_pack.active_slots()],
+            sections=[slot.summary_entry() for slot in active_slots],
             message_stats={
-                "message_count": len(messages),
-                "system_chars": len(system_content),
-                "user_chars": len(user_content),
-                "total_chars": total_chars,
+                **char_stats,
+                "encoding_name": token_estimate.encoding_name,
+                "system_tokens": system_tokens,
+                "user_tokens": user_tokens,
+                "total_tokens": total_tokens,
             },
-            composition={slot.name: slot.strategy for slot in trimmed_pack.active_slots()},
+            composition={slot.name: slot.strategy for slot in active_slots},
             recovery_refs=recovery_refs,
-            budget_report={"budget": self._settings.context_char_budget, "used": total_chars},
-            active_context_slots=[slot.name for slot in trimmed_pack.active_slots()],
+            budget_report={
+                "budget_tokens": self._settings.context_token_budget,
+                "used_tokens": total_tokens,
+                "compaction_passes": compaction_passes,
+                "within_budget": total_tokens <= self._settings.context_token_budget,
+            },
+            active_context_slots=[slot.name for slot in active_slots],
+            pack=pack,
+            protected_slots=self._protected_slot_refs(),
         )
+
+    def _merge_scene_slice_compaction(self, original: Any, replacement: Any) -> Any:
+        if not isinstance(original, dict):
+            return replacement
+        if not isinstance(replacement, dict):
+            replacement = {}
+        merged = dict(replacement)
+        for key in self._SCENE_SLICE_PROTECTED_KEYS:
+            merged[key] = original.get(key)
+        for key in ("recent_events", "server_rules_refs"):
+            if key not in merged and key in original:
+                merged[key] = original.get(key)
+        return merged
+
+    def _protected_slot_refs(self) -> list[str]:
+        return [
+            *self._PROTECTED_SLOT_NAMES,
+            "scene_slice.player",
+            "scene_slice.world",
+            "scene_slice.target_block",
+            "scene_slice.risk_state",
+        ]
 
     def _stable_core_text(self) -> str:
         return (
@@ -188,8 +398,7 @@ class ContextManager:
             "Do not delegate explore repeatedly when no new facts were found. If live inspection is still needed and a visible read capability matches, call it directly.\n"
             "capability_brief is the authoritative exact list of callable capability ids for this turn.\n"
             "dialogue_history is the authoritative recent conversation history sourced from persisted DB turns.\n"
-            "If dialogue_continuity includes an active open question and the current user message is brief or elliptical, treat it as a continuation of that question before treating it as a new request.\n"
-            "If the current player message is already a complete new question or request, do not reinterpret it as a reply to the previous open follow-up.\n"
+            "dialogue_continuity contains raw recent follow-up context signals such as Mina's last open question. Whether the current player message is related is for you to judge.\n"
             "observation_brief contains the latest live read results and any locked target subject for this turn.\n"
             "Never invent capability ids. Use an id from capability_brief exactly.\n"
             "Unknown capability ids are invalid. If no visible capability matches, do not guess an id; reply, guide, or delegate_plan instead.\n"
@@ -247,21 +456,21 @@ class ContextManager:
 
     def _build_scene_slice(self, normalized_snapshot: dict[str, Any]) -> dict[str, Any]:
         return {
-            "player": self._slice_part(normalized_snapshot.get("player")),
-            "world": self._slice_part(normalized_snapshot.get("world")),
-            "scene": self._slice_part(normalized_snapshot.get("scene")),
-            "interactables": self._slice_part(normalized_snapshot.get("interactables")),
-            "social": self._slice_part(normalized_snapshot.get("social")),
-            "technical": self._slice_part(normalized_snapshot.get("technical")),
-            "target_block": self._slice_part(normalized_snapshot.get("target_block")),
-            "recent_events": self._slice_recent_events(normalized_snapshot.get("recent_events")),
-            "server_rules_refs": self._slice_part(normalized_snapshot.get("server_rules_refs")),
-            "risk_state": self._slice_part(normalized_snapshot.get("risk_state")),
+            "player": normalized_snapshot.get("player"),
+            "world": normalized_snapshot.get("world"),
+            "scene": normalized_snapshot.get("scene"),
+            "interactables": normalized_snapshot.get("interactables"),
+            "social": normalized_snapshot.get("social"),
+            "technical": normalized_snapshot.get("technical"),
+            "target_block": normalized_snapshot.get("target_block"),
+            "recent_events": normalized_snapshot.get("recent_events"),
+            "server_rules_refs": normalized_snapshot.get("server_rules_refs"),
+            "risk_state": normalized_snapshot.get("risk_state"),
         }
 
     def _build_task_focus(self, turn_state: TurnState) -> dict[str, Any]:
-        active_observations = sorted(turn_state.observations, key=lambda item: item.salience, reverse=True)[:4]
-        observation_refs = [observation.context_entry() for observation in turn_state.observations[-6:]]
+        active_observations = sorted(turn_state.observations, key=lambda item: item.salience, reverse=True)
+        observation_refs = [observation.context_entry() for observation in turn_state.observations]
         turn_state.working_memory.active_observations = active_observations
         turn_state.working_memory.observation_refs = observation_refs
         turn_state.working_memory.recovery_refs = self._collect_observation_recovery_refs(turn_state)
@@ -279,16 +488,10 @@ class ContextManager:
 
     def _build_observation_brief(self, turn_state: TurnState) -> dict[str, Any]:
         latest_observations: list[dict[str, Any]] = []
-        for observation in reversed(turn_state.observations[-3:]):
-            latest_observations.append(
-                {
-                    "source": observation.source,
-                    "summary": observation.summary,
-                    "preview": observation.preview,
-                    "scope_tags": observation.scope_tags,
-                    "created_at": observation.created_at,
-                }
-            )
+        for observation in reversed(turn_state.observations[-6:]):
+            entry = observation.context_entry()
+            entry["created_at"] = observation.created_at
+            latest_observations.append(entry)
         block_subject_lock = turn_state.block_subject_lock.model_dump() if turn_state.block_subject_lock is not None else None
         return {
             "available": bool(latest_observations or block_subject_lock or turn_state.runtime_notes),
@@ -421,18 +624,12 @@ class ContextManager:
             "continuity_hint": continuity_hint,
         }
 
-    def _build_dialogue_continuity(self, recent_dialogue_memory: dict[str, Any], user_message: str) -> dict[str, Any]:
+    def _build_dialogue_continuity(self, recent_dialogue_memory: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(recent_dialogue_memory, dict) or not recent_dialogue_memory.get("available"):
             return {"available": False}
         active_dialogue_loop = recent_dialogue_memory.get("active_dialogue_loop")
         if not isinstance(active_dialogue_loop, dict):
             return {"available": False}
-        expects_brief_reply = bool(active_dialogue_loop.get("expects_brief_reply"))
-        if expects_brief_reply and not self._memory_policy.should_treat_as_brief_follow_up(user_message):
-            return {
-                "available": False,
-                "suppressed_reason": "current_message_looks_like_a_new_request",
-            }
         payload = {
             "available": True,
             "active_dialogue_loop": active_dialogue_loop,
@@ -473,92 +670,6 @@ class ContextManager:
             "turns": turns,
         }
 
-    def _trim_pack(self, pack: ContextPack) -> ContextPack:
-        while pack.total_chars() > self._settings.context_char_budget:
-            progressed = False
-            slot_by_name = {slot.name: slot for slot in pack.active_slots()}
-            for slot_name in pack.trim_policy.priority_order:
-                slot = slot_by_name.get(slot_name)
-                if slot is None:
-                    continue
-                if self._reduce_slot(slot):
-                    progressed = True
-                    break
-            if not progressed:
-                break
-
-        if pack.total_chars() > self._settings.context_char_budget:
-            for slot_name in pack.trim_policy.priority_order:
-                slot = next((item for item in pack.active_slots() if item.name == slot_name), None)
-                if slot is None:
-                    continue
-                if slot.name in {"capability_brief", "dialogue_continuity", "dialogue_history", "observation_brief"}:
-                    continue
-                self._preview_truncate_slot(slot, pack.trim_policy.hard_floor_chars)
-                if pack.total_chars() <= self._settings.context_char_budget:
-                    break
-        return pack
-
-    def _reduce_slot(self, slot: ContextSlot) -> bool:
-        before = slot.full_chars
-        if slot.name == "recoverable_history":
-            slot.content = self._reduce_recoverable_history(slot.content)
-        elif slot.name == "dialogue_continuity":
-            slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=5, max_str_chars=220)
-        elif slot.name == "runtime_policy":
-            slot.content = self._shrink_nested(slot.content, max_list_items=3, max_dict_keys=6, max_str_chars=220)
-        elif slot.name == "scene_slice":
-            slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=6, max_str_chars=260)
-        elif slot.name == "observation_brief":
-            slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=6, max_str_chars=220)
-        elif slot.name == "task_focus":
-            slot.content = self._shrink_nested(slot.content, max_list_items=3, max_dict_keys=6, max_str_chars=220)
-        elif slot.name == "confirmation_loop":
-            slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=4, max_str_chars=180)
-        else:
-            return False
-        after = slot.full_chars
-        if after < before:
-            slot.truncated = True
-            return True
-        return False
-
-    def _reduce_recoverable_history(self, content: Any) -> Any:
-        if not isinstance(content, dict):
-            return content
-        next_content = dict(content)
-        history = dict(next_content.get("history", {})) if isinstance(next_content.get("history"), dict) else {}
-        memories = list(next_content.get("memories", [])) if isinstance(next_content.get("memories"), list) else []
-        if len(memories) > 2:
-            next_content["memories"] = memories[:2]
-            return next_content
-        compact_summary = history.get("session_compact_summary")
-        if isinstance(compact_summary, dict) and "text" in compact_summary:
-            history["session_compact_summary"] = {
-                "path": compact_summary.get("path"),
-                "transcript_path": compact_summary.get("transcript_path"),
-                "summary_available": True,
-            }
-            next_content["history"] = history
-            return next_content
-        session_summary = next_content.get("session_summary")
-        if isinstance(session_summary, dict) and session_summary.get("metadata"):
-            next_content["session_summary"] = {
-                "summary": session_summary.get("summary"),
-                "transcript_path": session_summary.get("transcript_path"),
-            }
-            return next_content
-        recovery_refs = next_content.get("recovery_refs")
-        return {
-            "session_summary": self._compact_session_summary(next_content.get("session_summary")),
-            "history": {
-                "current_trigger": history.get("current_trigger"),
-                "older_turn_count": history.get("older_turn_count", 0),
-                "recovery_available": True,
-            },
-            "recovery_refs": recovery_refs,
-        }
-
     def _compact_session_summary(self, session_summary: Any) -> Any:
         if not isinstance(session_summary, dict):
             return session_summary
@@ -579,54 +690,6 @@ class ContextManager:
                 if key in metadata
             }
         return compacted
-
-    def _preview_truncate_slot(self, slot: ContextSlot, target_chars: int) -> None:
-        serialized = json.dumps(slot.content, ensure_ascii=False, default=str)
-        if len(serialized) <= target_chars:
-            return
-        slot.content = {"preview": serialized[:target_chars], "truncated": True, "full_chars": len(serialized)}
-        slot.truncated = True
-
-    def _slice_part(self, value: Any) -> Any:
-        if isinstance(value, dict):
-            keys = list(value.keys())[:8]
-            return {key: self._slice_part(value[key]) for key in keys}
-        if isinstance(value, list):
-            return [self._slice_part(item) for item in value[:4]]
-        if isinstance(value, str) and len(value) > 400:
-            return {"preview": value[:400], "truncated": True, "full_chars": len(value)}
-        return value
-
-    def _slice_recent_events(self, value: Any) -> list[Any]:
-        if not isinstance(value, list):
-            return []
-        return [self._slice_part(item) for item in value[:4]]
-
-    def _shrink_nested(
-        self,
-        value: Any,
-        *,
-        max_list_items: int,
-        max_dict_keys: int,
-        max_str_chars: int,
-    ) -> Any:
-        if isinstance(value, dict):
-            keys = list(value.keys())[:max_dict_keys]
-            reduced = {key: self._shrink_nested(value[key], max_list_items=max_list_items, max_dict_keys=max_dict_keys, max_str_chars=max_str_chars) for key in keys}
-            if len(value) > len(keys):
-                reduced["truncated"] = True
-            return reduced
-        if isinstance(value, list):
-            reduced = [
-                self._shrink_nested(item, max_list_items=max_list_items, max_dict_keys=max_dict_keys, max_str_chars=max_str_chars)
-                for item in value[:max_list_items]
-            ]
-            if len(value) > len(reduced):
-                reduced.append({"truncated": True, "omitted_items": len(value) - len(reduced)})
-            return reduced
-        if isinstance(value, str) and len(value) > max_str_chars:
-            return {"preview": value[:max_str_chars], "truncated": True, "full_chars": len(value)}
-        return value
 
     def _render_slots(self, slots: list[ContextSlot]) -> str:
         lines: list[str] = []

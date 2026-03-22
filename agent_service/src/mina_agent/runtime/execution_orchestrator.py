@@ -38,6 +38,7 @@ class ExecutionOrchestrator:
             observation_id=f"obs_{uuid.uuid4().hex[:12]}",
             source=source,
             summary=summary,
+            payload=payload,
             preview=preview,
             keys=sorted(payload.keys())[:12],
             artifact_ref=artifact_ref,

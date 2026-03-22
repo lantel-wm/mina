@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from mina_agent.audit.logger import AuditLogger
@@ -10,11 +12,14 @@ from mina_agent.debug import build_debug_recorder
 from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
+from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.providers.openai_compatible import ProviderDecisionResult
 from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeState
 from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
+from mina_agent.runtime.context_manager import ContextBuildResult
+from mina_agent.runtime.context_pack import ContextPack, ContextSlot, TrimPolicy
 from mina_agent.runtime.context_engine import ContextEngine
 from mina_agent.runtime.decision_engine import DecisionEngine
 from mina_agent.runtime.delegate_runtime import DelegateRuntime
@@ -28,6 +33,7 @@ from mina_agent.runtime.turn_service import TurnService
 from mina_agent.schemas import (
     CapabilityRequest,
     ConfirmationRequest,
+    ContextCompactionResult,
     DelegateRequest,
     DelegateSummary,
     LimitsPayload,
@@ -78,7 +84,7 @@ class RuntimeRefactorTests(unittest.TestCase):
         compact_summary = store.get_session_summary(request.session_ref)
         self.assertIsNotNone(compact_summary)
         self.assertIn("Mina Compact Summary", compact_summary["summary"])
-        self.assertLessEqual(result.message_stats["total_chars"], settings.context_char_budget)
+        self.assertLessEqual(result.message_stats["total_tokens"], settings.context_token_budget)
 
     def test_pending_confirmation_confirm_returns_action_batch_without_model_call(self) -> None:
         settings, store, policy_engine, capability_registry, _, orchestrator, _, resolver = self._build_runtime()
@@ -744,7 +750,7 @@ class RuntimeRefactorTests(unittest.TestCase):
 
     def test_capability_brief_keeps_full_exact_id_list_even_under_budget_pressure(self) -> None:
         settings, _, _, _, context_engine, _, _, _ = self._build_runtime()
-        settings.context_char_budget = 1100
+        settings.context_token_budget = 9000
         request = self._turn_request(turn_id="turn-capability-brief-ids")
         request.scoped_snapshot = {
             "player": {
@@ -1009,7 +1015,7 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         self.assertEqual([write for write in writes.semantic_writes if write["memory_type"] == "player_preference"], [])
 
-    def test_context_engine_trims_large_scene_snapshot_to_budget(self) -> None:
+    def test_context_engine_keeps_large_scene_snapshot_uncompressed_under_default_budget(self) -> None:
         settings, _, _, _, context_engine, _, _, _ = self._build_runtime()
         request = self._turn_request(turn_id="turn-large-snapshot")
         request.scoped_snapshot = {
@@ -1031,9 +1037,38 @@ class RuntimeRefactorTests(unittest.TestCase):
             capability_descriptors=[],
         )
 
-        self.assertLessEqual(result.message_stats["total_chars"], settings.context_char_budget)
+        self.assertLessEqual(result.message_stats["total_tokens"], settings.context_token_budget)
         scene_section = next(section for section in result.sections if section["name"] == "scene_slice")
-        self.assertTrue(scene_section["truncated"])
+        self.assertFalse(scene_section["truncated"])
+        self.assertEqual(
+            scene_section["preview"]["recent_events"][0]["payload"]["body"],
+            "x" * 8000,
+        )
+
+    def test_context_engine_raises_explicit_context_overflow_when_core_context_cannot_fit(self) -> None:
+        settings, _, _, _, context_engine, _, _, _ = self._build_runtime(context_token_budget=2500)
+        request = self._turn_request(turn_id="turn-context-overflow")
+        request.scoped_snapshot = {
+            "player": {"name": "Tester"},
+            "recent_events": [
+                {
+                    "kind": "mina_reply_sent",
+                    "payload": {
+                        "body": "x" * 12000,
+                        "message": "y" * 12000,
+                    },
+                }
+            ],
+        }
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=[],
+        )
+
+        self.assertFalse(result.budget_report["within_budget"])
+        self.assertGreater(result.message_stats["total_tokens"], settings.context_token_budget)
 
     def test_context_engine_compacts_full_session_history_not_sliding_window(self) -> None:
         settings, store, _, _, context_engine, _, _, _ = self._build_runtime(context_recent_full_turns=2)
@@ -1272,7 +1307,7 @@ class RuntimeRefactorTests(unittest.TestCase):
         )
 
     def test_memory_manager_preserves_compact_summary_and_transcript_path(self) -> None:
-        settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
+        settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime(context_recent_full_turns=2)
         request = self._turn_request(turn_id="turn-summary-preserve")
         for index in range(5):
             store.create_turn(
@@ -1428,8 +1463,8 @@ class RuntimeRefactorTests(unittest.TestCase):
         )
 
     def test_dialogue_continuity_survives_context_trimming_for_brief_follow_up(self) -> None:
-        settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
-        settings.context_char_budget = 7000
+        settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime(context_recent_full_turns=4)
+        settings.context_token_budget = 15000
         memory_manager = MemoryManager(store, memory_policy)
 
         first_request = self._turn_request(turn_id="turn-dialogue-continuity-1")
@@ -1443,7 +1478,7 @@ class RuntimeRefactorTests(unittest.TestCase):
             status="completed",
         )
 
-        for index in range(6):
+        for index in range(10):
             store.create_turn(
                 f"past-dialogue-{index}",
                 first_request.session_ref,
@@ -1451,7 +1486,8 @@ class RuntimeRefactorTests(unittest.TestCase):
                 {},
                 task_id=f"task_past_dialogue_{index}",
             )
-            store.finish_turn(f"past-dialogue-{index}", "reply " + ("x" * 400))
+            reply = "reply " + ("x" * 700 if index < 6 else "short")
+            store.finish_turn(f"past-dialogue-{index}", reply)
 
         second_request = self._turn_request(turn_id="turn-dialogue-continuity-2")
         second_request.user_message = "需要"
@@ -1472,7 +1508,7 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIn('"turns"', user_content)
         self.assertIn('"assistant_reply"', user_content)
 
-    def test_explicit_new_question_does_not_activate_dialogue_continuity(self) -> None:
+    def test_explicit_new_question_still_receives_raw_dialogue_continuity_signal(self) -> None:
         _, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
         memory_manager = MemoryManager(store, memory_policy)
 
@@ -1496,13 +1532,13 @@ class RuntimeRefactorTests(unittest.TestCase):
         )
 
         continuity_section = next(section for section in context_result.sections if section["name"] == "dialogue_continuity")
-        self.assertFalse(continuity_section["preview"]["available"])
+        self.assertTrue(continuity_section["preview"]["available"])
         self.assertEqual(
-            continuity_section["preview"]["suppressed_reason"],
-            "current_message_looks_like_a_new_request",
+            continuity_section["preview"]["active_dialogue_loop"]["prompt"],
+            "需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
         )
         user_content = context_result.messages[1]["content"]
-        self.assertNotIn('"active_dialogue_loop"', user_content)
+        self.assertIn('"active_dialogue_loop"', user_content)
         self.assertIn("[dialogue_history]", user_content)
         self.assertIn("what is this", user_content)
 
@@ -1541,9 +1577,290 @@ class RuntimeRefactorTests(unittest.TestCase):
             observation_section["preview"]["latest_observations"][0]["summary"],
             "Dark Oak Leaves",
         )
+        self.assertEqual(
+            observation_section["preview"]["latest_observations"][0]["payload"]["block_id"],
+            "minecraft:dark_oak_leaves",
+        )
+        self.assertEqual(
+            observation_section["preview"]["latest_observations"][0]["payload"]["pos"]["y"],
+            84,
+        )
         user_content = context_result.messages[1]["content"]
         self.assertIn("[observation_brief]", user_content)
         self.assertIn("Dark Oak Leaves", user_content)
+
+    def test_context_overflow_fails_before_provider_call(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = (
+            self._build_runtime(context_token_budget=2500)
+        )
+        provider = _OverflowAfterCompactionProvider()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(provider),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        request = self._turn_request(turn_id="turn-context-overflow-loop")
+        request.scoped_snapshot = {
+            "player": {"name": "Tester"},
+            "recent_events": [
+                {
+                    "kind": "mina_reply_sent",
+                    "payload": {
+                        "body": "x" * 12000,
+                        "message": "y" * 12000,
+                    },
+                }
+            ],
+        }
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "final_reply")
+        self.assertIn("超过了当前硬性预算", response.final_reply or "")
+        self.assertEqual(provider.decide_calls, 0)
+        self.assertEqual(provider.compact_calls, 2)
+        latest_turn = store.list_turns(request.session_ref, limit=1)[0]
+        self.assertEqual(latest_turn["status"], "failed")
+
+    def test_openai_provider_estimate_prompt_tokens_uses_model_auto_encoding(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override=None)
+        provider = OpenAICompatibleProvider(settings)
+
+        provider_estimate = provider.estimate_prompt_tokens(
+            [
+                {"role": "system", "content": "hello"},
+                {"role": "user", "content": "你好，Mina"},
+            ]
+        )
+
+        self.assertEqual(provider_estimate["encoding_name"], "o200k_base")
+        self.assertGreater(provider_estimate["total_tokens"], 0)
+
+    def test_openai_provider_estimate_prompt_tokens_respects_encoding_override(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="cl100k_base")
+        provider = OpenAICompatibleProvider(settings)
+
+        estimate = provider.estimate_prompt_tokens(
+            [
+                {"role": "system", "content": "hello"},
+                {"role": "user", "content": "world"},
+            ]
+        )
+
+        self.assertEqual(estimate["encoding_name"], "cl100k_base")
+
+    def test_openai_provider_uses_configured_request_timeout(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        settings.model_request_timeout_seconds = 77
+        provider = OpenAICompatibleProvider(settings)
+        seen: dict[str, int] = {}
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return (
+                    b'{"choices":[{"message":{"content":"{\\"mode\\":\\"final_reply\\",\\"final_reply\\":\\"ok\\"}"}}]}'
+                )
+
+        def fake_urlopen(request, timeout=0):
+            seen["timeout"] = timeout
+            return _Response()
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            result = provider.decide(
+                [
+                    {"role": "system", "content": "hello"},
+                    {"role": "user", "content": "world"},
+                ]
+            )
+
+        self.assertEqual(seen["timeout"], 77)
+        self.assertEqual(result.decision.final_reply, "ok")
+
+    def test_compaction_messages_use_compact_json_and_targeted_slots(self) -> None:
+        settings, store, _, _, context_engine, _, _, _ = self._build_runtime(context_token_budget=50000)
+        pack = ContextPack(
+            slots=[
+                ContextSlot(
+                    name="recoverable_history",
+                    role="user",
+                    source="test",
+                    strategy="recoverable_recall",
+                    content={"summary": "x" * 24000},
+                    priority=55,
+                ),
+                ContextSlot(
+                    name="runtime_policy",
+                    role="system",
+                    source="test",
+                    strategy="dynamic_structured_reminder",
+                    content={"notes": "y" * 12000},
+                    priority=95,
+                ),
+                ContextSlot(
+                    name="scene_slice",
+                    role="user",
+                    source="test",
+                    strategy="structured_slice",
+                    content={
+                        "player": {"name": "Tester"},
+                        "world": {"dimension": "minecraft:overworld"},
+                        "target_block": {"name": "Dark Oak Leaves"},
+                        "risk_state": {"level": "low"},
+                        "technical": {"details": "t" * 12000},
+                        "social": {"details": "s" * 12000},
+                    },
+                    priority=85,
+                ),
+                ContextSlot(
+                    name="task_focus",
+                    role="user",
+                    source="test",
+                    strategy="structured_summary",
+                    content={"active_observations": ["o" * 8000]},
+                    priority=80,
+                ),
+            ],
+            trim_policy=TrimPolicy(priority_order=("recoverable_history", "runtime_policy", "scene_slice", "task_focus")),
+        )
+        context_result = ContextBuildResult(
+            messages=[],
+            sections=[],
+            message_stats={},
+            composition={},
+            recovery_refs=[],
+            budget_report={},
+            active_context_slots=[],
+            pack=pack,
+            protected_slots=context_engine._protected_slot_refs(),
+        )
+
+        compact_messages = context_engine.build_compaction_messages(
+            context_result,
+            current_tokens=52000,
+            target_tokens=50000,
+            pass_index=1,
+        )
+        user_content = compact_messages[1]["content"]
+        payload = json.loads(user_content)
+
+        self.assertNotIn("\n", user_content)
+        self.assertEqual(list(payload["compactable_slots"].keys()), ["recoverable_history"])
+
+    def test_compaction_runs_before_main_decision_and_preserves_dialogue_context(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = (
+            self._build_runtime(context_token_budget=2500, context_recent_full_turns=4)
+        )
+        provider = _OnePassContinuityCompactionProvider()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(provider),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        memory_manager = MemoryManager(store, memory_policy)
+
+        first_request = self._turn_request(turn_id="turn-compaction-continuity-1")
+        first_request.user_message = "where am i"
+        first_state = self._turn_state(first_request)
+        first_state.task.status = "completed"
+        memory_manager.record_turn_memories(
+            first_request,
+            first_state,
+            final_reply="你在黑森林里。需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
+            status="completed",
+        )
+        for index in range(12):
+            store.create_turn(
+                f"turn-compaction-continuity-past-{index}",
+                first_request.session_ref,
+                f"message {index}",
+                {},
+                task_id=f"task_compaction_continuity_{index}",
+            )
+            store.finish_turn(f"turn-compaction-continuity-past-{index}", "reply " + ("x" * 600))
+
+        second_request = self._turn_request(turn_id="turn-compaction-continuity-2")
+        second_request.user_message = "需要"
+
+        response = loop.start_turn(second_request)
+
+        self.assertEqual(response.type, "final_reply")
+        self.assertEqual(response.final_reply, "我继续帮你看附近情况。")
+        self.assertEqual(provider.compact_calls, 1)
+        self.assertEqual(provider.decide_calls, 1)
+
+    def test_apply_compaction_result_preserves_observation_brief_target_payload(self) -> None:
+        _, _, _, _, context_engine, orchestrator, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-observation-compact-preserve")
+        request.user_message = "what is this"
+        turn_state = self._turn_state(request)
+        turn_state.task.goal = "what is this"
+
+        orchestrator.register_observation(
+            turn_state,
+            source="game.target_block.read",
+            payload={
+                "target_found": True,
+                "pos": {"x": -3, "y": 84, "z": 2},
+                "block_id": "minecraft:dark_oak_leaves",
+                "block_name": "Dark Oak Leaves",
+            },
+            kind="bridge_result",
+        )
+
+        context_result = context_engine.build_messages(
+            request=request,
+            turn_state=turn_state,
+            capability_descriptors=[],
+        )
+        compacted = context_engine.apply_compaction_result(
+            context_result,
+            ContextCompactionResult(
+                slot_replacements={
+                    "recoverable_history": {
+                        "session_summary": {"summary": "compacted"},
+                        "memories": [],
+                        "history": {"older_turn_count": 3, "recovery_available": True},
+                        "recovery_refs": [],
+                    }
+                },
+                rationale="Compact older recall only.",
+                target_tokens=1024,
+            ),
+            compaction_passes=1,
+        )
+
+        observation_section = next(section for section in compacted.sections if section["name"] == "observation_brief")
+        self.assertEqual(
+            observation_section["preview"]["latest_observations"][0]["payload"]["block_id"],
+            "minecraft:dark_oak_leaves",
+        )
+        self.assertIn("Dark Oak Leaves", compacted.messages[1]["content"])
 
     def test_model_sees_recent_dialogue_memory_for_brief_follow_up_turn(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
@@ -1760,8 +2077,8 @@ class RuntimeRefactorTests(unittest.TestCase):
         self,
         *,
         enable_dynamic_scripting: bool = False,
-        context_char_budget: int = 12000,
-        context_recent_full_turns: int = 2,
+        context_token_budget: int = 120000,
+        context_recent_full_turns: int = 32,
     ):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -1789,8 +2106,9 @@ class RuntimeRefactorTests(unittest.TestCase):
             max_agent_steps=8,
             max_retrieval_results=4,
             yield_after_internal_steps=True,
-            context_char_budget=context_char_budget,
+            context_token_budget=context_token_budget,
             context_recent_full_turns=context_recent_full_turns,
+            context_tokenizer_encoding_override=None,
             artifact_inline_char_budget=1200,
             script_timeout_seconds=5,
             script_memory_mb=128,
@@ -1814,6 +2132,42 @@ class RuntimeRefactorTests(unittest.TestCase):
         orchestrator = ExecutionOrchestrator(settings, store)
         resolver = ConfirmationResolver()
         return settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver
+
+    def _settings_for_provider_test(self, *, model: str, encoding_override: str | None) -> Settings:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name)
+        data_dir = root / "data"
+        return Settings(
+            host="127.0.0.1",
+            port=8787,
+            base_url="https://example.invalid/v1",
+            api_key="test-api-key",
+            model=model,
+            config_file=root / "config.local.json",
+            data_dir=data_dir,
+            db_path=data_dir / "mina_agent.db",
+            knowledge_dir=data_dir / "knowledge",
+            audit_dir=data_dir / "audit",
+            debug_enabled=False,
+            debug_dir=data_dir / "debug",
+            debug_string_preview_chars=600,
+            debug_list_preview_items=5,
+            debug_dict_preview_keys=20,
+            debug_event_payload_chars=4000,
+            enable_experimental=False,
+            enable_dynamic_scripting=False,
+            max_agent_steps=8,
+            max_retrieval_results=4,
+            yield_after_internal_steps=True,
+            context_token_budget=120000,
+            context_recent_full_turns=32,
+            context_tokenizer_encoding_override=encoding_override,
+            artifact_inline_char_budget=1200,
+            script_timeout_seconds=5,
+            script_memory_mb=128,
+            script_max_actions=8,
+        )
 
     def _turn_request(self, *, turn_id: str) -> TurnStartRequest:
         return TurnStartRequest(
@@ -1924,6 +2278,151 @@ if __name__ == "__main__":
 class _UnexpectedProvider:
     def decide(self, messages):
         raise AssertionError("Provider should not be called for rejected pending confirmation.")
+
+
+class _OverflowAfterCompactionProvider:
+    def __init__(self) -> None:
+        self.decide_calls = 0
+        self.compact_calls = 0
+
+    def decide(self, messages):
+        self.decide_calls += 1
+        raise AssertionError("Main model decide() should not run after context overflow.")
+
+    def complete_json(self, messages, response_model):
+        self.compact_calls += 1
+        payload = ContextCompactionResult(
+            slot_replacements={
+                "recoverable_history": {
+                    "session_summary": {"summary": "compacted"},
+                    "memories": [],
+                    "history": {"older_turn_count": 1, "recovery_available": True},
+                    "recovery_refs": [],
+                }
+            },
+            dropped_slots=[],
+            rationale="Reduce older recoverable history only.",
+            target_tokens=1024,
+        )
+        return type(
+            "StructuredResult",
+            (),
+            {
+                "payload": payload,
+                "latency_ms": 9,
+                "raw_response_preview": payload.model_dump_json(),
+                "parse_status": "ok",
+                "model": "compact-test-model",
+                "temperature": 0.2,
+                "message_count": len(messages),
+            },
+        )()
+
+    def estimate_prompt_tokens(self, messages):
+        system_content = messages[0]["content"] if messages else ""
+        if "You are Mina's context compactor." in system_content:
+            return {
+                "model": "compact-test-model",
+                "encoding_name": "o200k_base",
+                "message_count": len(messages),
+                "message_tokens": [120, 120],
+                "total_tokens": 240,
+            }
+        return {
+            "model": "compact-test-model",
+            "encoding_name": "o200k_base",
+            "message_count": len(messages),
+            "message_tokens": [2500, 2500],
+            "total_tokens": 5000,
+        }
+
+
+class _OnePassContinuityCompactionProvider:
+    def __init__(self) -> None:
+        self.decide_calls = 0
+        self.compact_calls = 0
+
+    def decide(self, messages):
+        self.decide_calls += 1
+        user_content = messages[1]["content"]
+        if '"active_dialogue_loop"' not in user_content:
+            raise AssertionError("dialogue_continuity was lost after compaction.")
+        if '"assistant_reply"' not in user_content:
+            raise AssertionError("dialogue_history was lost after compaction.")
+        if "需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？" not in user_content:
+            raise AssertionError("The open follow-up prompt was not preserved after compaction.")
+        return ProviderDecisionResult(
+            decision=ModelDecision(
+                mode="final_reply",
+                final_reply="我继续帮你看附近情况。",
+            ),
+            latency_ms=10,
+            raw_response_preview='{"mode":"final_reply"}',
+            parse_status="ok",
+            model="compact-test-model",
+            temperature=0.2,
+            message_count=len(messages),
+        )
+
+    def complete_json(self, messages, response_model):
+        self.compact_calls += 1
+        payload = ContextCompactionResult(
+            slot_replacements={
+                "recoverable_history": {
+                    "session_summary": {"summary": "compacted"},
+                    "memories": [],
+                    "history": {"older_turn_count": 12, "recovery_available": True},
+                    "recovery_refs": [],
+                },
+                "runtime_policy": {
+                    "language": "Simplified Chinese by default",
+                    "player_role": "read_only",
+                    "limits": {"max_agent_steps": 4},
+                    "runtime_notes": [],
+                },
+            },
+            rationale="Compact older recoverable context and non-essential policy detail.",
+            target_tokens=1800,
+        )
+        return type(
+            "StructuredResult",
+            (),
+            {
+                "payload": payload,
+                "latency_ms": 9,
+                "raw_response_preview": payload.model_dump_json(),
+                "parse_status": "ok",
+                "model": "compact-test-model",
+                "temperature": 0.2,
+                "message_count": len(messages),
+            },
+        )()
+
+    def estimate_prompt_tokens(self, messages):
+        system_content = messages[0]["content"] if messages else ""
+        if "You are Mina's context compactor." in system_content:
+            return {
+                "model": "compact-test-model",
+                "encoding_name": "o200k_base",
+                "message_count": len(messages),
+                "message_tokens": [150, 220],
+                "total_tokens": 370,
+            }
+        if self.compact_calls >= 1:
+            return {
+                "model": "compact-test-model",
+                "encoding_name": "o200k_base",
+                "message_count": len(messages),
+                "message_tokens": [700, 900],
+                "total_tokens": 1600,
+            }
+        return {
+            "model": "compact-test-model",
+            "encoding_name": "o200k_base",
+            "message_count": len(messages),
+            "message_tokens": [2000, 1800],
+            "total_tokens": 3800,
+        }
 
 
 class _SequenceProvider:

@@ -46,6 +46,7 @@ class ObservationRef(MinaBaseModel):
     observation_id: str
     source: str
     summary: str
+    payload: Any | None = None
     preview: Any | None = None
     keys: list[str] = Field(default_factory=list)
     artifact_ref: ArtifactRef | None = None
@@ -61,6 +62,8 @@ class ObservationRef(MinaBaseModel):
             "summary": self.summary,
             "salience": self.salience,
         }
+        if self.payload is not None:
+            payload["payload"] = self.payload
         if self.preview is not None:
             payload["preview"] = self.preview
         if self.keys:

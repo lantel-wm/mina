@@ -29,44 +29,6 @@ class MemoryPolicy:
         "要不要继续",
     )
     _FOLLOW_UP_ENDINGS = ("吗", "呢", "吧")
-    _BRIEF_FOLLOW_UP_REPLIES = {
-        "需要",
-        "需要的",
-        "好",
-        "好的",
-        "行",
-        "可以",
-        "继续",
-        "继续吧",
-        "嗯",
-        "恩",
-        "要",
-        "yes",
-        "y",
-        "ok",
-        "okay",
-        "sure",
-    }
-    _EXPLICIT_NEW_QUESTION_PREFIXES = (
-        "what",
-        "what is",
-        "what's",
-        "where",
-        "who",
-        "why",
-        "how",
-        "which",
-        "这是什么",
-        "这是啥",
-        "那是什么",
-        "什么是",
-        "谁是",
-        "哪里",
-        "哪儿",
-        "在哪",
-        "为什么",
-        "怎么",
-    )
 
     def derive_writes(
         self,
@@ -133,7 +95,8 @@ class MemoryPolicy:
         }
         if open_follow_up is not None:
             session_summary["continuity_hint"] = (
-                "If the next player reply is brief or elliptical, resolve it against Mina's latest follow-up prompt first."
+                "This is Mina's latest open follow-up prompt preserved as raw dialogue context. "
+                "Judge its relevance from the current message and recent dialogue."
             )
         return MemoryWriteResult(
             semantic_writes=semantic_writes,
@@ -161,25 +124,6 @@ class MemoryPolicy:
                 )
             )
         return candidates
-
-    def should_treat_as_brief_follow_up(self, user_message: str) -> bool:
-        text = self._normalize_dialogue_text(user_message)
-        if not text:
-            return False
-        normalized = re.sub(r"\s+", " ", text.casefold()).strip()
-        if not normalized:
-            return False
-        if "?" in normalized or "？" in normalized:
-            return False
-        if any(normalized.startswith(prefix) for prefix in self._EXPLICIT_NEW_QUESTION_PREFIXES):
-            return False
-        if normalized in self._BRIEF_FOLLOW_UP_REPLIES:
-            return True
-        if len(normalized.split()) <= 2 and len(normalized) <= 12:
-            return True
-        if len(text) <= 4:
-            return True
-        return False
 
     def _episode_summary(
         self,

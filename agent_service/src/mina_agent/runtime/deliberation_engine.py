@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider, ProviderDecisionResult, ProviderStructuredResult
-from mina_agent.schemas import CapabilityRequest, ConfirmationRequest, DelegateRequest, DelegateSummary, ModelDecision
+from mina_agent.schemas import (
+    CapabilityRequest,
+    ConfirmationRequest,
+    ContextCompactionResult,
+    DelegateRequest,
+    DelegateSummary,
+    ModelDecision,
+)
 
 
 class DeliberationEngine:
@@ -28,11 +35,31 @@ class DeliberationEngine:
             "body_text": json.dumps(messages, ensure_ascii=False, indent=2),
         }
 
+    def estimate_prompt_tokens(self, messages: list[dict[str, str]]) -> dict[str, int | str]:
+        estimator = getattr(self._provider, "estimate_prompt_tokens", None)
+        if callable(estimator):
+            payload = estimator(messages)
+            if isinstance(payload, dict):
+                return payload
+        return {
+            "model": "",
+            "encoding_name": "cl100k_base",
+            "message_count": len(messages),
+            "message_tokens": [0 for _ in messages],
+            "total_tokens": 0,
+        }
+
     def summarize_delegate(self, messages: list[dict[str, str]]) -> ProviderStructuredResult[DelegateSummary]:
         complete_json = getattr(self._provider, "complete_json", None)
         if complete_json is None:
             raise AttributeError("Provider does not support structured delegate summaries.")
         return complete_json(messages, DelegateSummary)
+
+    def compact_context(self, messages: list[dict[str, str]]) -> ProviderStructuredResult[ContextCompactionResult]:
+        complete_json = getattr(self._provider, "complete_json", None)
+        if complete_json is None:
+            raise AttributeError("Provider does not support structured context compaction.")
+        return complete_json(messages, ContextCompactionResult)
 
     def normalize(self, decision: ModelDecision) -> ModelDecision:
         if decision.intent is None:

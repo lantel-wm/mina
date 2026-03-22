@@ -7,6 +7,7 @@ from mina_agent.memory.store import Store
 from mina_agent.runtime.context_engine import ContextBuildResult, ContextEngine
 from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.runtime.models import TaskState, TurnState, WorkingMemory
+from mina_agent.runtime.prompt_token_estimator import PromptTokenEstimator
 from mina_agent.schemas import CapabilityDescriptor, TurnStartRequest
 
 
@@ -20,6 +21,10 @@ class ContextBuilder:
         self._settings = settings
         self._store = store
         self._memory_policy = memory_policy or MemoryPolicy()
+        self._token_estimator = PromptTokenEstimator(
+            settings.model if settings is not None else None,
+            settings.context_tokenizer_encoding_override if settings is not None else None,
+        )
 
     def build_messages(
         self,
@@ -121,12 +126,7 @@ class ContextBuilder:
                 ).summary_entry()
                 for index, (name, value) in enumerate(payload.items())
             ],
-            message_stats={
-                "message_count": 2,
-                "system_chars": len(system_content),
-                "user_chars": len(user_content),
-                "total_chars": len(system_content) + len(user_content),
-            },
+            message_stats=self._legacy_message_stats(system_content, user_content),
             composition={
                 "stable_core": "legacy",
                 "runtime_reminder": "legacy",
@@ -137,6 +137,28 @@ class ContextBuilder:
                 "recent_conversation_trigger": "legacy",
             },
             recovery_refs=[],
-            budget_report={"budget": len(system_content) + len(user_content), "used": len(system_content) + len(user_content)},
+            budget_report={
+                "budget_tokens": self._settings.context_token_budget if self._settings is not None else 0,
+                "used_tokens": self._legacy_message_stats(system_content, user_content)["total_tokens"],
+                "compaction_passes": 0,
+                "within_budget": True,
+            },
             active_context_slots=list(payload.keys()),
+            pack=None,  # type: ignore[arg-type]
+            protected_slots=[],
         )
+
+    def _legacy_message_stats(self, system_content: str, user_content: str) -> dict[str, int | str]:
+        messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
+        estimate = self._token_estimator.estimate_messages(messages)
+        message_tokens = estimate.per_message_tokens + [0, 0]
+        return {
+            "message_count": 2,
+            "system_chars": len(system_content),
+            "user_chars": len(user_content),
+            "total_chars": len(system_content) + len(user_content),
+            "encoding_name": estimate.encoding_name,
+            "system_tokens": message_tokens[0],
+            "user_tokens": message_tokens[1],
+            "total_tokens": estimate.total_tokens,
+        }

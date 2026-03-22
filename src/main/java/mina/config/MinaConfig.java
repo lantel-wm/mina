@@ -56,7 +56,7 @@ public record MinaConfig(
         return new MinaConfig(
                 readUri("MINA_AGENT_BASE_URL", "mina.agent.base_url", properties, DEFAULT_AGENT_BASE_URL),
                 Duration.ofMillis(readInt("MINA_AGENT_CONNECT_TIMEOUT_MS", "mina.agent.connect_timeout_ms", properties, 1_500)),
-                Duration.ofMillis(readInt("MINA_AGENT_REQUEST_TIMEOUT_MS", "mina.agent.request_timeout_ms", properties, 25_000)),
+                Duration.ofMillis(readInt("MINA_AGENT_REQUEST_TIMEOUT_MS", "mina.agent.request_timeout_ms", properties, 300_000)),
                 readInt("MINA_IO_THREADS", "mina.io_threads", properties, 4),
                 readInt("MINA_MAX_AGENT_STEPS", "mina.max_agent_steps", properties, 8),
                 readInt("MINA_MAX_BRIDGE_ACTIONS_PER_TURN", "mina.max_bridge_actions_per_turn", properties, 8),

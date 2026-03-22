@@ -184,6 +184,13 @@ class DelegateResult(MinaBaseModel):
     artifact_refs: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ContextCompactionResult(MinaBaseModel):
+    slot_replacements: dict[str, Any] = Field(default_factory=dict)
+    dropped_slots: list[str] = Field(default_factory=list)
+    rationale: str | None = None
+    target_tokens: int | None = None
+
+
 class ModelDecision(MinaBaseModel):
     mode: Literal["final_reply", "call_capability"] | None = None
     intent: DecisionIntent | None = None

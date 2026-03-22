@@ -235,6 +235,7 @@ class FileDebugRecorder(DebugRecorder):
             entry = self._upsert_step(summary["context_builds"], step_index)
             entry["sections"] = payload.get("sections", [])
             entry["message_stats"] = payload.get("message_stats", {})
+            entry["budget_report"] = payload.get("budget_report", {})
             entry["composition"] = payload.get("composition", {})
             return
 
@@ -247,6 +248,28 @@ class FileDebugRecorder(DebugRecorder):
             }
             if prompt_artifact is not None:
                 self._upsert_prompt_artifact(summary, prompt_artifact)
+            return
+
+        if event_type == "context_compaction_requested" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            collection = step.setdefault("context_compactions", [])
+            entry = self._upsert_pass(collection, int(payload.get("pass_index", 0)))
+            entry["request"] = {
+                "current_tokens": payload.get("current_tokens"),
+                "target_tokens": payload.get("target_tokens"),
+                "message_count": raw_payload.get("message_count"),
+                "message_stats": raw_payload.get("message_stats", {}),
+                "provider_input_artifact": prompt_artifact,
+            }
+            if prompt_artifact is not None:
+                self._upsert_prompt_artifact(summary, prompt_artifact)
+            return
+
+        if event_type == "context_compaction_finished" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            collection = step.setdefault("context_compactions", [])
+            entry = self._upsert_pass(collection, int(payload.get("pass_index", 0)))
+            entry["response"] = payload
             return
 
         if event_type == "model_response" and step_index is not None:
@@ -293,7 +316,7 @@ class FileDebugRecorder(DebugRecorder):
         payload: dict[str, Any],
         step_index: int | None,
     ) -> dict[str, Any] | None:
-        if event_type != "model_request":
+        if event_type not in {"model_request", "context_compaction_requested"}:
             return None
         messages = payload.get("messages")
         if not isinstance(messages, list):
@@ -301,7 +324,11 @@ class FileDebugRecorder(DebugRecorder):
         prompts_dir = turn_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
         step_label = f"{int(step_index):03d}" if step_index is not None else "unknown"
-        return self._write_provider_input_artifact(turn_dir, prompts_dir, payload, step_label, step_index)
+        filename_suffix = ""
+        if event_type == "context_compaction_requested":
+            pass_index = int(payload.get("pass_index") or 0)
+            filename_suffix = f".context_compaction_pass_{pass_index}"
+        return self._write_provider_input_artifact(turn_dir, prompts_dir, payload, step_label, step_index, filename_suffix)
 
     def _write_provider_input_artifact(
         self,
@@ -310,6 +337,7 @@ class FileDebugRecorder(DebugRecorder):
         payload: dict[str, Any],
         step_label: str,
         step_index: int | None,
+        filename_suffix: str = "",
     ) -> dict[str, Any] | None:
         provider_input = payload.get("provider_input_buffer")
         if not isinstance(provider_input, dict):
@@ -320,7 +348,7 @@ class FileDebugRecorder(DebugRecorder):
         extension = str(provider_input.get("extension") or ".txt")
         if not extension.startswith("."):
             extension = f".{extension}"
-        target = prompts_dir / f"step_{step_label}.provider_input{extension}"
+        target = prompts_dir / f"step_{step_label}{filename_suffix}.provider_input{extension}"
         target.write_text(body_text, encoding="utf-8")
         return {
             "kind": "provider_input_buffer",
@@ -346,6 +374,15 @@ class FileDebugRecorder(DebugRecorder):
         entry = {"step_index": step_index}
         collection.append(entry)
         collection.sort(key=lambda item: int(item.get("step_index", 0)))
+        return entry
+
+    def _upsert_pass(self, collection: list[dict[str, Any]], pass_index: int) -> dict[str, Any]:
+        for entry in collection:
+            if entry.get("pass_index") == pass_index:
+                return entry
+        entry = {"pass_index": pass_index}
+        collection.append(entry)
+        collection.sort(key=lambda item: int(item.get("pass_index", 0)))
         return entry
 
 

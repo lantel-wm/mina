@@ -11,6 +11,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from mina_agent.config import Settings
+from mina_agent.runtime.prompt_token_estimator import PromptTokenEstimator
 from mina_agent.schemas import ModelDecision
 
 
@@ -59,6 +60,10 @@ class ProviderError(RuntimeError):
 class OpenAICompatibleProvider:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._token_estimator = PromptTokenEstimator(
+            settings.model,
+            settings.context_tokenizer_encoding_override,
+        )
 
     def available(self) -> bool:
         return bool(self._settings.base_url and self._settings.api_key and self._settings.model)
@@ -69,6 +74,16 @@ class OpenAICompatibleProvider:
             "content_type": "application/json",
             "extension": ".json",
             "body_text": self._render_request_body(messages),
+        }
+
+    def estimate_prompt_tokens(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        estimate = self._token_estimator.estimate_messages(messages)
+        return {
+            "model": self._settings.model or "",
+            "encoding_name": estimate.encoding_name,
+            "message_count": len(messages),
+            "message_tokens": estimate.per_message_tokens,
+            "total_tokens": estimate.total_tokens,
         }
 
     def decide(self, messages: list[dict[str, str]]) -> ProviderDecisionResult:
@@ -129,7 +144,7 @@ class OpenAICompatibleProvider:
         started = perf_counter()
 
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=self._settings.model_request_timeout_seconds) as response:
                 raw_body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             latency_ms = int((perf_counter() - started) * 1000)

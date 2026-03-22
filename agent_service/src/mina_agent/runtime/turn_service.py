@@ -9,7 +9,7 @@ from typing import Any
 from mina_agent.providers.openai_compatible import ProviderDecisionResult, ProviderError
 from mina_agent.runtime.agent_services import AgentServices
 from mina_agent.runtime.capability_registry import RuntimeState
-from mina_agent.runtime.context_manager import ContextManager
+from mina_agent.runtime.context_manager import ContextManager, ContextOverflowError
 from mina_agent.runtime.deliberation_engine import DeliberationEngine
 from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.execution_manager import ExecutionManager
@@ -152,12 +152,19 @@ class TurnPipeline:
             turn_state=turn_state,
             capability_descriptors=[capability.descriptor for capability in capabilities],
         )
+        context_result = self._fit_context_to_budget(
+            request=request,
+            turn_state=turn_state,
+            current_step=current_step,
+            context_result=context_result,
+        )
         self._services.debug.record_event(
             request.turn_id,
             "context_built",
             {
                 "sections": context_result.sections,
                 "message_stats": context_result.message_stats,
+                "budget_report": context_result.budget_report,
                 "composition": context_result.composition,
                 "task_id": turn_state.task.task_id,
             },
@@ -175,6 +182,129 @@ class TurnPipeline:
             step_index=current_step,
         )
         return context_result
+
+    def _fit_context_to_budget(
+        self,
+        *,
+        request: TurnStartRequest,
+        turn_state: TurnState,
+        current_step: int,
+        context_result: Any,
+    ) -> Any:
+        current_result = context_result
+        max_compaction_passes = 2
+        for pass_index in range(0, max_compaction_passes + 1):
+            token_estimate = self._deliberation_engine.estimate_prompt_tokens(current_result.messages)
+            current_result = self._apply_token_estimate(
+                current_result,
+                token_estimate=token_estimate,
+                compaction_passes=pass_index,
+            )
+            if bool(current_result.budget_report.get("within_budget")):
+                return current_result
+            if pass_index >= max_compaction_passes:
+                raise ContextOverflowError(
+                    budget_tokens=self._services.settings.context_token_budget,
+                    used_tokens=int(current_result.budget_report.get("used_tokens", 0)),
+                    protected_slots=list(current_result.protected_slots),
+                )
+
+            current_tokens = int(current_result.budget_report.get("used_tokens", 0))
+            target_tokens = max(1024, int(self._services.settings.context_token_budget * 0.85))
+            compact_messages = self._context_manager.build_compaction_messages(
+                current_result,
+                current_tokens=current_tokens,
+                target_tokens=target_tokens,
+                pass_index=pass_index + 1,
+            )
+            compact_request_stats = self._deliberation_engine.estimate_prompt_tokens(compact_messages)
+            self._services.debug.record_event(
+                request.turn_id,
+                "context_compaction_requested",
+                {
+                    "pass_index": pass_index + 1,
+                    "current_tokens": current_tokens,
+                    "target_tokens": target_tokens,
+                    "message_count": len(compact_messages),
+                    "message_stats": self._message_stats_from_token_estimate(compact_messages, compact_request_stats),
+                    "messages": compact_messages,
+                    "provider_input_buffer": self._deliberation_engine.debug_request_buffer(compact_messages),
+                },
+                step_index=current_step,
+            )
+            compact_result = self._deliberation_engine.compact_context(compact_messages)
+            self._services.debug.record_event(
+                request.turn_id,
+                "context_compaction_finished",
+                {
+                    "pass_index": pass_index + 1,
+                    "current_tokens": current_tokens,
+                    "target_tokens": target_tokens,
+                    "parse_status": compact_result.parse_status,
+                    "raw_response_preview": compact_result.raw_response_preview,
+                    "slot_replacements": list(compact_result.payload.slot_replacements.keys()),
+                    "dropped_slots": compact_result.payload.dropped_slots,
+                    "rationale": compact_result.payload.rationale,
+                    "result": compact_result.payload.model_dump(),
+                },
+                step_index=current_step,
+            )
+            current_result = self._context_manager.apply_compaction_result(
+                current_result,
+                compact_result.payload,
+                compaction_passes=pass_index + 1,
+            )
+        return current_result
+
+    def _apply_token_estimate(
+        self,
+        context_result: Any,
+        *,
+        token_estimate: dict[str, Any],
+        compaction_passes: int,
+    ) -> Any:
+        message_tokens = token_estimate.get("message_tokens")
+        if not isinstance(message_tokens, list):
+            message_tokens = []
+        system_tokens = int(message_tokens[0]) if len(message_tokens) > 0 else 0
+        user_tokens = int(message_tokens[1]) if len(message_tokens) > 1 else 0
+        total_tokens = int(token_estimate.get("total_tokens") or (system_tokens + user_tokens))
+        context_result.message_stats.update(
+            {
+                "encoding_name": token_estimate.get("encoding_name"),
+                "system_tokens": system_tokens,
+                "user_tokens": user_tokens,
+                "total_tokens": total_tokens,
+            }
+        )
+        context_result.budget_report = {
+            "budget_tokens": self._services.settings.context_token_budget,
+            "used_tokens": total_tokens,
+            "compaction_passes": compaction_passes,
+            "within_budget": total_tokens <= self._services.settings.context_token_budget,
+        }
+        return context_result
+
+    def _message_stats_from_token_estimate(
+        self,
+        messages: list[dict[str, str]],
+        token_estimate: dict[str, Any],
+    ) -> dict[str, Any]:
+        system_chars = len(messages[0]["content"]) if len(messages) > 0 else 0
+        user_chars = len(messages[1]["content"]) if len(messages) > 1 else 0
+        message_tokens = token_estimate.get("message_tokens")
+        if not isinstance(message_tokens, list):
+            message_tokens = []
+        return {
+            "message_count": len(messages),
+            "system_chars": system_chars,
+            "user_chars": user_chars,
+            "total_chars": system_chars + user_chars,
+            "encoding_name": token_estimate.get("encoding_name"),
+            "system_tokens": int(message_tokens[0]) if len(message_tokens) > 0 else 0,
+            "user_tokens": int(message_tokens[1]) if len(message_tokens) > 1 else 0,
+            "total_tokens": int(token_estimate.get("total_tokens") or 0),
+        }
 
     def _stage_deliberate(self, messages: list[dict[str, str]]) -> ProviderDecisionResult:
         return self._deliberation_engine.decide(messages)
@@ -494,7 +624,84 @@ class TurnPipeline:
 
         while turn_state.step_index < min(request.limits.max_agent_steps, self._services.settings.max_agent_steps):
             current_step = turn_state.step_index + 1
-            context_result = self._stage_context_assemble(request, turn_state, capabilities, current_step)
+            try:
+                context_result = self._stage_context_assemble(request, turn_state, capabilities, current_step)
+            except ContextOverflowError as exc:
+                overflow_payload = {
+                    "budget_tokens": exc.budget_tokens,
+                    "used_tokens": exc.used_tokens,
+                    "protected_slots": exc.protected_slots,
+                    "task_id": turn_state.task.task_id,
+                }
+                self._services.store.log_step_event(
+                    request.turn_id,
+                    current_step,
+                    "context_overflow",
+                    overflow_payload,
+                )
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "context_overflow",
+                    overflow_payload,
+                    step_index=current_step,
+                )
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    "这一轮需要的完整上下文超过了当前硬性预算，我先停下，避免在缺失关键信息的情况下继续推理。",
+                    trace_events,
+                    status="failed",
+                    step_index=current_step,
+                    debug_payload={"reason": "context_overflow", **overflow_payload},
+                    turn_state=turn_state,
+                    request=request,
+                )
+            except ProviderError as exc:
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "context_compaction_failed",
+                    {
+                        "parse_status": exc.parse_status,
+                        "raw_response_preview": exc.raw_response_preview,
+                        "error": str(exc),
+                        "task_id": turn_state.task.task_id,
+                    },
+                    step_index=current_step,
+                )
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    f"上下文压缩失败了，我这一轮先停下。{exc}",
+                    trace_events,
+                    status="failed",
+                    step_index=current_step,
+                    debug_payload={"reason": "context_compaction_failed", "error": str(exc)},
+                    turn_state=turn_state,
+                    request=request,
+                )
+            except Exception as exc:
+                self._services.debug.record_event(
+                    request.turn_id,
+                    "context_compaction_failed",
+                    {
+                        "parse_status": "unexpected_context_compaction_error",
+                        "raw_response_preview": str(exc),
+                        "error": str(exc),
+                        "task_id": turn_state.task.task_id,
+                    },
+                    step_index=current_step,
+                )
+                return self._return_final_reply(
+                    request.turn_id,
+                    request.session_ref,
+                    f"上下文压缩流程出错了，我这一轮先停下。{exc}",
+                    trace_events,
+                    status="failed",
+                    step_index=current_step,
+                    debug_payload={"reason": "unexpected_context_compaction_error", "error": str(exc)},
+                    turn_state=turn_state,
+                    request=request,
+                )
             try:
                 provider_result = self._stage_deliberate(context_result.messages)
             except ProviderError as exc:

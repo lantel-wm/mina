@@ -29,12 +29,14 @@ class Settings:
     max_agent_steps: int
     max_retrieval_results: int
     yield_after_internal_steps: bool
-    context_char_budget: int
+    context_token_budget: int
     context_recent_full_turns: int
+    context_tokenizer_encoding_override: str | None
     artifact_inline_char_budget: int
     script_timeout_seconds: int
     script_memory_mb: int
     script_max_actions: int
+    model_request_timeout_seconds: int = 120
 
     @classmethod
     def load(cls) -> "Settings":
@@ -76,12 +78,32 @@ class Settings:
                 "yield_after_internal_steps",
                 True,
             ),
-            context_char_budget=int(_read("MINA_AGENT_CONTEXT_CHAR_BUDGET", config_data, "context_char_budget", 32000)),
+            context_token_budget=int(
+                _read(
+                    "MINA_AGENT_CONTEXT_TOKEN_BUDGET",
+                    config_data,
+                    "context_token_budget",
+                    _read("MINA_AGENT_CONTEXT_CHAR_BUDGET", config_data, "context_char_budget", 50000),
+                )
+            ),
             context_recent_full_turns=int(_read("MINA_AGENT_CONTEXT_RECENT_FULL_TURNS", config_data, "context_recent_full_turns", 32)),
+            context_tokenizer_encoding_override=(
+                str(value)
+                if (value := _read("MINA_AGENT_CONTEXT_TOKENIZER_ENCODING", config_data, "context_tokenizer_encoding_override", "")) not in ("", None)
+                else None
+            ),
             artifact_inline_char_budget=int(_read("MINA_AGENT_ARTIFACT_INLINE_CHAR_BUDGET", config_data, "artifact_inline_char_budget", 1200)),
             script_timeout_seconds=int(_read("MINA_AGENT_SCRIPT_TIMEOUT_SECONDS", config_data, "script_timeout_seconds", 5)),
             script_memory_mb=int(_read("MINA_AGENT_SCRIPT_MEMORY_MB", config_data, "script_memory_mb", 128)),
             script_max_actions=int(_read("MINA_AGENT_SCRIPT_MAX_ACTIONS", config_data, "script_max_actions", 8)),
+            model_request_timeout_seconds=int(
+                _read(
+                    "MINA_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
+                    config_data,
+                    "model_request_timeout_seconds",
+                    120,
+                )
+            ),
         )
 
 

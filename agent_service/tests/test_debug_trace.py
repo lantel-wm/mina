@@ -25,6 +25,7 @@ from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.runtime.models import TaskState, TurnState, WorkingMemory
 from mina_agent.schemas import (
     ActionResultPayload,
+    ContextCompactionResult,
     LimitsPayload,
     ModelDecision,
     PlayerPayload,
@@ -46,6 +47,76 @@ class StubProvider:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+class _DebugCompactingProvider:
+    def __init__(self) -> None:
+        self._compact_calls = 0
+
+    def decide(self, messages: list[dict[str, str]]) -> ProviderDecisionResult:
+        return ProviderDecisionResult(
+            decision=ModelDecision(mode="final_reply", final_reply="Compaction complete."),
+            latency_ms=8,
+            raw_response_preview='{"mode":"final_reply"}',
+            parse_status="ok",
+            model="test-model",
+            temperature=0.2,
+            message_count=len(messages),
+        )
+
+    def complete_json(self, messages, response_model):
+        self._compact_calls += 1
+        payload = ContextCompactionResult(
+            slot_replacements={
+                "recoverable_history": {
+                    "session_summary": {"summary": "compacted"},
+                    "memories": [],
+                    "history": {"older_turn_count": 0, "recovery_available": True},
+                    "recovery_refs": [],
+                }
+            },
+            rationale="Compact older history for debug test.",
+            target_tokens=1024,
+        )
+        return type(
+            "StructuredResult",
+            (),
+            {
+                "payload": payload,
+                "latency_ms": 9,
+                "raw_response_preview": payload.model_dump_json(),
+                "parse_status": "ok",
+                "model": "test-model",
+                "temperature": 0.2,
+                "message_count": len(messages),
+            },
+        )()
+
+    def estimate_prompt_tokens(self, messages):
+        system_content = messages[0]["content"] if messages else ""
+        if "You are Mina's context compactor." in system_content:
+            return {
+                "model": "test-model",
+                "encoding_name": "o200k_base",
+                "message_count": len(messages),
+                "message_tokens": [120, 100],
+                "total_tokens": 220,
+            }
+        if self._compact_calls >= 1:
+            return {
+                "model": "test-model",
+                "encoding_name": "o200k_base",
+                "message_count": len(messages),
+                "message_tokens": [700, 900],
+                "total_tokens": 1600,
+            }
+        return {
+            "model": "test-model",
+            "encoding_name": "o200k_base",
+            "message_count": len(messages),
+            "message_tokens": [70000, 70000],
+            "total_tokens": 140000,
+        }
 
 
 class DebugTraceTests(unittest.TestCase):
@@ -147,8 +218,9 @@ class DebugTraceTests(unittest.TestCase):
             max_agent_steps=8,
             max_retrieval_results=4,
             yield_after_internal_steps=True,
-            context_char_budget=12000,
-            context_recent_full_turns=2,
+            context_token_budget=120000,
+            context_recent_full_turns=32,
+            context_tokenizer_encoding_override=None,
             artifact_inline_char_budget=1200,
             script_timeout_seconds=5,
             script_memory_mb=128,
@@ -173,6 +245,24 @@ class DebugTraceTests(unittest.TestCase):
                 }
             ),
         )
+
+    def test_debug_records_context_compaction_request_and_response(self) -> None:
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[],
+            provider_override=_DebugCompactingProvider(),
+        )
+
+        response = loop.start_turn(self._turn_request(turn_id="turn-context-compaction-debug"))
+
+        self.assertEqual(response.type, "final_reply")
+        summary = self._load_summary(settings.debug_dir, "turn-context-compaction-debug")
+        compaction = summary["timeline"][0]["context_compactions"][0]
+        artifact = compaction["request"]["provider_input_artifact"]
+        self.assertEqual(artifact["relative_path"], "prompts/step_001.context_compaction_pass_1.provider_input.json")
+        self.assertEqual(compaction["response"]["pass_index"], 1)
+        self.assertIn("slot_replacements", compaction["response"]["result"])
+        self.assertEqual(summary["context_builds"][0]["budget_report"]["compaction_passes"], 1)
 
     def test_debug_turn_directory_uses_time_prefixed_human_readable_name(self) -> None:
         loop, settings, _ = self._build_loop(
@@ -860,6 +950,7 @@ class DebugTraceTests(unittest.TestCase):
         debug_enabled: bool,
         provider_responses: list[ProviderDecisionResult | Exception],
         api_key: str = "test-api-key",
+        provider_override: object | None = None,
     ) -> tuple[AgentLoop, Settings, AgentServices]:
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -887,8 +978,9 @@ class DebugTraceTests(unittest.TestCase):
             max_agent_steps=8,
             max_retrieval_results=4,
             yield_after_internal_steps=True,
-            context_char_budget=12000,
-            context_recent_full_turns=2,
+            context_token_budget=120000,
+            context_recent_full_turns=32,
+            context_tokenizer_encoding_override=None,
             artifact_inline_char_budget=1200,
             script_timeout_seconds=5,
             script_memory_mb=128,
@@ -917,7 +1009,7 @@ class DebugTraceTests(unittest.TestCase):
             policy_engine=policy_engine,
             capability_registry=capability_registry,
             context_engine=ContextEngine(settings, store, memory_policy),
-            decision_engine=DecisionEngine(StubProvider(provider_responses)),  # type: ignore[arg-type]
+            decision_engine=DecisionEngine(provider_override or StubProvider(provider_responses)),  # type: ignore[arg-type]
             execution_orchestrator=ExecutionOrchestrator(settings, store),
             memory_policy=memory_policy,
             confirmation_resolver=ConfirmationResolver(),
