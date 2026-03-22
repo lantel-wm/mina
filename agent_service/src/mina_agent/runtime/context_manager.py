@@ -27,10 +27,13 @@ class ContextManager:
     _TRIM_POLICY = TrimPolicy(
         priority_order=(
             "capability_brief",
+            "dialogue_continuity",
+            "dialogue_history",
             "recoverable_history",
             "scene_slice",
             "task_focus",
             "confirmation_loop",
+            "runtime_policy",
         ),
         hard_floor_chars=320,
     )
@@ -48,6 +51,10 @@ class ContextManager:
     ) -> ContextBuildResult:
         normalized_snapshot = self._normalize_snapshot(request.scoped_snapshot)
         session_turns = self._store.list_turns(request.session_ref)
+        recent_turns = self._store.list_recent_turns(
+            request.session_ref,
+            limit=self._settings.context_recent_full_turns,
+        )
         compacted_history = self._compact_history(request.session_ref, session_turns, turn_state)
         retrieved_memory = self._memory_policy.summarize_for_context(
             self._store.search_memories(request.session_ref, request.user_message, limit=6)
@@ -99,13 +106,28 @@ class ContextManager:
                     priority=78,
                 ),
                 self._slot(
+                    "dialogue_continuity",
+                    "user",
+                    "session_summary.active_dialogue_loop",
+                    "structured_dialogue_continuity",
+                    self._build_dialogue_continuity(recent_dialogue_memory),
+                    priority=57,
+                ),
+                self._slot(
+                    "dialogue_history",
+                    "user",
+                    "db.turns",
+                    "structured_recent_turn_history",
+                    self._build_dialogue_history(recent_turns),
+                    priority=56,
+                ),
+                self._slot(
                     "recoverable_history",
                     "user",
                     "memory+history+refs",
                     "recoverable_recall",
                     {
-                        "session_summary": session_summary,
-                        "recent_dialogue_memory": recent_dialogue_memory,
+                        "session_summary": self._compact_session_summary(session_summary),
                         "memories": [candidate.context_entry() for candidate in retrieved_memory],
                         "history": compacted_history,
                         "recovery_refs": recovery_refs,
@@ -157,6 +179,8 @@ class ContextManager:
             "Delegate turns may not call bridge actions and may not delegate recursively.\n"
             "Do not delegate explore repeatedly when no new facts were found. If live inspection is still needed and a visible read capability matches, call it directly.\n"
             "capability_brief is the authoritative exact list of callable capability ids for this turn.\n"
+            "dialogue_history is the authoritative recent conversation history sourced from persisted DB turns.\n"
+            "If dialogue_continuity includes an active open question and the current user message is brief or elliptical, treat it as a continuation of that question before treating it as a new request.\n"
             "Never invent capability ids. Use an id from capability_brief exactly.\n"
             "Unknown capability ids are invalid. If no visible capability matches, do not guess an id; reply, guide, or delegate_plan instead.\n"
             "Return JSON only.\n"
@@ -254,19 +278,18 @@ class ContextManager:
     def _compact_history(
         self,
         session_ref: str,
-        recent_turns: list[dict[str, Any]],
+        session_turns: list[dict[str, Any]],
         turn_state: TurnState,
     ) -> dict[str, Any]:
-        if len(recent_turns) <= self._settings.context_recent_full_turns:
+        if len(session_turns) <= self._settings.context_recent_full_turns:
             return {
                 "current_trigger": {"turn_id": turn_state.turn_id},
-                "recent_turns": recent_turns,
+                "older_turn_count": 0,
                 "session_compact_summary": None,
                 "recovery_refs": [],
             }
 
-        older_turns = recent_turns[: -self._settings.context_recent_full_turns]
-        recent_tail = recent_turns[-self._settings.context_recent_full_turns :]
+        older_turns = session_turns[: -self._settings.context_recent_full_turns]
         summary_lines = [
             "Mina Compact Summary",
             "",
@@ -298,7 +321,7 @@ class ContextManager:
         )
         return {
             "current_trigger": {"turn_id": turn_state.turn_id},
-            "recent_turns": recent_tail,
+            "older_turn_count": len(older_turns),
             "session_compact_summary": {
                 "text": compact_summary,
                 "path": summary_record["path"],
@@ -365,6 +388,52 @@ class ContextManager:
             "continuity_hint": continuity_hint,
         }
 
+    def _build_dialogue_continuity(self, recent_dialogue_memory: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(recent_dialogue_memory, dict) or not recent_dialogue_memory.get("available"):
+            return {"available": False}
+        active_dialogue_loop = recent_dialogue_memory.get("active_dialogue_loop")
+        if not isinstance(active_dialogue_loop, dict):
+            return {"available": False}
+        payload = {
+            "available": True,
+            "active_dialogue_loop": active_dialogue_loop,
+        }
+        last_dialogue_turn = recent_dialogue_memory.get("last_dialogue_turn")
+        if isinstance(last_dialogue_turn, dict):
+            payload["last_dialogue_turn"] = last_dialogue_turn
+        recent_window = recent_dialogue_memory.get("recent_dialogue_window")
+        if isinstance(recent_window, list):
+            payload["recent_dialogue_window"] = recent_window[-2:]
+        last_dialogue_resolution = recent_dialogue_memory.get("last_dialogue_resolution")
+        if isinstance(last_dialogue_resolution, dict):
+            payload["last_dialogue_resolution"] = last_dialogue_resolution
+        continuity_hint = recent_dialogue_memory.get("continuity_hint")
+        if continuity_hint is not None:
+            payload["continuity_hint"] = continuity_hint
+        return payload
+
+    def _build_dialogue_history(self, recent_turns: list[dict[str, Any]]) -> dict[str, Any]:
+        turns: list[dict[str, Any]] = []
+        for turn in recent_turns:
+            if not isinstance(turn, dict):
+                continue
+            turns.append(
+                {
+                    "turn_id": turn.get("turn_id"),
+                    "task_id": turn.get("task_id"),
+                    "created_at": turn.get("created_at"),
+                    "user_message": turn.get("user_message"),
+                    "assistant_reply": turn.get("final_reply"),
+                    "status": turn.get("status"),
+                }
+            )
+        return {
+            "source": "db.turns",
+            "window_size": self._settings.context_recent_full_turns,
+            "available": bool(turns),
+            "turns": turns,
+        }
+
     def _trim_pack(self, pack: ContextPack) -> ContextPack:
         while pack.total_chars() > self._settings.context_char_budget:
             progressed = False
@@ -384,7 +453,7 @@ class ContextManager:
                 slot = next((item for item in pack.active_slots() if item.name == slot_name), None)
                 if slot is None:
                     continue
-                if slot.name == "capability_brief":
+                if slot.name in {"capability_brief", "dialogue_continuity", "dialogue_history"}:
                     continue
                 self._preview_truncate_slot(slot, pack.trim_policy.hard_floor_chars)
                 if pack.total_chars() <= self._settings.context_char_budget:
@@ -395,6 +464,10 @@ class ContextManager:
         before = slot.full_chars
         if slot.name == "recoverable_history":
             slot.content = self._reduce_recoverable_history(slot.content)
+        elif slot.name == "dialogue_continuity":
+            slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=5, max_str_chars=220)
+        elif slot.name == "runtime_policy":
+            slot.content = self._shrink_nested(slot.content, max_list_items=3, max_dict_keys=6, max_str_chars=220)
         elif slot.name == "scene_slice":
             slot.content = self._shrink_nested(slot.content, max_list_items=2, max_dict_keys=6, max_str_chars=260)
         elif slot.name == "task_focus":
@@ -414,12 +487,7 @@ class ContextManager:
             return content
         next_content = dict(content)
         history = dict(next_content.get("history", {})) if isinstance(next_content.get("history"), dict) else {}
-        recent_turns = list(history.get("recent_turns", [])) if isinstance(history.get("recent_turns"), list) else []
         memories = list(next_content.get("memories", [])) if isinstance(next_content.get("memories"), list) else []
-        if len(recent_turns) > 1:
-            history["recent_turns"] = recent_turns[-max(1, len(recent_turns) - 1) :]
-            next_content["history"] = history
-            return next_content
         if len(memories) > 2:
             next_content["memories"] = memories[:2]
             return next_content
@@ -432,11 +500,21 @@ class ContextManager:
             }
             next_content["history"] = history
             return next_content
+        session_summary = next_content.get("session_summary")
+        if isinstance(session_summary, dict) and session_summary.get("metadata"):
+            next_content["session_summary"] = {
+                "summary": session_summary.get("summary"),
+                "transcript_path": session_summary.get("transcript_path"),
+            }
+            return next_content
         recovery_refs = next_content.get("recovery_refs")
         return {
             "session_summary": self._compact_session_summary(next_content.get("session_summary")),
-            "recent_dialogue_memory": next_content.get("recent_dialogue_memory"),
-            "history": {"current_trigger": history.get("current_trigger"), "recovery_available": True},
+            "history": {
+                "current_trigger": history.get("current_trigger"),
+                "older_turn_count": history.get("older_turn_count", 0),
+                "recovery_available": True,
+            },
             "recovery_refs": recovery_refs,
         }
 
@@ -455,10 +533,7 @@ class ContextManager:
                     "task_id",
                     "status",
                     "next_best_companion_move",
-                    "last_dialogue_turn",
-                    "recent_dialogue_turn",
-                    "active_dialogue_loop",
-                    "continuity_hint",
+                    "older_turn_count",
                 )
                 if key in metadata
             }

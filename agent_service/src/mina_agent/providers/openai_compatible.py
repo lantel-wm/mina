@@ -63,6 +63,14 @@ class OpenAICompatibleProvider:
     def available(self) -> bool:
         return bool(self._settings.base_url and self._settings.api_key and self._settings.model)
 
+    def debug_request_buffer(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        return {
+            "kind": "openai_chat_completions_request",
+            "content_type": "application/json",
+            "extension": ".json",
+            "body_text": self._render_request_body(messages),
+        }
+
     def decide(self, messages: list[dict[str, str]]) -> ProviderDecisionResult:
         result = self.complete_json(messages, ModelDecision)
         return ProviderDecisionResult(
@@ -108,18 +116,14 @@ class OpenAICompatibleProvider:
         if not self.available():
             raise ProviderError("OpenAI-compatible provider is not configured.", parse_status="provider_unavailable")
 
-        body = {
-            "model": self._settings.model,
-            "temperature": TEMPERATURE,
-            "messages": messages,
-        }
+        request_body = self._render_request_body(messages)
         request = urllib.request.Request(
             self._settings.base_url.rstrip("/") + "/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._settings.api_key}",
                 "Content-Type": "application/json",
             },
-            data=json.dumps(body).encode("utf-8"),
+            data=request_body.encode("utf-8"),
             method="POST",
         )
         started = perf_counter()
@@ -168,3 +172,11 @@ class OpenAICompatibleProvider:
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
         return str(content), latency_ms
+
+    def _render_request_body(self, messages: list[dict[str, str]]) -> str:
+        body = {
+            "model": self._settings.model,
+            "temperature": TEMPERATURE,
+            "messages": messages,
+        }
+        return json.dumps(body)

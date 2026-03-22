@@ -42,7 +42,7 @@ from mina_agent.schemas import (
 
 class RuntimeRefactorTests(unittest.TestCase):
     def test_context_engine_uses_expected_block_order_and_compacts_history(self) -> None:
-        settings, store, _, _, context_engine, _, _, _ = self._build_runtime()
+        settings, store, _, _, context_engine, _, _, _ = self._build_runtime(context_recent_full_turns=2)
         request = self._turn_request(turn_id="turn-context")
         for index in range(5):
             store.create_turn(
@@ -68,6 +68,8 @@ class RuntimeRefactorTests(unittest.TestCase):
                 "scene_slice",
                 "task_focus",
                 "confirmation_loop",
+                "dialogue_continuity",
+                "dialogue_history",
                 "recoverable_history",
                 "capability_brief",
             ],
@@ -394,13 +396,13 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(finished.final_reply, "脚本已经按确认后的计划执行了。")
         self.assertIsNone(store.get_pending_confirmation(request.session_ref))
 
-    def test_prepare_task_creates_new_task_even_when_active_task_exists(self) -> None:
+    def test_prepare_task_reuses_latest_session_task_by_default(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
         active_task = store.create_task(
             "session-1",
             "Tester",
             "继续整理主基地箱子",
-            status="in_progress",
+            status="completed",
         )
         turn_service = TurnService(
             AgentServices(
@@ -422,7 +424,7 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         prepared = turn_service._prepare_task(request, pending_confirmation=None)  # type: ignore[attr-defined]
 
-        self.assertNotEqual(prepared.task_id, active_task["task_id"])
+        self.assertEqual(prepared.task_id, active_task["task_id"])
         self.assertEqual(prepared.goal, request.user_message)
         self.assertEqual(prepared.status, "analyzing")
 
@@ -503,13 +505,13 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(candidate.steps[0].step_key, "scan")
         self.assertEqual(candidate.steps[0].title, "扫描箱子")
 
-    def test_model_can_reuse_active_task_candidate_for_follow_up_turn(self) -> None:
+    def test_follow_up_turn_reuses_existing_session_task_without_provisional_task(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
         active_task = store.create_task(
             "session-1",
             "Tester",
             "整理主基地箱子",
-            status="in_progress",
+            status="completed",
             summary={"next_best_step": "扫描箱子"},
         )
         loop = AgentLoop(
@@ -527,11 +529,11 @@ class RuntimeRefactorTests(unittest.TestCase):
                             ProviderDecisionResult(
                                 decision=ModelDecision(
                                     mode="final_reply",
-                                    task_selection="reuse_active",
+                                    task_selection="keep_current",
                                     final_reply="我接着刚才那件事继续看。",
                                 ),
                                 latency_ms=10,
-                                raw_response_preview='{"mode":"final_reply","task_selection":"reuse_active"}',
+                                raw_response_preview='{"mode":"final_reply","task_selection":"keep_current"}',
                                 parse_status="ok",
                                 model="test-model",
                                 temperature=0.2,
@@ -563,11 +565,7 @@ class RuntimeRefactorTests(unittest.TestCase):
                     (request.session_ref,),
                 ).fetchall()
             ]
-        provisional_task_id = next(task_id for task_id in task_ids if task_id != active_task["task_id"])
-        provisional_task = store.get_task(provisional_task_id)
-        self.assertIsNotNone(provisional_task)
-        self.assertEqual(provisional_task["status"], "canceled")
-        self.assertEqual(provisional_task["summary"]["superseded_by_task_id"], active_task["task_id"])
+        self.assertEqual(task_ids, [active_task["task_id"]])
 
     def test_unknown_nearby_entity_alias_is_mapped_to_visible_capability(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
@@ -1037,7 +1035,7 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertTrue(scene_section["truncated"])
 
     def test_context_engine_compacts_full_session_history_not_sliding_window(self) -> None:
-        settings, store, _, _, context_engine, _, _, _ = self._build_runtime()
+        settings, store, _, _, context_engine, _, _, _ = self._build_runtime(context_recent_full_turns=2)
         request = self._turn_request(turn_id="turn-history-full-compact")
         for index in range(20):
             store.create_turn(
@@ -1059,9 +1057,65 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIsNotNone(compact_summary)
         self.assertIn("message 0", compact_summary["summary"])
         self.assertIn("message 17", compact_summary["summary"])
-        history_section = next(section for section in result.sections if section["name"] == "recoverable_history")
-        recent_turns = history_section["preview"]["history"]["recent_turns"]
+        dialogue_history = next(section for section in result.sections if section["name"] == "dialogue_history")
+        recent_turns = dialogue_history["preview"]["turns"]
         self.assertEqual([turn["user_message"] for turn in recent_turns], ["message 18", "message 19"])
+        history_section = next(section for section in result.sections if section["name"] == "recoverable_history")
+        self.assertEqual(history_section["preview"]["history"]["older_turn_count"], 18)
+
+    def test_context_engine_uses_db_recent_dialogue_history_for_last_32_turns(self) -> None:
+        _, store, _, _, context_engine, _, _, _ = self._build_runtime(context_recent_full_turns=32)
+        request = self._turn_request(turn_id="turn-history-db-window")
+        for index in range(40):
+            store.create_turn(
+                f"db-turn-{index}",
+                request.session_ref,
+                f"message {index}",
+                {},
+                task_id=f"task_db_turn_{index}",
+            )
+            store.finish_turn(f"db-turn-{index}", f"reply {index}")
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=[],
+        )
+
+        dialogue_history = next(section for section in result.sections if section["name"] == "dialogue_history")
+        turns = dialogue_history["preview"]["turns"]
+        self.assertEqual(len(turns), 32)
+        self.assertEqual(turns[0]["user_message"], "message 8")
+        self.assertEqual(turns[-1]["assistant_reply"], "reply 39")
+
+    def test_context_engine_prefers_db_turns_when_transcript_is_incomplete(self) -> None:
+        _, store, _, _, context_engine, _, _, _ = self._build_runtime(context_recent_full_turns=10)
+        request = self._turn_request(turn_id="turn-history-db-over-transcript")
+        for index in range(10):
+            store.create_turn(
+                f"db-only-{index}",
+                request.session_ref,
+                f"message {index}",
+                {},
+                task_id=f"task_db_only_{index}",
+            )
+            store.finish_turn(f"db-only-{index}", f"reply {index}")
+
+        transcript_path = store.session_dir(request.session_ref) / "transcript.jsonl"
+        transcript_lines = transcript_path.read_text(encoding="utf-8").splitlines()
+        transcript_path.write_text("\n".join(transcript_lines[:6]) + "\n", encoding="utf-8")
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=[],
+        )
+
+        dialogue_history = next(section for section in result.sections if section["name"] == "dialogue_history")
+        turns = dialogue_history["preview"]["turns"]
+        self.assertEqual(len(turns), 10)
+        self.assertEqual(turns[0]["user_message"], "message 0")
+        self.assertEqual(turns[-1]["assistant_reply"], "reply 9")
 
     def test_context_engine_normalizes_target_block_and_server_rules_refs(self) -> None:
         _, _, _, _, context_engine, _, _, _ = self._build_runtime()
@@ -1321,11 +1375,101 @@ class RuntimeRefactorTests(unittest.TestCase):
             turn_state=self._turn_state(second_request),
             capability_descriptors=[],
         )
-        history_section = next(section for section in context_result.sections if section["name"] == "recoverable_history")
+        continuity_section = next(section for section in context_result.sections if section["name"] == "dialogue_continuity")
         self.assertEqual(
-            history_section["preview"]["recent_dialogue_memory"]["active_dialogue_loop"]["prompt"],
+            continuity_section["preview"]["active_dialogue_loop"]["prompt"],
             "需要我帮你看看它的具体信息吗？",
         )
+
+    def test_recent_dialogue_memory_survives_compact_history_rewrite(self) -> None:
+        _, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
+        memory_manager = MemoryManager(store, memory_policy)
+
+        first_request = self._turn_request(turn_id="turn-recent-dialogue-compact-1")
+        first_request.user_message = "where am i"
+        first_state = self._turn_state(first_request)
+        first_state.task.status = "completed"
+        memory_manager.record_turn_memories(
+            first_request,
+            first_state,
+            final_reply="你在黑森林里。需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
+            status="completed",
+        )
+
+        for index in range(4):
+            store.create_turn(
+                f"past-compact-{index}",
+                first_request.session_ref,
+                f"message {index}",
+                {},
+                task_id=f"task_past_compact_{index}",
+            )
+            store.finish_turn(f"past-compact-{index}", f"reply {index}")
+
+        second_request = self._turn_request(turn_id="turn-recent-dialogue-compact-2")
+        second_request.user_message = "需要"
+        context_result = context_engine.build_messages(
+            request=second_request,
+            turn_state=self._turn_state(second_request),
+            capability_descriptors=[],
+        )
+
+        continuity_section = next(section for section in context_result.sections if section["name"] == "dialogue_continuity")
+        self.assertEqual(
+            continuity_section["preview"]["active_dialogue_loop"]["prompt"],
+            "需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
+        )
+        summary = store.get_session_summary(first_request.session_ref)
+        self.assertIsNotNone(summary)
+        self.assertEqual(
+            summary["metadata"]["active_dialogue_loop"]["prompt"],
+            "需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
+        )
+
+    def test_dialogue_continuity_survives_context_trimming_for_brief_follow_up(self) -> None:
+        settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
+        settings.context_char_budget = 7000
+        memory_manager = MemoryManager(store, memory_policy)
+
+        first_request = self._turn_request(turn_id="turn-dialogue-continuity-1")
+        first_request.user_message = "where am i"
+        first_state = self._turn_state(first_request)
+        first_state.task.status = "completed"
+        memory_manager.record_turn_memories(
+            first_request,
+            first_state,
+            final_reply="你在黑森林里。需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？",
+            status="completed",
+        )
+
+        for index in range(6):
+            store.create_turn(
+                f"past-dialogue-{index}",
+                first_request.session_ref,
+                f"message {index}",
+                {},
+                task_id=f"task_past_dialogue_{index}",
+            )
+            store.finish_turn(f"past-dialogue-{index}", "reply " + ("x" * 400))
+
+        second_request = self._turn_request(turn_id="turn-dialogue-continuity-2")
+        second_request.user_message = "需要"
+        context_result = context_engine.build_messages(
+            request=second_request,
+            turn_state=self._turn_state(second_request),
+            capability_descriptors=[],
+        )
+
+        self.assertIn("dialogue_continuity", [section["name"] for section in context_result.sections])
+        self.assertIn("dialogue_history", [section["name"] for section in context_result.sections])
+        dialogue_history_section = next(section for section in context_result.sections if section["name"] == "dialogue_history")
+        self.assertFalse(dialogue_history_section["truncated"])
+        self.assertIn("turns", dialogue_history_section["preview"])
+        user_content = context_result.messages[1]["content"]
+        self.assertIn('"active_dialogue_loop"', user_content)
+        self.assertIn("需要我帮你看看更具体的情况，比如附近有什么可用的资源或安全路径吗？", user_content)
+        self.assertIn('"turns"', user_content)
+        self.assertIn('"assistant_reply"', user_content)
 
     def test_model_sees_recent_dialogue_memory_for_brief_follow_up_turn(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
@@ -1358,6 +1502,12 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         self.assertEqual(second_response.type, "final_reply")
         self.assertEqual(second_response.final_reply, "好，我继续讲这个方块的具体信息。")
+        first_state = store.get_turn_state(first_request.turn_id)
+        second_state = store.get_turn_state(second_request.turn_id)
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(second_state["task"]["task_id"], first_state["task"]["task_id"])
+        self.assertEqual(second_state["task"]["goal"], first_state["task"]["goal"])
 
     def test_artifact_search_finds_session_artifacts_from_previous_task(self) -> None:
         settings, store, policy_engine, capability_registry, _, _, _, _ = self._build_runtime()
@@ -1532,7 +1682,13 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(second_response.type, "final_reply")
         self.assertEqual(second_response.final_reply, "我先把现成线索整理给你了。")
 
-    def _build_runtime(self, *, enable_dynamic_scripting: bool = False):
+    def _build_runtime(
+        self,
+        *,
+        enable_dynamic_scripting: bool = False,
+        context_char_budget: int = 12000,
+        context_recent_full_turns: int = 2,
+    ):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
@@ -1559,9 +1715,8 @@ class RuntimeRefactorTests(unittest.TestCase):
             max_agent_steps=8,
             max_retrieval_results=4,
             yield_after_internal_steps=True,
-            context_char_budget=12000,
-            context_recent_turn_limit=12,
-            context_recent_full_turns=2,
+            context_char_budget=context_char_budget,
+            context_recent_full_turns=context_recent_full_turns,
             artifact_inline_char_budget=1200,
             script_timeout_seconds=5,
             script_memory_mb=128,
@@ -1750,10 +1905,14 @@ class _RecentDialogueMemoryProvider:
                 message_count=len(messages),
             )
         user_content = messages[1]["content"]
-        if '"recent_dialogue_memory"' not in user_content:
-            raise AssertionError("recent_dialogue_memory was not included in the model context.")
+        if "[dialogue_continuity]" not in user_content:
+            raise AssertionError("dialogue_continuity was not included in the model context.")
+        if "[dialogue_history]" not in user_content:
+            raise AssertionError("dialogue_history was not included in the model context.")
         if '"active_dialogue_loop"' not in user_content:
             raise AssertionError("active_dialogue_loop was not included in the model context.")
+        if '"assistant_reply"' not in user_content:
+            raise AssertionError("assistant_reply was not included in the recent dialogue history.")
         if "需要我帮你看看它的具体信息吗？" not in user_content:
             raise AssertionError("The last follow-up prompt was not preserved in recent dialogue memory.")
         return ProviderDecisionResult(

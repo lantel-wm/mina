@@ -62,8 +62,12 @@ class TurnPipeline:
     def _stage_bootstrap_start(self, request: TurnStartRequest) -> TurnState:
         self._services.store.ensure_session(request.session_ref, request.player.name, request.player.role)
         pending_confirmation = self._services.store.get_pending_confirmation(request.session_ref)
-        active_task_candidate = self._task_manager.load_active_task_candidate(request, pending_confirmation)
         task = self._task_manager.prepare_task(request, pending_confirmation)
+        active_task_candidate = self._task_manager.load_active_task_candidate(
+            request,
+            pending_confirmation,
+            current_task_id=task.task_id,
+        )
         turn_state = TurnState(
             session_ref=request.session_ref,
             turn_id=request.turn_id,
@@ -165,6 +169,7 @@ class TurnPipeline:
                 "message_count": len(context_result.messages),
                 "message_stats": context_result.message_stats,
                 "messages": context_result.messages,
+                "provider_input_buffer": self._deliberation_engine.debug_request_buffer(context_result.messages),
             },
             step_index=current_step,
         )
@@ -989,8 +994,14 @@ class TurnPipeline:
         self,
         request: TurnStartRequest,
         pending_confirmation: dict[str, Any] | None,
+        *,
+        current_task_id: str | None = None,
     ) -> TaskState | None:
-        return self._task_manager.load_active_task_candidate(request, pending_confirmation)
+        return self._task_manager.load_active_task_candidate(
+            request,
+            pending_confirmation,
+            current_task_id=current_task_id,
+        )
 
     def _task_state_from_record(self, record: dict[str, Any]) -> TaskState:
         return self._task_manager.task_state_from_record(record)

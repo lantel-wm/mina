@@ -18,6 +18,31 @@ class TaskManager:
             if existing is not None:
                 return self.task_state_from_record(existing)
 
+        reusable = self._store.get_latest_task(request.session_ref)
+        if reusable is not None:
+            summary = dict(reusable.get("summary", {}))
+            summary.update(
+                {
+                    "created_from": "turn_start_reuse",
+                    "player_intent": request.user_message,
+                    "mina_stance": summary.get("mina_stance") or "companionship_first",
+                    "next_best_companion_move": (
+                        summary.get("next_best_companion_move") or "understand the situation before acting"
+                    ),
+                }
+            )
+            goal = self._reused_task_goal(request, reusable)
+            self._store.update_task(
+                reusable["task_id"],
+                goal=goal,
+                status="analyzing",
+                requires_confirmation=False,
+                last_active_at=request.turn_id,
+                summary=summary,
+            )
+            refreshed = self._store.get_task(reusable["task_id"]) or reusable
+            return self.task_state_from_record(refreshed)
+
         task_record = self._store.create_task(
             request.session_ref,
             request.player.name,
@@ -41,11 +66,15 @@ class TaskManager:
         self,
         request: TurnStartRequest,
         pending_confirmation: dict[str, Any] | None,
+        *,
+        current_task_id: str | None = None,
     ) -> TaskState | None:
         if pending_confirmation is not None:
             return None
         active_task = self._store.get_active_task(request.session_ref)
         if active_task is None:
+            return None
+        if current_task_id is not None and active_task["task_id"] == current_task_id:
             return None
         candidate = self.task_state_from_record(active_task)
         candidate.continuity_score = self._continuity_score(request.user_message, candidate)
@@ -177,3 +206,26 @@ class TaskManager:
         if task.status in {"analyzing", "planned", "in_progress", "blocked", "awaiting_confirmation"}:
             score += 0.2
         return min(score, 1.0)
+
+    def _reused_task_goal(self, request: TurnStartRequest, task_record: dict[str, Any]) -> str:
+        if self._should_preserve_existing_goal(request):
+            existing_goal = str(task_record.get("goal") or "").strip()
+            if existing_goal:
+                return existing_goal
+        return request.user_message
+
+    def _should_preserve_existing_goal(self, request: TurnStartRequest) -> bool:
+        if not self._is_brief_follow_up(request.user_message):
+            return False
+        session_summary = self._store.get_session_summary(request.session_ref)
+        if session_summary is None:
+            return False
+        metadata = session_summary.get("metadata")
+        return isinstance(metadata, dict) and isinstance(metadata.get("active_dialogue_loop"), dict)
+
+    def _is_brief_follow_up(self, message: str) -> bool:
+        stripped = message.strip()
+        if not stripped:
+            return False
+        terms = set(re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", stripped.lower()))
+        return len(stripped) <= 8 and len(terms) <= 1

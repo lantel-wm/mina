@@ -950,6 +950,34 @@ class Store:
             return None
         return self._task_row_to_dict(row)
 
+    def get_latest_task(
+        self,
+        session_ref: str,
+        *,
+        excluded_statuses: Iterable[str] | None = ("failed", "canceled"),
+    ) -> dict[str, Any] | None:
+        clauses = ["session_ref = ?"]
+        params: list[Any] = [session_ref]
+        normalized_excluded = [str(status) for status in (excluded_statuses or ()) if str(status).strip()]
+        if normalized_excluded:
+            placeholders = ", ".join("?" for _ in normalized_excluded)
+            clauses.append(f"status NOT IN ({placeholders})")
+            params.extend(normalized_excluded)
+        query = f"""
+            SELECT task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
+                   requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
+                   constraints_json, artifacts_json, summary_json, created_at, updated_at
+            FROM tasks
+            WHERE {" AND ".join(clauses)}
+            ORDER BY updated_at DESC
+            LIMIT 1
+        """
+        with self.connection() as connection:
+            row = connection.execute(query, tuple(params)).fetchone()
+        if row is None:
+            return None
+        return self._task_row_to_dict(row)
+
     def replace_task_steps(self, task_id: str, steps: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         now = _utc_now()
         normalized: list[dict[str, Any]] = []
@@ -1209,11 +1237,15 @@ class Store:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         transcript_path = self.session_dir(session_ref) / "transcript.jsonl"
+        existing_summary = self.get_session_summary(session_ref)
+        merged_metadata = dict(existing_summary.get("metadata", {})) if isinstance(existing_summary, dict) else {}
+        if isinstance(metadata, dict):
+            merged_metadata.update(metadata)
         self.upsert_session_summary(
             session_ref,
             summary,
             transcript_path=str(transcript_path),
-            metadata=metadata,
+            metadata=merged_metadata,
         )
         target = self.session_dir(session_ref) / "compact_summary.md"
         target.write_text(summary, encoding="utf-8")

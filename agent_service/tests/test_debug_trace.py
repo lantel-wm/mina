@@ -12,6 +12,7 @@ from mina_agent.debug import build_debug_recorder
 from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
+from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.providers.openai_compatible import ProviderDecisionResult, ProviderError
 from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
@@ -88,6 +89,89 @@ class DebugTraceTests(unittest.TestCase):
                 "model_decision",
                 "turn_completed",
             ],
+        )
+
+    def test_debug_saves_raw_provider_input_for_model_request(self) -> None:
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[self._final_reply_result("Prompt saved.")],
+        )
+
+        response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-full-prompt-markdown",
+                user_message="u" * 2000,
+            )
+        )
+
+        self.assertEqual(response.type, "final_reply")
+        summary = self._load_summary(settings.debug_dir, "turn-full-prompt-markdown")
+        events = self._load_events(settings.debug_dir, "turn-full-prompt-markdown")
+        prompt_artifact = summary["timeline"][0]["model_request"]["provider_input_artifact"]
+        self.assertEqual(prompt_artifact["relative_path"], "prompts/step_001.provider_input.json")
+        self.assertTrue(prompt_artifact["path"].endswith(".json"))
+        prompt_path = Path(prompt_artifact["path"])
+        self.assertTrue(prompt_path.exists())
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        self.assertIn("u" * 2000, prompt_text)
+        model_request_event = self._find_event(events, "model_request")
+        self.assertEqual(model_request_event["artifact_ref"]["relative_path"], "prompts/step_001.provider_input.json")
+        raw_payload = json.loads(prompt_text)
+        self.assertEqual(len(raw_payload), 2)
+        self.assertEqual(raw_payload[1]["role"], "user")
+        self.assertIn("u" * 2000, raw_payload[1]["content"])
+
+    def test_openai_provider_debug_request_buffer_matches_exact_http_body(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name)
+        settings = Settings(
+            host="127.0.0.1",
+            port=8787,
+            base_url="https://example.invalid/v1",
+            api_key="test-api-key",
+            model="test-model",
+            config_file=root / "config.local.json",
+            data_dir=root / "data",
+            db_path=root / "data" / "mina_agent.db",
+            knowledge_dir=root / "data" / "knowledge",
+            audit_dir=root / "data" / "audit",
+            debug_enabled=False,
+            debug_dir=root / "data" / "debug",
+            debug_string_preview_chars=600,
+            debug_list_preview_items=5,
+            debug_dict_preview_keys=20,
+            debug_event_payload_chars=8000,
+            enable_experimental=False,
+            enable_dynamic_scripting=False,
+            max_agent_steps=8,
+            max_retrieval_results=4,
+            yield_after_internal_steps=True,
+            context_char_budget=12000,
+            context_recent_full_turns=2,
+            artifact_inline_char_budget=1200,
+            script_timeout_seconds=5,
+            script_memory_mb=128,
+            script_max_actions=8,
+        )
+        provider = OpenAICompatibleProvider(settings)
+        messages = [
+            {"role": "system", "content": "hello"},
+            {"role": "user", "content": "你好"},
+        ]
+
+        buffer = provider.debug_request_buffer(messages)
+
+        self.assertEqual(buffer["content_type"], "application/json")
+        self.assertEqual(
+            buffer["body_text"],
+            json.dumps(
+                {
+                    "model": "test-model",
+                    "temperature": 0.2,
+                    "messages": messages,
+                }
+            ),
         )
 
     def test_debug_turn_directory_uses_time_prefixed_human_readable_name(self) -> None:
@@ -669,7 +753,6 @@ class DebugTraceTests(unittest.TestCase):
             max_retrieval_results=4,
             yield_after_internal_steps=True,
             context_char_budget=12000,
-            context_recent_turn_limit=12,
             context_recent_full_turns=2,
             artifact_inline_char_budget=1200,
             script_timeout_seconds=5,

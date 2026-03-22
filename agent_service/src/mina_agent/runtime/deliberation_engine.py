@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider, ProviderDecisionResult, ProviderStructuredResult
 from mina_agent.schemas import CapabilityRequest, ConfirmationRequest, DelegateRequest, DelegateSummary, ModelDecision
 
@@ -12,6 +14,19 @@ class DeliberationEngine:
         result = self._provider.decide(messages)
         result.decision = self.normalize(result.decision)
         return result
+
+    def debug_request_buffer(self, messages: list[dict[str, str]]) -> dict[str, str]:
+        builder = getattr(self._provider, "debug_request_buffer", None)
+        if callable(builder):
+            payload = builder(messages)
+            if isinstance(payload, dict):
+                return payload
+        return {
+            "kind": "provider_decide_messages",
+            "content_type": "application/json",
+            "extension": ".json",
+            "body_text": json.dumps(messages, ensure_ascii=False, indent=2),
+        }
 
     def summarize_delegate(self, messages: list[dict[str, str]]) -> ProviderStructuredResult[DelegateSummary]:
         complete_json = getattr(self._provider, "complete_json", None)

@@ -30,7 +30,6 @@ class Settings:
     max_retrieval_results: int
     yield_after_internal_steps: bool
     context_char_budget: int
-    context_recent_turn_limit: int
     context_recent_full_turns: int
     artifact_inline_char_budget: int
     script_timeout_seconds: int
@@ -77,9 +76,8 @@ class Settings:
                 "yield_after_internal_steps",
                 True,
             ),
-            context_char_budget=int(_read("MINA_AGENT_CONTEXT_CHAR_BUDGET", config_data, "context_char_budget", 12000)),
-            context_recent_turn_limit=int(_read("MINA_AGENT_CONTEXT_RECENT_TURN_LIMIT", config_data, "context_recent_turn_limit", 12)),
-            context_recent_full_turns=int(_read("MINA_AGENT_CONTEXT_RECENT_FULL_TURNS", config_data, "context_recent_full_turns", 2)),
+            context_char_budget=int(_read("MINA_AGENT_CONTEXT_CHAR_BUDGET", config_data, "context_char_budget", 32000)),
+            context_recent_full_turns=int(_read("MINA_AGENT_CONTEXT_RECENT_FULL_TURNS", config_data, "context_recent_full_turns", 32)),
             artifact_inline_char_budget=int(_read("MINA_AGENT_ARTIFACT_INLINE_CHAR_BUDGET", config_data, "artifact_inline_char_budget", 1200)),
             script_timeout_seconds=int(_read("MINA_AGENT_SCRIPT_TIMEOUT_SECONDS", config_data, "script_timeout_seconds", 5)),
             script_memory_mb=int(_read("MINA_AGENT_SCRIPT_MEMORY_MB", config_data, "script_memory_mb", 128)),

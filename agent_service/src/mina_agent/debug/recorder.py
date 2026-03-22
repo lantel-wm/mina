@@ -85,7 +85,14 @@ class FileDebugRecorder(DebugRecorder):
         summary_path = turn_dir / "summary.json"
 
         summary = self._load_summary(summary_path, turn_id, turn_dir)
-        sanitized_payload, stats = sanitize_event_payload(payload, self._limits)
+        raw_payload = _jsonable_value(payload)
+        prompt_artifact = self._write_model_request_artifact(
+            turn_dir,
+            event_type,
+            raw_payload,
+            step_index,
+        )
+        sanitized_payload, stats = sanitize_event_payload(raw_payload, self._limits)
         self._merge_truncation(summary, stats)
 
         event_record = {
@@ -95,8 +102,18 @@ class FileDebugRecorder(DebugRecorder):
             "step_index": step_index,
             "payload": sanitized_payload,
         }
+        if prompt_artifact is not None:
+            event_record["artifact_ref"] = prompt_artifact
         self._append_jsonl(events_path, event_record)
-        self._apply_summary_update(summary, event_type, sanitized_payload, stamp, step_index)
+        self._apply_summary_update(
+            summary,
+            event_type,
+            sanitized_payload,
+            raw_payload,
+            stamp,
+            step_index,
+            prompt_artifact,
+        )
         self._write_json(summary_path, summary)
 
     def _resolve_turn_dir(
@@ -157,6 +174,7 @@ class FileDebugRecorder(DebugRecorder):
             },
             "context_builds": [],
             "timeline": [],
+            "prompt_artifacts": [],
             "final_reply_preview": None,
             "truncation": TruncationStats().as_dict(),
         }
@@ -178,8 +196,10 @@ class FileDebugRecorder(DebugRecorder):
         summary: dict[str, Any],
         event_type: str,
         payload: dict[str, Any],
+        raw_payload: dict[str, Any],
         stamp: datetime,
         step_index: int | None,
+        prompt_artifact: dict[str, Any] | None,
     ) -> None:
         if event_type == "turn_started":
             turn = summary["turn"]
@@ -218,6 +238,17 @@ class FileDebugRecorder(DebugRecorder):
             entry["composition"] = payload.get("composition", {})
             return
 
+        if event_type == "model_request" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            step["model_request"] = {
+                "message_count": raw_payload.get("message_count"),
+                "message_stats": raw_payload.get("message_stats", {}),
+                "provider_input_artifact": prompt_artifact,
+            }
+            if prompt_artifact is not None:
+                self._upsert_prompt_artifact(summary, prompt_artifact)
+            return
+
         if event_type == "model_response" and step_index is not None:
             step = self._upsert_step(summary["timeline"], step_index)
             step["model_response"] = payload
@@ -254,6 +285,59 @@ class FileDebugRecorder(DebugRecorder):
             summary["turn"]["status"] = "failed"
             summary["final_reply_preview"] = payload.get("final_reply")
             summary["failure"] = payload
+
+    def _write_model_request_artifact(
+        self,
+        turn_dir: Path,
+        event_type: str,
+        payload: dict[str, Any],
+        step_index: int | None,
+    ) -> dict[str, Any] | None:
+        if event_type != "model_request":
+            return None
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return None
+        prompts_dir = turn_dir / "prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        step_label = f"{int(step_index):03d}" if step_index is not None else "unknown"
+        return self._write_provider_input_artifact(turn_dir, prompts_dir, payload, step_label, step_index)
+
+    def _write_provider_input_artifact(
+        self,
+        turn_dir: Path,
+        prompts_dir: Path,
+        payload: dict[str, Any],
+        step_label: str,
+        step_index: int | None,
+    ) -> dict[str, Any] | None:
+        provider_input = payload.get("provider_input_buffer")
+        if not isinstance(provider_input, dict):
+            return None
+        body_text = provider_input.get("body_text")
+        if not isinstance(body_text, str):
+            return None
+        extension = str(provider_input.get("extension") or ".txt")
+        if not extension.startswith("."):
+            extension = f".{extension}"
+        target = prompts_dir / f"step_{step_label}.provider_input{extension}"
+        target.write_text(body_text, encoding="utf-8")
+        return {
+            "kind": "provider_input_buffer",
+            "path": str(target),
+            "relative_path": str(target.relative_to(turn_dir)),
+            "step_index": step_index,
+            "content_type": provider_input.get("content_type"),
+            "buffer_kind": provider_input.get("kind"),
+        }
+
+    def _upsert_prompt_artifact(self, summary: dict[str, Any], artifact: dict[str, Any]) -> None:
+        collection = summary.setdefault("prompt_artifacts", [])
+        for index, existing in enumerate(collection):
+            if isinstance(existing, dict) and existing.get("relative_path") == artifact.get("relative_path"):
+                collection[index] = artifact
+                return
+        collection.append(artifact)
 
     def _upsert_step(self, collection: list[dict[str, Any]], step_index: int) -> dict[str, Any]:
         for entry in collection:
@@ -339,6 +423,18 @@ def _sanitize_value(value: Any, limits: DebugPreviewLimits, stats: TruncationSta
             "truncated": omitted > 0,
         }
     return _sanitize_value(str(value), limits, stats)
+
+
+def _jsonable_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable_value(nested) for key, nested in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable_value(item) for item in value]
+    return str(value)
 
 
 def _truncate_text(value: str, limits: DebugPreviewLimits) -> str:
