@@ -28,6 +28,7 @@ class Settings:
     enable_dynamic_scripting: bool
     max_agent_steps: int
     max_retrieval_results: int
+    yield_after_internal_steps: bool
     context_char_budget: int
     context_recent_turn_limit: int
     context_recent_full_turns: int
@@ -70,6 +71,12 @@ class Settings:
             enable_dynamic_scripting=_read_bool("MINA_AGENT_ENABLE_DYNAMIC_SCRIPTING", config_data, "enable_dynamic_scripting", False),
             max_agent_steps=int(_read("MINA_AGENT_MAX_STEPS", config_data, "max_agent_steps", 8)),
             max_retrieval_results=int(_read("MINA_AGENT_MAX_RETRIEVAL_RESULTS", config_data, "max_retrieval_results", 4)),
+            yield_after_internal_steps=_read_bool(
+                "MINA_AGENT_YIELD_AFTER_INTERNAL_STEPS",
+                config_data,
+                "yield_after_internal_steps",
+                True,
+            ),
             context_char_budget=int(_read("MINA_AGENT_CONTEXT_CHAR_BUDGET", config_data, "context_char_budget", 12000)),
             context_recent_turn_limit=int(_read("MINA_AGENT_CONTEXT_RECENT_TURN_LIMIT", config_data, "context_recent_turn_limit", 12)),
             context_recent_full_turns=int(_read("MINA_AGENT_CONTEXT_RECENT_FULL_TURNS", config_data, "context_recent_full_turns", 2)),

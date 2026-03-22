@@ -43,6 +43,10 @@ public final class BridgeModels {
         public boolean isActionBatch() {
             return "action_request_batch".equals(type);
         }
+
+        public boolean isProgressUpdate() {
+            return "progress_update".equals(type);
+        }
     }
 
     public static final class PlayerPayload {

@@ -220,6 +220,7 @@ class TurnState(MinaBaseModel):
     request: dict[str, Any]
     step_index: int = 0
     continuation_depth: int = 0
+    bridge_action_count: int = 0
     task: TaskState
     working_memory: WorkingMemory = Field(default_factory=WorkingMemory)
     observations: list[ObservationRef] = Field(default_factory=list)

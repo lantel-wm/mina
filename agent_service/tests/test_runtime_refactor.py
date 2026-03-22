@@ -17,6 +17,8 @@ from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeSt
 from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
 from mina_agent.runtime.context_engine import ContextEngine
 from mina_agent.runtime.decision_engine import DecisionEngine
+from mina_agent.runtime.delegate_runtime import DelegateRuntime
+from mina_agent.runtime.deliberation_engine import DeliberationEngine
 from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
 from mina_agent.runtime.memory_manager import MemoryManager
 from mina_agent.runtime.memory_policy import MemoryPolicy
@@ -26,10 +28,13 @@ from mina_agent.runtime.turn_service import TurnService
 from mina_agent.schemas import (
     CapabilityRequest,
     ConfirmationRequest,
+    DelegateRequest,
+    DelegateSummary,
     LimitsPayload,
     ModelDecision,
     PlayerPayload,
     ServerEnvPayload,
+    TurnResumeRequest,
     TurnStartRequest,
     VisibleCapabilityPayload,
 )
@@ -59,11 +64,12 @@ class RuntimeRefactorTests(unittest.TestCase):
             [section["name"] for section in result.sections],
             [
                 "stable_core",
-                "runtime_reminder",
-                "situation_slice",
-                "task_working_set",
-                "recoverable_recall",
-                "capability_catalog",
+                "runtime_policy",
+                "scene_slice",
+                "task_focus",
+                "confirmation_loop",
+                "recoverable_history",
+                "capability_brief",
             ],
         )
         compact_summary = store.get_session_summary(request.session_ref)
@@ -377,8 +383,15 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         confirmed = loop.start_turn(confirm_request)
 
-        self.assertEqual(confirmed.type, "final_reply")
-        self.assertEqual(confirmed.final_reply, "脚本已经按确认后的计划执行了。")
+        self.assertEqual(confirmed.type, "progress_update")
+        self.assertIsNotNone(confirmed.continuation_id)
+        finished = loop.resume_turn(
+            confirmed.continuation_id or "",
+            TurnResumeRequest(turn_id="turn-internal-confirm-finish", action_results=[]),
+        )
+
+        self.assertEqual(finished.type, "final_reply")
+        self.assertEqual(finished.final_reply, "脚本已经按确认后的计划执行了。")
         self.assertIsNone(store.get_pending_confirmation(request.session_ref))
 
     def test_prepare_task_creates_new_task_even_when_active_task_exists(self) -> None:
@@ -555,6 +568,108 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIsNotNone(provisional_task)
         self.assertEqual(provisional_task["status"], "canceled")
         self.assertEqual(provisional_task["summary"]["superseded_by_task_id"], active_task["task_id"])
+
+    def test_unknown_nearby_entity_alias_is_mapped_to_visible_capability(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(
+                    _SequenceProvider(
+                        [
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="execute",
+                                    capability_request=CapabilityRequest(
+                                        capability_id="entity.scan_nearby",
+                                        arguments={"radius": 64, "entity_type": "monster"},
+                                        effect_summary="Scan nearby monsters around the player.",
+                                        requires_confirmation=False,
+                                    ),
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"execute","capability_id":"entity.scan_nearby"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            )
+                        ]
+                    )
+                ),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        request = self._turn_request(turn_id="turn-nearby-entity-alias")
+        request.visible_capabilities = [self._nearby_entities_capability()]
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "action_request_batch")
+        self.assertIsNotNone(response.action_request_batch)
+        action_request = response.action_request_batch[0]
+        self.assertEqual(action_request.capability_id, "game.nearby_entities.read")
+        self.assertEqual(action_request.arguments["radius"], 64)
+        self.assertEqual(action_request.arguments["entity_type"], "monster")
+
+    def test_minecraft_entity_scan_alias_is_mapped_to_nearby_entities_capability(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(
+                    _SequenceProvider(
+                        [
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="execute",
+                                    capability_request=CapabilityRequest(
+                                        capability_id="minecraft.entity.scan",
+                                        arguments={"player_name": "Tester", "radius": 32},
+                                        effect_summary="Scan nearby entities around the player.",
+                                        requires_confirmation=False,
+                                    ),
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"execute","capability_id":"minecraft.entity.scan"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            )
+                        ]
+                    )
+                ),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        request = self._turn_request(turn_id="turn-minecraft-entity-scan-alias")
+        request.visible_capabilities = [self._nearby_entities_capability()]
+
+        response = loop.start_turn(request)
+
+        self.assertEqual(response.type, "action_request_batch")
+        self.assertIsNotNone(response.action_request_batch)
+        action_request = response.action_request_batch[0]
+        self.assertEqual(action_request.capability_id, "game.nearby_entities.read")
+        self.assertEqual(action_request.arguments["radius"], 32)
+        self.assertEqual(action_request.arguments["player_name"], "Tester")
 
     def test_sync_task_clears_persisted_steps_when_plan_is_reset(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
@@ -781,7 +896,7 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         self.assertEqual([write for write in writes.semantic_writes if write["memory_type"] == "player_preference"], [])
 
-    def test_context_engine_trims_large_situation_snapshot_to_budget(self) -> None:
+    def test_context_engine_trims_large_scene_snapshot_to_budget(self) -> None:
         settings, _, _, _, context_engine, _, _, _ = self._build_runtime()
         request = self._turn_request(turn_id="turn-large-snapshot")
         request.scoped_snapshot = {
@@ -804,8 +919,8 @@ class RuntimeRefactorTests(unittest.TestCase):
         )
 
         self.assertLessEqual(result.message_stats["total_chars"], settings.context_char_budget)
-        situation_section = next(section for section in result.sections if section["name"] == "situation_slice")
-        self.assertTrue(situation_section["truncated"])
+        scene_section = next(section for section in result.sections if section["name"] == "scene_slice")
+        self.assertTrue(scene_section["truncated"])
 
     def test_context_engine_compacts_full_session_history_not_sliding_window(self) -> None:
         settings, store, _, _, context_engine, _, _, _ = self._build_runtime()
@@ -830,9 +945,29 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIsNotNone(compact_summary)
         self.assertIn("message 0", compact_summary["summary"])
         self.assertIn("message 17", compact_summary["summary"])
-        history_section = next(section for section in result.sections if section["name"] == "recoverable_recall")
-        recent_turns = history_section["preview"]["history"]["recent_tail"]
+        history_section = next(section for section in result.sections if section["name"] == "recoverable_history")
+        recent_turns = history_section["preview"]["history"]["recent_turns"]
         self.assertEqual([turn["user_message"] for turn in recent_turns], ["message 18", "message 19"])
+
+    def test_context_engine_normalizes_target_block_and_server_rules_refs(self) -> None:
+        _, _, _, _, context_engine, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-normalized-scene")
+        request.scoped_snapshot = {
+            "player": {"name": "Tester"},
+            "world": {"dimension": "minecraft:overworld"},
+            "target_block": {"target_found": True, "block_name": "橡树树叶"},
+            "server_rules_refs": {"server_properties_path": "/tmp/server.properties"},
+        }
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=[],
+        )
+
+        scene_section = next(section for section in result.sections if section["name"] == "scene_slice")
+        self.assertEqual(scene_section["preview"]["target_block"]["block_name"], "橡树树叶")
+        self.assertEqual(scene_section["preview"]["server_rules_refs"]["server_properties_path"], "/tmp/server.properties")
 
     def test_memory_manager_preserves_compact_summary_and_transcript_path(self) -> None:
         settings, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
@@ -902,6 +1037,81 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertIsNone(summary["transcript_path"])
         self.assertEqual(summary["metadata"]["topic"], "second topic")
 
+    def test_recent_dialogue_memory_is_persisted_for_brief_follow_up_turns(self) -> None:
+        _, store, _, _, context_engine, _, memory_policy, _ = self._build_runtime()
+        memory_manager = MemoryManager(store, memory_policy)
+
+        first_request = self._turn_request(turn_id="turn-recent-dialogue-1")
+        first_request.user_message = "what is this"
+        first_state = self._turn_state(first_request)
+        first_state.task.status = "completed"
+        memory_manager.record_turn_memories(
+            first_request,
+            first_state,
+            final_reply="这是深色橡木树叶。需要我帮你看看它的具体信息吗？",
+            status="completed",
+        )
+
+        summary = store.get_session_summary(first_request.session_ref)
+        self.assertIsNotNone(summary)
+        self.assertEqual(
+            summary["metadata"]["active_dialogue_loop"]["prompt"],
+            "需要我帮你看看它的具体信息吗？",
+        )
+        self.assertEqual(len(summary["metadata"]["recent_dialogue_window"]), 1)
+
+        retrieved = store.search_memories(first_request.session_ref, "需要", limit=6)
+        self.assertGreaterEqual(len(retrieved), 1)
+        self.assertEqual(
+            retrieved[0]["metadata"]["open_follow_up"]["prompt"],
+            "需要我帮你看看它的具体信息吗？",
+        )
+
+        second_request = self._turn_request(turn_id="turn-recent-dialogue-2")
+        second_request.user_message = "需要"
+        context_result = context_engine.build_messages(
+            request=second_request,
+            turn_state=self._turn_state(second_request),
+            capability_descriptors=[],
+        )
+        history_section = next(section for section in context_result.sections if section["name"] == "recoverable_history")
+        self.assertEqual(
+            history_section["preview"]["recent_dialogue_memory"]["active_dialogue_loop"]["prompt"],
+            "需要我帮你看看它的具体信息吗？",
+        )
+
+    def test_model_sees_recent_dialogue_memory_for_brief_follow_up_turn(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(_RecentDialogueMemoryProvider()),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+
+        first_request = self._turn_request(turn_id="turn-brief-follow-up-first")
+        first_request.user_message = "what is this"
+        first_response = loop.start_turn(first_request)
+
+        self.assertEqual(first_response.type, "final_reply")
+        self.assertIn("深色橡木树叶", first_response.final_reply or "")
+
+        second_request = self._turn_request(turn_id="turn-brief-follow-up-second")
+        second_request.user_message = "需要"
+        second_response = loop.start_turn(second_request)
+
+        self.assertEqual(second_response.type, "final_reply")
+        self.assertEqual(second_response.final_reply, "好，我继续讲这个方块的具体信息。")
+
     def test_artifact_search_finds_session_artifacts_from_previous_task(self) -> None:
         settings, store, policy_engine, capability_registry, _, _, _, _ = self._build_runtime()
         old_task = store.create_task(
@@ -962,6 +1172,119 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(follow_up_task.task_type, "conversation_thread")
         self.assertEqual(guidance_task.task_type, "conversation_thread")
 
+    def test_delegate_runtime_uses_isolated_structured_delegate_summary(self) -> None:
+        _, store, _, _, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-delegate-model")
+        turn_state = self._turn_state(request)
+        turn_state.working_memory.key_facts = ["玩家正在看一个方块"]
+        store.write_artifact(
+            request.session_ref,
+            turn_state.task.task_id,
+            request.turn_id,
+            "observation",
+            {"summary": "oak leaves near the player"},
+            "oak leaves near the player",
+        )
+        runtime = DelegateRuntime(
+            store,
+            DeliberationEngine(
+                _StructuredStubProvider(
+                    DelegateSummary(
+                        summary="Explore summary for the target block: likely oak leaves, but live confirmation may still help.",
+                        unresolved_questions=["Is the player still targeting the same block?"],
+                        confidence=0.74,
+                        stop_reason="completed",
+                    )
+                )
+            ),
+        )
+
+        result = runtime.run(DelegateRequest(role="explore", objective="看看这个方块"), turn_state)
+
+        self.assertEqual(result.role, "explore")
+        self.assertIn("likely oak leaves", result.summary.summary)
+        self.assertEqual(result.summary.unresolved_questions, ["Is the player still targeting the same block?"])
+        self.assertEqual(result.task_patch["summary"]["delegate"], "explore")
+        self.assertEqual(result.task_patch["status"], "analyzing")
+
+    def test_delegate_runtime_skips_submodel_for_empty_explore_context(self) -> None:
+        _, store, _, _, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-empty-delegate")
+        turn_state = self._turn_state(request)
+        runtime = DelegateRuntime(store, DeliberationEngine(_UnexpectedStructuredProvider()))
+
+        result = runtime.run(
+            DelegateRequest(role="explore", objective="扫描玩家周围半径32格内的实体"),
+            turn_state,
+        )
+
+        self.assertEqual(result.role, "explore")
+        self.assertIn("no additional facts found", result.summary.summary)
+        self.assertEqual(result.summary.stop_reason, "fallback_completed")
+
+    def test_delegate_step_returns_progress_update_before_final_reply(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        loop = AgentLoop(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(
+                    _SequenceProvider(
+                        [
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="delegate_explore",
+                                    delegate_role="explore",
+                                    delegate_objective="看看周围有没有现成线索",
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"delegate_explore"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            ),
+                            ProviderDecisionResult(
+                                decision=ModelDecision(
+                                    intent="reply",
+                                    final_reply="我先把现成线索整理给你了。",
+                                ),
+                                latency_ms=10,
+                                raw_response_preview='{"intent":"reply"}',
+                                parse_status="ok",
+                                model="test-model",
+                                temperature=0.2,
+                                message_count=2,
+                            ),
+                        ]
+                    )
+                ),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )
+        request = self._turn_request(turn_id="turn-delegate-progress")
+
+        first_response = loop.start_turn(request)
+
+        self.assertEqual(first_response.type, "progress_update")
+        self.assertIsNotNone(first_response.continuation_id)
+        self.assertTrue(first_response.trace_events)
+
+        second_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(turn_id="turn-delegate-progress", action_results=[]),
+        )
+
+        self.assertEqual(second_response.type, "final_reply")
+        self.assertEqual(second_response.final_reply, "我先把现成线索整理给你了。")
+
     def _build_runtime(self, *, enable_dynamic_scripting: bool = False):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -988,6 +1311,7 @@ class RuntimeRefactorTests(unittest.TestCase):
             enable_dynamic_scripting=enable_dynamic_scripting,
             max_agent_steps=8,
             max_retrieval_results=4,
+            yield_after_internal_steps=True,
             context_char_budget=12000,
             context_recent_turn_limit=12,
             context_recent_full_turns=2,
@@ -1056,6 +1380,18 @@ class RuntimeRefactorTests(unittest.TestCase):
             working_memory=WorkingMemory(primary_goal=request.user_message),
         )
 
+    def _nearby_entities_capability(self) -> VisibleCapabilityPayload:
+        return VisibleCapabilityPayload(
+            id="game.nearby_entities.read",
+            kind="tool",
+            description="List nearby entities around the player within a radius, optionally filtered by entity category.",
+            risk_class="read_only",
+            execution_mode="bridge",
+            requires_confirmation=False,
+            args_schema={"radius": "number", "entity_type": "string", "limit": "integer"},
+            result_schema={"radius": "number", "filter": "string", "count": "integer", "entities": "array<object>"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1074,3 +1410,74 @@ class _SequenceProvider:
         if not self._responses:
             raise AssertionError("Provider was called more times than expected.")
         return self._responses.pop(0)
+
+
+class _StructuredStubProvider:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def decide(self, messages):
+        raise AssertionError("Structured delegate test should not call decide().")
+
+    def complete_json(self, messages, response_model):
+        return type(
+            "StructuredResult",
+            (),
+            {
+                "payload": self._payload,
+                "latency_ms": 9,
+                "raw_response_preview": self._payload.model_dump_json(),
+                "parse_status": "ok",
+                "model": "delegate-test-model",
+                "temperature": 0.2,
+                "message_count": len(messages),
+            },
+        )()
+
+
+class _RecentDialogueMemoryProvider:
+    def __init__(self) -> None:
+        self._calls = 0
+
+    def decide(self, messages):
+        self._calls += 1
+        if self._calls == 1:
+            return ProviderDecisionResult(
+                decision=ModelDecision(
+                    mode="final_reply",
+                    final_reply="这是深色橡木树叶。需要我帮你看看它的具体信息吗？",
+                ),
+                latency_ms=10,
+                raw_response_preview='{"mode":"final_reply"}',
+                parse_status="ok",
+                model="test-model",
+                temperature=0.2,
+                message_count=len(messages),
+            )
+        user_content = messages[1]["content"]
+        if '"recent_dialogue_memory"' not in user_content:
+            raise AssertionError("recent_dialogue_memory was not included in the model context.")
+        if '"active_dialogue_loop"' not in user_content:
+            raise AssertionError("active_dialogue_loop was not included in the model context.")
+        if "需要我帮你看看它的具体信息吗？" not in user_content:
+            raise AssertionError("The last follow-up prompt was not preserved in recent dialogue memory.")
+        return ProviderDecisionResult(
+            decision=ModelDecision(
+                mode="final_reply",
+                final_reply="好，我继续讲这个方块的具体信息。",
+            ),
+            latency_ms=10,
+            raw_response_preview='{"mode":"final_reply"}',
+            parse_status="ok",
+            model="test-model",
+            temperature=0.2,
+            message_count=len(messages),
+        )
+
+
+class _UnexpectedStructuredProvider:
+    def decide(self, messages):
+        raise AssertionError("Unexpected decide() call.")
+
+    def complete_json(self, messages, response_model):
+        raise AssertionError("Delegate runtime should have used local fallback instead of submodel summarization.")

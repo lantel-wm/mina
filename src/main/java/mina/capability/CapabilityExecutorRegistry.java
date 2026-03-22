@@ -9,6 +9,9 @@ import mina.policy.PlayerRole;
 import mina.policy.RiskClass;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -16,14 +19,17 @@ import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.rule.GameRule;
 import net.minecraft.world.rule.GameRules;
 
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -77,6 +83,28 @@ public final class CapabilityExecutorRegistry {
                 Map.of(),
                 (player, role) -> true,
                 (player, arguments) -> new CapabilityResult(collectPlayerSnapshot(player), "Read current player snapshot.")
+        ));
+        map.put("game.nearby_entities.read", new CapabilityDefinition(
+                "game.nearby_entities.read",
+                "tool",
+                "List nearby entities around the player within a radius, optionally filtered by a category such as monster, hostile, living, player, or a specific entity id.",
+                RiskClass.READ_ONLY,
+                "server_main_thread",
+                false,
+                Map.of(
+                        "radius", "number",
+                        "entity_type", "string",
+                        "limit", "integer"
+                ),
+                Map.of(
+                        "radius", "number",
+                        "filter", "string",
+                        "count", "integer",
+                        "entities", "array<object>",
+                        "summary", "string"
+                ),
+                (player, role) -> true,
+                this::executeNearbyEntitiesRead
         ));
         map.put("game.target_block.read", new CapabilityDefinition(
                 "game.target_block.read",
@@ -276,6 +304,43 @@ public final class CapabilityExecutorRegistry {
         return new CapabilityResult(payload, "Read Carpet mobcap report.");
     }
 
+    private CapabilityResult executeNearbyEntitiesRead(ServerPlayerEntity player, Map<String, Object> arguments) {
+        double radius = clampRadius(numberArg(arguments.get("radius"), 32.0));
+        int limit = clampEntityLimit(intArg(arguments.get("limit"), 24));
+        String rawFilter = stringArg(arguments.get("entity_type"));
+        String normalizedFilter = rawFilter == null || rawFilter.isBlank() ? "all" : rawFilter.trim().toLowerCase(Locale.ROOT);
+
+        Vec3d origin = new Vec3d(player.getX(), player.getY(), player.getZ());
+        double maxDistanceSquared = radius * radius;
+        Box searchBox = player.getBoundingBox().expand(radius);
+
+        List<Entity> matches = player.getEntityWorld().getOtherEntities(
+                player,
+                searchBox,
+                entity -> entity != null
+                        && entity.squaredDistanceTo(origin) <= maxDistanceSquared
+                        && matchesEntityFilter(entity, normalizedFilter)
+        );
+        matches.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(origin)));
+
+        List<Map<String, Object>> entities = new ArrayList<>();
+        for (Entity entity : matches) {
+            if (entities.size() >= limit) {
+                break;
+            }
+            entities.add(entityPayload(origin, entity));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("radius", radius);
+        payload.put("filter", normalizedFilter);
+        payload.put("count", entities.size());
+        payload.put("entities", entities);
+        payload.put("truncated", matches.size() > entities.size());
+        payload.put("summary", buildNearbyEntitiesSummary(normalizedFilter, radius, entities.size(), matches.size() > entities.size()));
+        return new CapabilityResult(payload, "Scanned nearby entities around the player.");
+    }
+
     private Map<String, Object> collectPlayerSnapshot(ServerPlayerEntity player) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("uuid", player.getUuidAsString());
@@ -286,5 +351,79 @@ public final class CapabilityExecutorRegistry {
         payload.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack()));
         payload.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack()));
         return payload;
+    }
+
+    private boolean matchesEntityFilter(Entity entity, String normalizedFilter) {
+        if (normalizedFilter == null || normalizedFilter.isBlank() || "all".equals(normalizedFilter)) {
+            return true;
+        }
+        String entityId = Registries.ENTITY_TYPE.getId(entity.getType()).toString();
+        String spawnGroup = entity.getType().getSpawnGroup().name().toLowerCase(Locale.ROOT);
+
+        return switch (normalizedFilter) {
+            case "monster", "hostile" -> entity instanceof HostileEntity || "monster".equals(spawnGroup);
+            case "living" -> entity instanceof LivingEntity;
+            case "player", "players" -> entity instanceof ServerPlayerEntity;
+            default -> normalizedFilter.equals(spawnGroup) || normalizedFilter.equals(entityId);
+        };
+    }
+
+    private Map<String, Object> entityPayload(Vec3d origin, Entity entity) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("uuid", entity.getUuidAsString());
+        payload.put("entity_id", Registries.ENTITY_TYPE.getId(entity.getType()).toString());
+        payload.put("name", entity.getName().getString());
+        payload.put("position", GameContextCollector.vectorMap(new Vec3d(entity.getX(), entity.getY(), entity.getZ())));
+        payload.put("block_pos", GameContextCollector.blockPosMap(entity.getBlockPos()));
+        payload.put("distance", Math.sqrt(entity.squaredDistanceTo(origin)));
+        payload.put("spawn_group", entity.getType().getSpawnGroup().name().toLowerCase(Locale.ROOT));
+        payload.put("is_living", entity instanceof LivingEntity);
+        payload.put("is_hostile", entity instanceof HostileEntity);
+        if (entity instanceof LivingEntity livingEntity) {
+            payload.put("health", livingEntity.getHealth());
+        }
+        return payload;
+    }
+
+    private String buildNearbyEntitiesSummary(String normalizedFilter, double radius, int count, boolean truncated) {
+        String filterLabel = "all".equals(normalizedFilter) ? "实体" : normalizedFilter + " 实体";
+        if (count <= 0) {
+            return "No nearby " + filterLabel + " found within " + formatRadius(radius) + " blocks.";
+        }
+        return "Found " + count + " nearby " + filterLabel + " within " + formatRadius(radius) + " blocks."
+                + (truncated ? " Results were limited." : "");
+    }
+
+    private double clampRadius(double radius) {
+        return Math.max(4.0, Math.min(radius, 96.0));
+    }
+
+    private int clampEntityLimit(int limit) {
+        return Math.max(1, Math.min(limit, 32));
+    }
+
+    private String formatRadius(double radius) {
+        if (Math.rint(radius) == radius) {
+            return Integer.toString((int) radius);
+        }
+        return Double.toString(radius);
+    }
+
+    private double numberArg(Object raw, double fallback) {
+        if (raw instanceof Number number) {
+            return number.doubleValue();
+        }
+        return fallback;
+    }
+
+    private int intArg(Object raw, int fallback) {
+        if (raw instanceof Number number) {
+            return number.intValue();
+        }
+        return fallback;
+    }
+
+    private String stringArg(Object raw) {
+        return raw instanceof String string ? string : null;
     }
 }

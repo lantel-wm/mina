@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-from mina_agent.providers.openai_compatible import ProviderDecisionResult
-from mina_agent.runtime.decision_engine import DecisionEngine
-from mina_agent.schemas import CapabilityRequest, ConfirmationRequest, DelegateRequest, ModelDecision
+from mina_agent.providers.openai_compatible import OpenAICompatibleProvider, ProviderDecisionResult, ProviderStructuredResult
+from mina_agent.schemas import CapabilityRequest, ConfirmationRequest, DelegateRequest, DelegateSummary, ModelDecision
 
 
 class DeliberationEngine:
-    def __init__(self, decision_engine: DecisionEngine) -> None:
-        self._decision_engine = decision_engine
+    def __init__(self, provider: OpenAICompatibleProvider) -> None:
+        self._provider = provider
 
     def decide(self, messages: list[dict[str, str]]) -> ProviderDecisionResult:
-        result = self._decision_engine.decide(messages)
+        result = self._provider.decide(messages)
         result.decision = self.normalize(result.decision)
         return result
+
+    def summarize_delegate(self, messages: list[dict[str, str]]) -> ProviderStructuredResult[DelegateSummary]:
+        complete_json = getattr(self._provider, "complete_json", None)
+        if complete_json is None:
+            raise AttributeError("Provider does not support structured delegate summaries.")
+        return complete_json(messages, DelegateSummary)
 
     def normalize(self, decision: ModelDecision) -> ModelDecision:
         if decision.intent is None:

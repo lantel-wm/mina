@@ -108,7 +108,7 @@ class TraceEventPayload(MinaBaseModel):
 
 
 class TurnResponse(MinaBaseModel):
-    type: Literal["final_reply", "action_request_batch"]
+    type: Literal["final_reply", "action_request_batch", "progress_update"]
     final_reply: str | None = None
     continuation_id: str | None = None
     action_request_batch: list[ActionRequestPayload] | None = None

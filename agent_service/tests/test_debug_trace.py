@@ -99,7 +99,13 @@ class DebugTraceTests(unittest.TestCase):
             ],
         )
 
-        response = loop.start_turn(self._turn_request(turn_id="turn-internal-cap"))
+        start_response = loop.start_turn(self._turn_request(turn_id="turn-internal-cap"))
+        self.assertEqual(start_response.type, "progress_update")
+        self.assertIsNotNone(start_response.continuation_id)
+        response = loop.resume_turn(
+            start_response.continuation_id or "",
+            TurnResumeRequest(turn_id="turn-internal-cap", action_results=[]),
+        )
 
         self.assertEqual(response.type, "final_reply")
         summary = self._load_summary(settings.debug_dir, "turn-internal-cap")
@@ -107,6 +113,7 @@ class DebugTraceTests(unittest.TestCase):
 
         self.assertIn("capability_started", [event["event_type"] for event in events])
         self.assertIn("capability_finished", [event["event_type"] for event in events])
+        self.assertIn("turn_resumed", [event["event_type"] for event in events])
         self.assertEqual(summary["timeline"][0]["capability"]["handler_kind"], "internal")
         self.assertEqual(summary["timeline"][0]["capability_result"]["status"], "succeeded")
 
@@ -242,7 +249,7 @@ class DebugTraceTests(unittest.TestCase):
             capability_descriptors=[capability.descriptor for capability in resolved_capabilities],
         )
         capability_section = next(
-            section for section in context_result.sections if section["name"] == "capability_catalog"
+            section for section in context_result.sections if section["name"] == "capability_brief"
         )
         target_capability = self._capability_from_payload(capability_section["preview"], "game.target_block.read")
 
@@ -273,6 +280,7 @@ class DebugTraceTests(unittest.TestCase):
                 turn_id="turn-lock-injection",
                 user_message="mina，这是什么？",
                 visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=4, max_bridge_actions_per_turn=2, max_continuation_depth=2),
             )
         )
         first_request = start_response.action_request_batch[0]
@@ -305,6 +313,103 @@ class DebugTraceTests(unittest.TestCase):
         self.assertEqual(follow_up_request.capability_id, "carpet.block_info.read")
         self.assertEqual(follow_up_request.arguments["block_pos"], {"x": 13, "y": 83, "z": -25})
 
+    def test_python_side_bridge_budget_stops_second_bridge_action(self) -> None:
+        visible_capabilities = [self._target_block_capability(), self._carpet_block_info_capability()]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("carpet.block_info.read"),
+            ],
+        )
+
+        first_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-python-bridge-budget",
+                user_message="mina，这是什么？",
+                visible_capabilities=visible_capabilities,
+            )
+        )
+        first_request = first_response.action_request_batch[0]
+
+        blocked_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-python-bridge-budget",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 13, "y": 83, "z": -25},
+                            "block_id": "minecraft:oak_leaves",
+                            "block_name": "橡树树叶",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read target block.",
+                        timing_ms=6,
+                        state_fingerprint="target-1",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(blocked_response.type, "final_reply")
+        self.assertIn("bridge action budget", blocked_response.final_reply or "")
+        events = self._load_events(settings.debug_dir, "turn-python-bridge-budget")
+        completed_event = self._find_event(events, "turn_completed")
+        self.assertEqual(completed_event["payload"]["reason"], "bridge_budget_exhausted")
+
+    def test_python_side_continuation_depth_stops_second_bridge_action(self) -> None:
+        visible_capabilities = [self._target_block_capability(), self._carpet_block_info_capability()]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.target_block.read"),
+                self._capability_result("carpet.block_info.read"),
+            ],
+        )
+
+        first_response = loop.start_turn(
+            self._turn_request(
+                turn_id="turn-python-cont-depth",
+                user_message="mina，这是什么？",
+                visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=4, max_bridge_actions_per_turn=2, max_continuation_depth=1),
+            )
+        )
+        first_request = first_response.action_request_batch[0]
+
+        blocked_response = loop.resume_turn(
+            first_response.continuation_id or "",
+            TurnResumeRequest(
+                turn_id="turn-python-cont-depth",
+                action_results=[
+                    ActionResultPayload(
+                        intent_id=first_request.intent_id,
+                        status="succeeded",
+                        observations={
+                            "target_found": True,
+                            "pos": {"x": 13, "y": 83, "z": -25},
+                            "block_id": "minecraft:oak_leaves",
+                            "block_name": "橡树树叶",
+                        },
+                        preconditions_passed=True,
+                        side_effect_summary="Read target block.",
+                        timing_ms=6,
+                        state_fingerprint="target-1",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(blocked_response.type, "final_reply")
+        self.assertIn("continuation depth", blocked_response.final_reply or "")
+        events = self._load_events(settings.debug_dir, "turn-python-cont-depth")
+        completed_event = self._find_event(events, "turn_completed")
+        self.assertEqual(completed_event["payload"]["reason"], "continuation_depth_exhausted")
+
     def test_first_locked_block_is_not_overwritten_by_later_drift(self) -> None:
         visible_capabilities = [self._target_block_capability(), self._carpet_block_info_capability()]
         loop, _, _ = self._build_loop(
@@ -321,6 +426,7 @@ class DebugTraceTests(unittest.TestCase):
                 turn_id="turn-first-lock-wins",
                 user_message="mina，这是什么？",
                 visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=4, max_bridge_actions_per_turn=2, max_continuation_depth=2),
             )
         )
         first_request = start_response.action_request_batch[0]
@@ -391,6 +497,7 @@ class DebugTraceTests(unittest.TestCase):
                 turn_id="turn-two-target-misses",
                 user_message="mina，这是什么？",
                 visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=4, max_bridge_actions_per_turn=2, max_continuation_depth=2),
             )
         )
         first_request = first_response.action_request_batch[0]
@@ -454,6 +561,7 @@ class DebugTraceTests(unittest.TestCase):
                 turn_id="turn-locked-repeat",
                 user_message="mina，这是什么？",
                 visible_capabilities=visible_capabilities,
+                limits=LimitsPayload(max_agent_steps=4, max_bridge_actions_per_turn=2, max_continuation_depth=2),
             )
         )
         first_request = first_response.action_request_batch[0]
@@ -547,6 +655,7 @@ class DebugTraceTests(unittest.TestCase):
             enable_dynamic_scripting=False,
             max_agent_steps=8,
             max_retrieval_results=4,
+            yield_after_internal_steps=True,
             context_char_budget=12000,
             context_recent_turn_limit=12,
             context_recent_full_turns=2,
@@ -591,6 +700,7 @@ class DebugTraceTests(unittest.TestCase):
         turn_id: str,
         user_message: str = "hello Mina",
         visible_capabilities: list[VisibleCapabilityPayload] | None = None,
+        limits: LimitsPayload | None = None,
     ) -> TurnStartRequest:
         return TurnStartRequest(
             session_ref="session-1",
@@ -617,7 +727,8 @@ class DebugTraceTests(unittest.TestCase):
                 "visible_capability_ids": [cap.id for cap in visible_capabilities or []],
             },
             visible_capabilities=visible_capabilities or [],
-            limits=LimitsPayload(
+            limits=limits
+            or LimitsPayload(
                 max_agent_steps=4,
                 max_bridge_actions_per_turn=1,
                 max_continuation_depth=1,

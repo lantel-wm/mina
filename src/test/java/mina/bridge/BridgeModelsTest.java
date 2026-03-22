@@ -59,10 +59,18 @@ class BridgeModelsTest {
         finalReply.type = "final_reply";
         assertTrue(finalReply.isFinalReply());
         assertFalse(finalReply.isActionBatch());
+        assertFalse(finalReply.isProgressUpdate());
 
         BridgeModels.TurnResponse actionBatch = new BridgeModels.TurnResponse();
         actionBatch.type = "action_request_batch";
         assertTrue(actionBatch.isActionBatch());
         assertFalse(actionBatch.isFinalReply());
+        assertFalse(actionBatch.isProgressUpdate());
+
+        BridgeModels.TurnResponse progressUpdate = new BridgeModels.TurnResponse();
+        progressUpdate.type = "progress_update";
+        assertTrue(progressUpdate.isProgressUpdate());
+        assertFalse(progressUpdate.isFinalReply());
+        assertFalse(progressUpdate.isActionBatch());
     }
 }

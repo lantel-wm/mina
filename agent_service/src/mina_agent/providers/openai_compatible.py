@@ -6,9 +6,9 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Generic, TypeVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from mina_agent.config import Settings
 from mina_agent.schemas import ModelDecision
@@ -16,11 +16,23 @@ from mina_agent.schemas import ModelDecision
 
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 TEMPERATURE = 0.2
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 @dataclass(slots=True)
 class ProviderDecisionResult:
     decision: ModelDecision
+    latency_ms: int
+    raw_response_preview: str
+    parse_status: str
+    model: str
+    temperature: float
+    message_count: int
+
+
+@dataclass(slots=True)
+class ProviderStructuredResult(Generic[ModelT]):
+    payload: ModelT
     latency_ms: int
     raw_response_preview: str
     parse_status: str
@@ -52,6 +64,47 @@ class OpenAICompatibleProvider:
         return bool(self._settings.base_url and self._settings.api_key and self._settings.model)
 
     def decide(self, messages: list[dict[str, str]]) -> ProviderDecisionResult:
+        result = self.complete_json(messages, ModelDecision)
+        return ProviderDecisionResult(
+            decision=result.payload,
+            latency_ms=result.latency_ms,
+            raw_response_preview=result.raw_response_preview,
+            parse_status=result.parse_status,
+            model=result.model,
+            temperature=result.temperature,
+            message_count=result.message_count,
+        )
+
+    def complete_json(self, messages: list[dict[str, str]], response_model: type[ModelT]) -> ProviderStructuredResult[ModelT]:
+        content, latency_ms = self._request_content(messages)
+        match = JSON_BLOCK_RE.search(content)
+        if not match:
+            raise ProviderError(
+                "Model returned a response without a JSON decision block.",
+                parse_status="missing_decision_json",
+                raw_response_preview=content,
+                latency_ms=latency_ms,
+            )
+        try:
+            payload = response_model.model_validate_json(match.group(0))
+        except ValidationError as exc:
+            raise ProviderError(
+                f"Model returned a JSON block that does not match the {response_model.__name__} schema.",
+                parse_status="invalid_decision_json",
+                raw_response_preview=match.group(0),
+                latency_ms=latency_ms,
+            ) from exc
+        return ProviderStructuredResult(
+            payload=payload,
+            latency_ms=latency_ms,
+            raw_response_preview=content,
+            parse_status="ok",
+            model=self._settings.model or "",
+            temperature=TEMPERATURE,
+            message_count=len(messages),
+        )
+
+    def _request_content(self, messages: list[dict[str, str]]) -> tuple[str, int]:
         if not self.available():
             raise ProviderError("OpenAI-compatible provider is not configured.", parse_status="provider_unavailable")
 
@@ -114,29 +167,4 @@ class OpenAICompatibleProvider:
             ) from exc
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        match = JSON_BLOCK_RE.search(content)
-        if not match:
-            raise ProviderError(
-                "Model returned a response without a JSON decision block.",
-                parse_status="missing_decision_json",
-                raw_response_preview=content,
-                latency_ms=latency_ms,
-            )
-        try:
-            decision = ModelDecision.model_validate_json(match.group(0))
-        except ValidationError as exc:
-            raise ProviderError(
-                "Model returned a JSON decision that does not match the Mina schema.",
-                parse_status="invalid_decision_json",
-                raw_response_preview=match.group(0),
-                latency_ms=latency_ms,
-            ) from exc
-        return ProviderDecisionResult(
-            decision=decision,
-            latency_ms=latency_ms,
-            raw_response_preview=content,
-            parse_status="ok",
-            model=self._settings.model or "",
-            temperature=TEMPERATURE,
-            message_count=len(messages),
-        )
+        return str(content), latency_ms

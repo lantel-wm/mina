@@ -104,6 +104,17 @@ public final class TurnCoordinator {
                     return;
                 }
 
+                if (response.isProgressUpdate()) {
+                    if (response.continuation_id == null || response.continuation_id.isBlank()) {
+                        throw new IllegalStateException("Agent service returned a progress update without a continuation id.");
+                    }
+                    BridgeModels.TurnResumeRequest resumeRequest = new BridgeModels.TurnResumeRequest();
+                    resumeRequest.turn_id = turnId;
+                    response = agentServiceClient.resumeTurn(response.continuation_id, resumeRequest);
+                    syncPendingConfirmation(turnContext.sessionRef(), response);
+                    continue;
+                }
+
                 if (!response.isActionBatch() || response.action_request_batch == null || response.action_request_batch.isEmpty()) {
                     throw new IllegalStateException("Agent service returned neither a final reply nor an action batch.");
                 }
@@ -306,6 +317,7 @@ public final class TurnCoordinator {
         String lastCapabilityId = executedCapabilityIds.get(executedCapabilityIds.size() - 1);
         return switch (lastCapabilityId) {
             case "game.player_snapshot.read" -> "你的状态";
+            case "game.nearby_entities.read" -> "附近的生物";
             case "game.target_block.read", "carpet.block_info.read" -> "眼前这个方块";
             case "server.rules.read" -> "服务器这边的规则";
             case "carpet.distance.measure" -> "距离结果";
@@ -368,6 +380,7 @@ public final class TurnCoordinator {
     private String capabilityLabel(String capabilityId) {
         return switch (capabilityId) {
             case "game.player_snapshot.read" -> "看看你的状态";
+            case "game.nearby_entities.read" -> "看看附近有哪些生物";
             case "game.target_block.read" -> "看看你正在看的方块";
             case "server.rules.read" -> "看看服务器规则";
             case "carpet.block_info.read" -> "看看这个方块的详细信息";
@@ -380,6 +393,7 @@ public final class TurnCoordinator {
     private String actionIntentDetail(BridgeModels.ActionRequestPayload actionRequest) {
         return switch (actionRequest.capability_id) {
             case "game.player_snapshot.read" -> "我会替你看看生命、饥饿、坐标和手里的东西。";
+            case "game.nearby_entities.read" -> "我会替你看看附近有哪些生物，它们离你多远。";
             case "game.target_block.read" -> "我会替你看看你现在盯着的方块。";
             case "server.rules.read" -> "我会替你看看服务器这边现在的规则。";
             case "carpet.block_info.read" -> "我会替你把这个方块的细节看清楚。";

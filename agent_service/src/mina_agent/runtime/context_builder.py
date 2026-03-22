@@ -136,4 +136,7 @@ class ContextBuilder:
                 "capability_catalog": "legacy",
                 "recent_conversation_trigger": "legacy",
             },
+            recovery_refs=[],
+            budget_report={"budget": len(system_content) + len(user_content), "used": len(system_content) + len(user_content)},
+            active_context_slots=list(payload.keys()),
         )

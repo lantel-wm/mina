@@ -32,6 +32,25 @@ def _score_text(query: str, *parts: str) -> float:
     return len(overlap) / max(len(query_terms), 1)
 
 
+def _is_brief_follow_up_query(query: str) -> bool:
+    stripped = query.strip()
+    if not stripped:
+        return False
+    terms = _normalize_terms(stripped)
+    return len(stripped) <= 8 and len(terms) <= 1
+
+
+def _has_recent_dialogue_signal(memory: dict[str, Any]) -> bool:
+    metadata = memory.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return bool(
+        metadata.get("recent_dialogue_turn")
+        or metadata.get("dialogue_turn")
+        or metadata.get("open_follow_up")
+    )
+
+
 def _safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
     return cleaned[:96] or "unknown"
@@ -766,6 +785,10 @@ class Store:
                     )
                 )
         scored.sort(key=lambda item: item[0], reverse=True)
+        if not scored and _is_brief_follow_up_query(query):
+            for memory in self.list_episodic_memories(session_ref, limit=max(limit, 6)):
+                if _has_recent_dialogue_signal(memory):
+                    scored.append((0.05, memory))
         results: list[dict[str, Any]] = []
         for score, payload in scored[:limit]:
             entry = dict(payload)

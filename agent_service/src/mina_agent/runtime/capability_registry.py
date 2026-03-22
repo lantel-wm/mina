@@ -32,6 +32,17 @@ class RuntimeState:
 
 
 class CapabilityRegistry:
+    _CAPABILITY_ALIASES = {
+        "entity.scan_nearby": "game.nearby_entities.read",
+        "entity.nearby.read": "game.nearby_entities.read",
+        "nearby_entities.read": "game.nearby_entities.read",
+        "nearby.entities.read": "game.nearby_entities.read",
+        "game.nearby_entities.scan": "game.nearby_entities.read",
+        "minecraft.entity.scan": "game.nearby_entities.read",
+        "minecraft.entities.scan": "game.nearby_entities.read",
+        "minecraft.entity.nearby.scan": "game.nearby_entities.read",
+    }
+
     def __init__(
         self,
         settings: Settings,
@@ -81,8 +92,14 @@ class CapabilityRegistry:
         return capabilities
 
     def get(self, capabilities: list[RuntimeCapability], capability_id: str) -> RuntimeCapability | None:
+        normalized_id = str(capability_id or "").strip()
+        if not normalized_id:
+            return None
+        alias_id = self._CAPABILITY_ALIASES.get(normalized_id)
         for capability in capabilities:
-            if capability.descriptor.id == capability_id:
+            if capability.descriptor.id == normalized_id:
+                return capability
+            if alias_id is not None and capability.descriptor.id == alias_id:
                 return capability
         return None
 
