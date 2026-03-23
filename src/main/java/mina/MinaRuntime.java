@@ -18,6 +18,7 @@ import mina.context.RecentEventTracker;
 import mina.context.TargetBlockSnapshotProvider;
 import mina.context.ThreatAssessmentProvider;
 import mina.context.WorldStateProvider;
+import mina.execution.DevTurnLog;
 import mina.execution.PendingTurnRegistry;
 import mina.execution.PendingConfirmationRegistry;
 import mina.execution.TurnCoordinator;
@@ -56,6 +57,7 @@ public final class MinaRuntime {
     private AgentServiceClient agentServiceClient;
     private ExecutionGuard executionGuard;
     private TurnCoordinator turnCoordinator;
+    private DevTurnLog devTurnLog;
     private MinecraftServer server;
 
     private MinaRuntime() {
@@ -134,6 +136,10 @@ public final class MinaRuntime {
         );
         this.agentServiceClient = new AgentServiceClient(config);
         this.executionGuard = new ExecutionGuard(config, permissionResolver);
+        this.devTurnLog = DevTurnLog.forRunDirectory(
+                minecraftServer.getRunDirectory(),
+                FabricLoader.getInstance().isDevelopmentEnvironment()
+        );
         this.turnCoordinator = new TurnCoordinator(
                 config,
                 agentServiceClient,
@@ -143,6 +149,7 @@ public final class MinaRuntime {
                 pendingTurns,
                 pendingConfirmations,
                 recentEventTracker,
+                devTurnLog,
                 ioExecutor
         );
 
@@ -162,6 +169,7 @@ public final class MinaRuntime {
         contextCollector = null;
         capabilityRegistry = null;
         permissionResolver = null;
+        devTurnLog = null;
         pendingTurns = null;
         pendingConfirmations = null;
         recentEventTracker = null;

@@ -70,6 +70,55 @@ When enabled, the service writes compact debug traces under `agent_service/data/
 - `summary.json` for coding-agent-friendly turn summaries
 - `events.jsonl` for step-by-step structured trace events
 
+The debug recorder now also writes executable bundle artifacts per turn:
+
+- `request.start.json` for the normalized turn-start request
+- `response.progress.jsonl` for emitted action batches and progress updates
+- `response.final.json` for the final reply payload
+- `scenario.capture.json` for a promotion-ready scenario bundle
+
+It also keeps a global lookup file at `agent_service/data/debug/index.jsonl`, so a turn can be resolved directly from its `turn_id`.
+
+## Headless Regression Workflow
+
+Mina now supports a headless `server-in-loop` workflow that uses Carpet fake players plus `execute as <player> run mina ...` instead of a GUI Minecraft client.
+
+Detailed usage is documented in [docs/headless_testing_workflow.md](/Users/zhaozhiyu/Projects/mina/docs/headless_testing_workflow.md).
+
+Install the editable Python package once:
+
+```bash
+./.venv/bin/python -m pip install -e agent_service
+```
+
+Run the default real-model scenario set:
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli run-headless
+```
+
+Run the included smoke scenario against the local stub agent:
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli run-headless --agent-mode stub --scenario-id companion_smoke
+```
+
+Headless outputs are stored under `tmp/headless/<timestamp>/`. Each scenario run keeps:
+
+- an isolated Fabric run dir
+- an isolated Python `agent_data/` directory
+- Java-side turn logs under `<server-run-dir>/mina-dev/turns.jsonl`
+- Python-side debug bundles under `<scenario-run-dir>/agent_data/debug/turns/...`
+
+Useful developer commands:
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli recent-turns --limit 10
+./.venv/bin/python -m mina_agent.dev.cli promote-trace --turn-id <turn_id> --scenario-id <new_case> --world-template default
+```
+
+Scenario files live under `testing/headless/scenarios/`, and world template metadata lives under `testing/headless/world_templates/`.
+
 ## Local knowledge seed
 
 The repo now seeds a minimal local knowledge base in `agent_service/data/knowledge/` so retrieval can start small instead of waiting for a full Minecraft corpus.

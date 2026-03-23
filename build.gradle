@@ -9,6 +9,7 @@ version = project.mod_version
 group = project.maven_group
 
 def localCarpetJar = file("run/mods/fabric-carpet-1.21.11-1.4.194+v251223.jar")
+def minaRunDir = (findProperty("minaRunDir") ?: "run").toString()
 
 base {
     archivesName = project.archives_base_name
@@ -49,7 +50,7 @@ loom {
         server {
             server()
             ideConfigGenerated = true
-            runDir = "run"
+            runDir = minaRunDir
         }
     }
 }

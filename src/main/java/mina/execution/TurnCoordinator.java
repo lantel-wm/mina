@@ -24,6 +24,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +41,7 @@ public final class TurnCoordinator {
     private final PendingTurnRegistry pendingTurnRegistry;
     private final PendingConfirmationRegistry pendingConfirmationRegistry;
     private final RecentEventTracker recentEventTracker;
+    private final DevTurnLog devTurnLog;
     private final ExecutorService ioExecutor;
 
     public TurnCoordinator(
@@ -51,6 +53,7 @@ public final class TurnCoordinator {
             PendingTurnRegistry pendingTurnRegistry,
             PendingConfirmationRegistry pendingConfirmationRegistry,
             RecentEventTracker recentEventTracker,
+            DevTurnLog devTurnLog,
             ExecutorService ioExecutor
     ) {
         this.config = config;
@@ -61,6 +64,7 @@ public final class TurnCoordinator {
         this.pendingTurnRegistry = pendingTurnRegistry;
         this.pendingConfirmationRegistry = pendingConfirmationRegistry;
         this.recentEventTracker = recentEventTracker;
+        this.devTurnLog = devTurnLog;
         this.ioExecutor = ioExecutor;
     }
 
@@ -68,6 +72,9 @@ public final class TurnCoordinator {
         ServerPlayerEntity player = source.getPlayerOrThrow();
         UUID playerId = player.getUuid();
         String turnId = UUID.randomUUID().toString();
+        String sessionRef = player.getUuidAsString();
+        String playerName = player.getName().getString();
+        Instant startedAt = Instant.now();
 
         if (!pendingTurnRegistry.tryOpen(playerId, turnId)) {
             source.sendError(MinaChatRenderer.commandError("我这边还在看上一件事，先别急。"));
@@ -76,14 +83,25 @@ public final class TurnCoordinator {
 
         recentEventTracker.recordPlayerEvent("mina_user_message", player, Map.of("message", userMessage));
         acceptedCallback.run();
-        ioExecutor.submit(() -> runTurn(playerId, turnId, userMessage, source.getServer()));
+        devTurnLog.recordAccepted(turnId, sessionRef, playerName, userMessage, startedAt);
+        ioExecutor.submit(() -> runTurn(playerId, sessionRef, playerName, turnId, userMessage, source.getServer(), startedAt));
         return true;
     }
 
-    private void runTurn(UUID playerId, String turnId, String userMessage, net.minecraft.server.MinecraftServer server) {
-        long turnStartedAt = System.nanoTime();
+    private void runTurn(
+            UUID playerId,
+            String sessionRef,
+            String playerName,
+            String turnId,
+            String userMessage,
+            net.minecraft.server.MinecraftServer server,
+            Instant startedAt
+    ) {
+        long turnStartedAtNanos = System.nanoTime();
         try {
             TurnContext turnContext = ServerExecutor.call(server, () -> collectTurnContext(playerId, server)).join();
+            sessionRef = turnContext.sessionRef();
+            playerName = turnContext.playerPayload().name;
             BridgeModels.TurnStartRequest startRequest = toStartRequest(turnContext, turnId, userMessage);
             BridgeModels.TurnResponse response = agentServiceClient.startTurn(startRequest);
             syncPendingConfirmation(turnContext.sessionRef(), response);
@@ -96,10 +114,19 @@ public final class TurnCoordinator {
                 deliverResponseTraceEvents(server, playerId, response);
 
                 if (response.isFinalReply()) {
+                    devTurnLog.recordCompleted(
+                            turnId,
+                            sessionRef,
+                            playerName,
+                            userMessage,
+                            startedAt,
+                            Instant.now(),
+                            response.final_reply
+                    );
                     deliverReply(
                             server,
                             playerId,
-                            buildReplyPresentation(response, turnStartedAt, actionCount, continuationDepth, executedCapabilityIds)
+                            buildReplyPresentation(response, turnStartedAtNanos, actionCount, continuationDepth, executedCapabilityIds)
                     );
                     return;
                 }
@@ -146,6 +173,16 @@ public final class TurnCoordinator {
             throw new IllegalStateException("Agent service returned an empty response.");
         } catch (Exception exception) {
             MinaMod.LOGGER.error("Mina turn {} failed", turnId, exception);
+            devTurnLog.recordFailed(
+                    turnId,
+                    sessionRef,
+                    playerName,
+                    userMessage,
+                    startedAt,
+                    Instant.now(),
+                    exception.getMessage(),
+                    null
+            );
             deliverError(server, playerId, "刚刚这一步有点不对，我再处理也许会更稳。原因：" + exception.getMessage());
         } finally {
             pendingTurnRegistry.close(playerId, turnId);

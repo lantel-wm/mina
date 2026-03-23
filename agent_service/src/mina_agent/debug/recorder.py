@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from mina_agent.config import Settings
 
 
 SUMMARY_VERSION = 1
+CAPTURE_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -76,45 +78,58 @@ class FileDebugRecorder(DebugRecorder):
     def __init__(self, debug_dir: Path, limits: DebugPreviewLimits) -> None:
         self._debug_dir = debug_dir
         self._limits = limits
+        self._lock = threading.Lock()
+        self._index_path = self._debug_dir / "index.jsonl"
         self._debug_dir.mkdir(parents=True, exist_ok=True)
 
     def record_event(self, turn_id: str, event_type: str, payload: dict[str, Any], *, step_index: int | None = None) -> None:
-        stamp = datetime.now(timezone.utc)
-        turn_dir = self._resolve_turn_dir(turn_id, stamp, event_type, payload)
-        events_path = turn_dir / "events.jsonl"
-        summary_path = turn_dir / "summary.json"
+        with self._lock:
+            stamp = datetime.now(timezone.utc)
+            turn_dir = self._resolve_turn_dir(turn_id, stamp, event_type, payload)
+            events_path = turn_dir / "events.jsonl"
+            summary_path = turn_dir / "summary.json"
 
-        summary = self._load_summary(summary_path, turn_id, turn_dir)
-        raw_payload = _jsonable_value(payload)
-        prompt_artifact = self._write_model_request_artifact(
-            turn_dir,
-            event_type,
-            raw_payload,
-            step_index,
-        )
-        sanitized_payload, stats = sanitize_event_payload(raw_payload, self._limits)
-        self._merge_truncation(summary, stats)
+            summary = self._load_summary(summary_path, turn_id, turn_dir)
+            raw_payload = _jsonable_value(payload)
+            prompt_artifact = self._write_model_request_artifact(
+                turn_dir,
+                event_type,
+                raw_payload,
+                step_index,
+            )
+            sanitized_payload, stats = sanitize_event_payload(raw_payload, self._limits)
+            self._merge_truncation(summary, stats)
 
-        event_record = {
-            "ts": stamp.isoformat(),
-            "turn_id": turn_id,
-            "event_type": event_type,
-            "step_index": step_index,
-            "payload": sanitized_payload,
-        }
-        if prompt_artifact is not None:
-            event_record["artifact_ref"] = prompt_artifact
-        self._append_jsonl(events_path, event_record)
-        self._apply_summary_update(
-            summary,
-            event_type,
-            sanitized_payload,
-            raw_payload,
-            stamp,
-            step_index,
-            prompt_artifact,
-        )
-        self._write_json(summary_path, summary)
+            event_record = {
+                "ts": stamp.isoformat(),
+                "turn_id": turn_id,
+                "event_type": event_type,
+                "step_index": step_index,
+                "payload": sanitized_payload,
+            }
+            if prompt_artifact is not None:
+                event_record["artifact_ref"] = prompt_artifact
+            self._append_jsonl(events_path, event_record)
+            self._apply_summary_update(
+                summary,
+                event_type,
+                sanitized_payload,
+                raw_payload,
+                stamp,
+                step_index,
+                prompt_artifact,
+            )
+            self._write_bundle_artifacts(
+                turn_dir,
+                turn_id,
+                summary,
+                event_type,
+                raw_payload,
+                stamp,
+                step_index,
+            )
+            self._write_json(summary_path, summary)
+            self._rewrite_index(summary, turn_dir)
 
     def _resolve_turn_dir(
         self,
@@ -385,11 +400,271 @@ class FileDebugRecorder(DebugRecorder):
         collection.sort(key=lambda item: int(item.get("pass_index", 0)))
         return entry
 
+    def _write_bundle_artifacts(
+        self,
+        turn_dir: Path,
+        turn_id: str,
+        summary: dict[str, Any],
+        event_type: str,
+        raw_payload: dict[str, Any],
+        stamp: datetime,
+        step_index: int | None,
+    ) -> None:
+        if event_type == "turn_started":
+            self._write_json(
+                turn_dir / "request.start.json",
+                {
+                    "turn_id": turn_id,
+                    "session_ref": raw_payload.get("session_ref"),
+                    "user_message": raw_payload.get("user_message"),
+                    "player": raw_payload.get("player"),
+                    "server_env": raw_payload.get("server_env"),
+                    "limits": raw_payload.get("limits"),
+                    "pending_confirmation": raw_payload.get("pending_confirmation"),
+                    "task": raw_payload.get("task"),
+                },
+            )
+
+        progress_entry = self._progress_entry_from_event(raw_payload, event_type, stamp, step_index)
+        if progress_entry is not None:
+            self._append_jsonl(turn_dir / "response.progress.jsonl", progress_entry)
+
+        if event_type in {"turn_completed", "turn_failed"}:
+            self._write_json(
+                turn_dir / "response.final.json",
+                {
+                    "turn_id": turn_id,
+                    "type": "final_reply",
+                    "status": "completed" if event_type == "turn_completed" else "failed",
+                    "final_reply": raw_payload.get("final_reply"),
+                    "pending_confirmation_id": raw_payload.get("pending_confirmation_id"),
+                    "pending_confirmation_effect_summary": raw_payload.get("pending_confirmation_effect_summary"),
+                    "task_id": raw_payload.get("task_id"),
+                    "reason": raw_payload.get("reason"),
+                    "error": raw_payload.get("error"),
+                },
+            )
+
+        self._write_json(turn_dir / "scenario.capture.json", self._build_scenario_capture(turn_dir, summary))
+
+    def _progress_entry_from_event(
+        self,
+        raw_payload: dict[str, Any],
+        event_type: str,
+        stamp: datetime,
+        step_index: int | None,
+    ) -> dict[str, Any] | None:
+        if event_type == "capability_finished" and raw_payload.get("status") == "awaiting_bridge_result":
+            continuation_id = raw_payload.get("continuation_id")
+            if not continuation_id:
+                return None
+            return {
+                "ts": stamp.isoformat(),
+                "step_index": step_index,
+                "type": "action_request_batch",
+                "continuation_id": continuation_id,
+                "action_request_batch": [
+                    {
+                        "continuation_id": continuation_id,
+                        "intent_id": raw_payload.get("intent_id"),
+                        "capability_id": raw_payload.get("capability_id"),
+                        "risk_class": raw_payload.get("risk_class"),
+                        "effect_summary": raw_payload.get("effect_summary"),
+                        "preconditions": raw_payload.get("preconditions") or [],
+                        "arguments": raw_payload.get("arguments") or {},
+                        "requires_confirmation": bool(raw_payload.get("requires_confirmation")),
+                    }
+                ],
+            }
+
+        if event_type == "turn_yielded":
+            return {
+                "ts": stamp.isoformat(),
+                "step_index": step_index,
+                "type": "progress_update",
+                "continuation_id": raw_payload.get("continuation_id"),
+                "reason": raw_payload.get("reason"),
+                "trace_events": raw_payload.get("trace_events") or [],
+            }
+        return None
+
+    def _build_scenario_capture(self, turn_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
+        user_input = summary.get("user_input") or {}
+        turn = summary.get("turn") or {}
+        final_response = self._read_json_if_exists(turn_dir / "response.final.json")
+        selected_capability_ids = self._selected_capability_ids(summary)
+        observed_duration_ms = self._observed_duration_ms(turn)
+        confirmation_expected = None
+        if isinstance(final_response, dict):
+            confirmation_expected = bool(final_response.get("pending_confirmation_id"))
+
+        scenario = {
+            "scenario_id": turn.get("turn_id"),
+            "world_template": None,
+            "player_name": ((user_input.get("player") or {}).get("name")),
+            "setup_commands": [],
+            "message": user_input.get("user_message"),
+            "follow_up_messages": [],
+            "assertions": {
+                "expected_final_status": turn.get("status") if turn.get("status") in {"completed", "failed"} else None,
+                "forbidden_statuses": [],
+                "required_capability_ids": [],
+                "forbidden_capability_ids": [],
+                "confirmation_expected": confirmation_expected,
+                "required_reply_substrings": [],
+                "forbidden_reply_substrings": [],
+                "max_duration_ms": None,
+            },
+        }
+        return {
+            "version": CAPTURE_VERSION,
+            "turn": {
+                "turn_id": turn.get("turn_id"),
+                "session_ref": turn.get("session_ref"),
+                "started_at": turn.get("started_at"),
+                "ended_at": turn.get("ended_at"),
+                "status": turn.get("status"),
+                "debug_dir": turn.get("debug_dir"),
+            },
+            "scenario": scenario,
+            "request_snapshot": {
+                "player": user_input.get("player"),
+                "server_env": user_input.get("server_env"),
+                "limits": user_input.get("limits"),
+                "pending_confirmation": user_input.get("pending_confirmation"),
+            },
+            "selected_capability_ids": selected_capability_ids,
+            "assertion_slots": {
+                "observed_capability_ids": selected_capability_ids,
+                "observed_reply_preview": summary.get("final_reply_preview"),
+                "observed_confirmation_expected": confirmation_expected,
+                "suggested_assertions": {
+                    "expected_final_status": turn.get("status") if turn.get("status") in {"completed", "failed"} else None,
+                    "forbidden_statuses": ["failed"] if turn.get("status") == "completed" else [],
+                    "required_capability_ids": selected_capability_ids,
+                    "forbidden_capability_ids": [],
+                    "confirmation_expected": confirmation_expected,
+                    "required_reply_substrings": [],
+                    "forbidden_reply_substrings": [],
+                    "max_duration_ms": observed_duration_ms,
+                },
+            },
+            "source_trace_refs": {
+                "summary_path": str(turn_dir / "summary.json"),
+                "events_path": str(turn_dir / "events.jsonl"),
+                "request_start_path": self._artifact_path_or_none(turn_dir / "request.start.json"),
+                "response_progress_path": self._artifact_path_or_none(turn_dir / "response.progress.jsonl"),
+                "response_final_path": self._artifact_path_or_none(turn_dir / "response.final.json"),
+                "prompt_artifacts": [artifact.get("path") for artifact in summary.get("prompt_artifacts", []) if isinstance(artifact, dict) and artifact.get("path")],
+            },
+        }
+
+    def _selected_capability_ids(self, summary: dict[str, Any]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for step in summary.get("timeline", []):
+            if not isinstance(step, dict):
+                continue
+            for key in ("capability", "capability_result", "bridge_result"):
+                payload = step.get(key)
+                if not isinstance(payload, dict):
+                    continue
+                capability_id = payload.get("capability_id")
+                if isinstance(capability_id, str) and capability_id and capability_id not in seen:
+                    seen.add(capability_id)
+                    ordered.append(capability_id)
+        return ordered
+
+    def _observed_duration_ms(self, turn: dict[str, Any]) -> int | None:
+        started_at = turn.get("started_at")
+        ended_at = turn.get("ended_at")
+        if not isinstance(started_at, str) or not isinstance(ended_at, str):
+            return None
+        started = _parse_iso8601(started_at)
+        ended = _parse_iso8601(ended_at)
+        if started is None or ended is None:
+            return None
+        return max(int((ended - started).total_seconds() * 1000), 0)
+
+    def _read_json_if_exists(self, target: Path) -> dict[str, Any] | None:
+        if not target.exists():
+            return None
+        return json.loads(target.read_text(encoding="utf-8"))
+
+    def _artifact_path_or_none(self, target: Path) -> str | None:
+        return str(target) if target.exists() else None
+
+    def _rewrite_index(self, summary: dict[str, Any], turn_dir: Path) -> None:
+        entries = {
+            entry["turn_id"]: entry
+            for entry in load_debug_index(self._debug_dir)
+            if isinstance(entry, dict) and isinstance(entry.get("turn_id"), str)
+        }
+        user_input = summary.get("user_input") or {}
+        player = user_input.get("player") or {}
+        turn = summary.get("turn") or {}
+        turn_id = turn.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id:
+            return
+        entries[turn_id] = {
+            "turn_id": turn_id,
+            "session_ref": turn.get("session_ref"),
+            "player_name": player.get("name"),
+            "user_message": user_input.get("user_message"),
+            "status": turn.get("status"),
+            "started_at": turn.get("started_at"),
+            "ended_at": turn.get("ended_at"),
+            "debug_dir": str(turn_dir),
+            "final_reply_preview": summary.get("final_reply_preview"),
+        }
+        ordered = sorted(
+            entries.values(),
+            key=lambda item: (
+                str(item.get("started_at") or ""),
+                str(item.get("turn_id") or ""),
+            ),
+        )
+        self._index_path.write_text(
+            "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in ordered),
+            encoding="utf-8",
+        )
+
 
 def build_debug_recorder(settings: Settings) -> DebugRecorder:
     if not settings.debug_enabled:
         return NoopDebugRecorder()
     return FileDebugRecorder(settings.debug_dir, DebugPreviewLimits.from_settings(settings))
+
+
+def load_debug_index(debug_dir: Path | str) -> list[dict[str, Any]]:
+    target = Path(debug_dir) / "index.jsonl"
+    if not target.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            entries.append(payload)
+    return entries
+
+
+def lookup_debug_index(debug_dir: Path | str, turn_id: str) -> dict[str, Any] | None:
+    for entry in reversed(load_debug_index(debug_dir)):
+        if entry.get("turn_id") == turn_id:
+            return entry
+    return None
+
+
+def resolve_turn_bundle(debug_dir: Path | str, turn_id: str) -> Path | None:
+    entry = lookup_debug_index(debug_dir, turn_id)
+    if isinstance(entry, dict) and entry.get("debug_dir"):
+        return Path(str(entry["debug_dir"]))
+    turns_dir = Path(debug_dir) / "turns"
+    if not turns_dir.exists():
+        return None
+    return next((path for path in turns_dir.glob(f"*/*{turn_id}") if path.is_dir()), None)
 
 
 def sanitize_event_payload(payload: dict[str, Any], limits: DebugPreviewLimits) -> tuple[dict[str, Any], TruncationStats]:
@@ -481,3 +756,15 @@ def _truncate_text(value: str, limits: DebugPreviewLimits) -> str:
     if tail <= 0:
         return value[:head]
     return value[:head] + value[-tail:]
+
+
+def _parse_iso8601(value: str) -> datetime | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None

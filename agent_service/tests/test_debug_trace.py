@@ -8,7 +8,7 @@ from typing import Any
 
 from mina_agent.audit.logger import AuditLogger
 from mina_agent.config import Settings
-from mina_agent.debug import build_debug_recorder
+from mina_agent.debug import build_debug_recorder, load_debug_index, lookup_debug_index, resolve_turn_bundle
 from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
@@ -154,6 +154,66 @@ class DebugTraceTests(unittest.TestCase):
                 "turn_completed",
             ],
         )
+
+    def test_debug_writes_bundle_artifacts_and_index_for_final_reply(self) -> None:
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[self._final_reply_result("Ready.")],
+        )
+
+        response = loop.start_turn(self._turn_request(turn_id="turn-bundle-final"))
+
+        self.assertEqual(response.type, "final_reply")
+        turn_dir = self._turn_dir(settings.debug_dir, "turn-bundle-final")
+        request_artifact = json.loads((turn_dir / "request.start.json").read_text(encoding="utf-8"))
+        final_artifact = json.loads((turn_dir / "response.final.json").read_text(encoding="utf-8"))
+        capture = json.loads((turn_dir / "scenario.capture.json").read_text(encoding="utf-8"))
+        index_entries = load_debug_index(settings.debug_dir)
+        index_entry = lookup_debug_index(settings.debug_dir, "turn-bundle-final")
+
+        self.assertEqual(request_artifact["turn_id"], "turn-bundle-final")
+        self.assertEqual(request_artifact["user_message"], "hello Mina")
+        self.assertEqual(final_artifact["type"], "final_reply")
+        self.assertEqual(final_artifact["status"], "completed")
+        self.assertEqual(final_artifact["final_reply"], "Ready.")
+        self.assertEqual(capture["scenario"]["scenario_id"], "turn-bundle-final")
+        self.assertEqual(capture["scenario"]["player_name"], "Tester")
+        self.assertEqual(capture["scenario"]["message"], "hello Mina")
+        self.assertEqual(capture["turn"]["status"], "completed")
+        self.assertEqual(capture["assertion_slots"]["observed_reply_preview"], "Ready.")
+        self.assertEqual(index_entry["status"], "completed")
+        self.assertEqual(index_entry["player_name"], "Tester")
+        self.assertTrue(any(entry["turn_id"] == "turn-bundle-final" for entry in index_entries))
+        self.assertEqual(resolve_turn_bundle(settings.debug_dir, "turn-bundle-final"), turn_dir)
+
+    def test_bridge_turn_writes_progress_artifact_for_action_batch(self) -> None:
+        visible_capabilities = [
+            VisibleCapabilityPayload(
+                id="game.player_snapshot.read",
+                kind="tool",
+                description="Read the current player snapshot.",
+                risk_class="read_only",
+                execution_mode="bridge",
+                requires_confirmation=False,
+            )
+        ]
+        loop, settings, _ = self._build_loop(
+            debug_enabled=True,
+            provider_responses=[
+                self._capability_result("game.player_snapshot.read", effect_summary="Read the player snapshot."),
+                self._final_reply_result("Snapshot captured."),
+            ],
+        )
+
+        start_response = loop.start_turn(
+            self._turn_request(turn_id="turn-progress-artifact", visible_capabilities=visible_capabilities)
+        )
+
+        self.assertEqual(start_response.type, "action_request_batch")
+        turn_dir = self._turn_dir(settings.debug_dir, "turn-progress-artifact")
+        progress_entries = self._load_jsonl(turn_dir / "response.progress.jsonl")
+        self.assertEqual(progress_entries[0]["type"], "action_request_batch")
+        self.assertEqual(progress_entries[0]["action_request_batch"][0]["capability_id"], "game.player_snapshot.read")
 
     def test_debug_saves_raw_provider_input_for_model_request(self) -> None:
         loop, settings, _ = self._build_loop(
@@ -1168,6 +1228,9 @@ class DebugTraceTests(unittest.TestCase):
     def _load_events(self, debug_dir: Path, turn_id: str) -> list[dict[str, Any]]:
         events_path = self._turn_dir(debug_dir, turn_id) / "events.jsonl"
         return [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def _load_jsonl(self, target: Path) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 if __name__ == "__main__":

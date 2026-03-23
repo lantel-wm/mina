@@ -1,0 +1,15 @@
+{
+  "server_properties": {
+    "difficulty": "hard",
+    "enforce-secure-profile": "false",
+    "gamemode": "survival",
+    "level-name": "world",
+    "level-seed": "-2032795982907864146",
+    "motd": "mina headless",
+    "online-mode": "false",
+    "pause-when-empty-seconds": "0",
+    "simulation-distance": "12",
+    "spawn-protection": "0",
+    "view-distance": "12"
+  }
+}

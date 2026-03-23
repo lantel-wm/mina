@@ -1,6 +1,8 @@
 .gradle/
 build/
 run/
+tmp/
+var/
 out/
 .idea/
 .vscode/
@@ -28,6 +30,8 @@ agent_service/data/knowledge/changelogs/
 agent_service/data/memory/
 agent_service/data/sessions/
 agent_service/data/tasks/
+tmp/
+var/
 
 # reference repos for coding agent
 reference

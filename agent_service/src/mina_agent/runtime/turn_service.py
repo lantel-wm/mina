@@ -1349,7 +1349,12 @@ class TurnPipeline:
             pending_confirmation_resolved=pending_confirmation_resolved,
             preserve_task_status=preserve_task_status,
         )
-        payload = {"final_reply": final_reply, "task_id": turn_state.task.task_id}
+        payload = {
+            "final_reply": final_reply,
+            "task_id": turn_state.task.task_id,
+            "pending_confirmation_id": pending_confirmation_id,
+            "pending_confirmation_effect_summary": pending_confirmation_effect_summary,
+        }
         if debug_payload is not None:
             payload.update(debug_payload)
         self._services.debug.record_event(
