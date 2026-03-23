@@ -22,8 +22,13 @@
     "forbidden_statuses": [
       "failed"
     ],
+    "required_capability_groups": [
+      [
+        "server.rules.read",
+        "carpet.rules.read"
+      ]
+    ],
     "required_capability_ids": [
-      "server.rules.read"
     ],
     "confirmation_expected": false,
     "max_duration_ms": 120000

@@ -15,6 +15,7 @@ from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.execution_manager import ExecutionManager
 from mina_agent.runtime.memory_manager import MemoryManager
 from mina_agent.runtime.models import (
+    BlockSubjectLock,
     ObservationRef,
     TurnState,
     WorkingMemory,
@@ -84,6 +85,7 @@ class TurnPipeline:
             pending_confirmation=pending_confirmation,
             active_task_candidate=active_task_candidate,
         )
+        self._restore_recent_block_subject_lock(turn_state)
         self._services.store.create_turn(
             request.turn_id,
             request.session_ref,
@@ -113,6 +115,28 @@ class TurnPipeline:
             },
         )
         return turn_state
+
+    def _restore_recent_block_subject_lock(self, turn_state: TurnState) -> None:
+        recent_turns = self._services.store.list_turns(turn_state.session_ref, limit=6)
+        for record in reversed(recent_turns):
+            if record.get("task_id") != turn_state.task.task_id:
+                continue
+            if record.get("status") != "completed":
+                continue
+            previous_turn_id = record.get("turn_id")
+            if not isinstance(previous_turn_id, str) or not previous_turn_id:
+                continue
+            previous_state = self._services.store.get_turn_state(previous_turn_id)
+            if not isinstance(previous_state, dict):
+                continue
+            payload = previous_state.get("block_subject_lock")
+            if not isinstance(payload, dict):
+                continue
+            try:
+                turn_state.block_subject_lock = BlockSubjectLock.model_validate(payload)
+            except Exception:
+                turn_state.block_subject_lock = None
+            return
 
     def _stage_bootstrap_resume(
         self,
@@ -1454,6 +1478,18 @@ class TurnPipeline:
     def _capability_observation_is_ambiguous(self, capability_id: str, observations: dict[str, Any] | None) -> bool:
         if not isinstance(observations, dict) or not observations:
             return True
+        if capability_id in {"observe.technical", "carpet.observability.read"}:
+            if any(
+                key in observations
+                for key in (
+                    "carpet_loaded",
+                    "script_server_running",
+                    "hopper_counters_enabled",
+                    "logger_count",
+                    "fake_player_count",
+                )
+            ):
+                return False
         if capability_id == "game.target_block.read":
             if observations.get("target_found") is False:
                 return True

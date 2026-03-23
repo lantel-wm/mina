@@ -562,12 +562,14 @@ class ContextManager:
             "When the player explicitly asks you to first explore on your own before answering, prefer agent.explore.delegate if it is visible.\n"
             "When the player explicitly asks for a plan but says not to take over, prefer agent.plan.delegate if it is visible.\n"
             "When the player asks for technical state, diagnostics, or observability and observe.technical or carpet.observability.read is visible, prefer one of those capabilities over replying from scene hints alone.\n"
+            "If observe.technical or carpet.observability.read already produced a fresh snapshot this turn, answer from that snapshot instead of rereading the same technical state.\n"
             "When the player asks how far they are from the thing they are currently looking at and distance measurement is visible, inspect the target if needed and then use carpet.distance.measure.\n"
             "If a target read already produced a locked target or observation_brief identifies the target, use carpet.distance.measure next instead of rereading the same target.\n"
             "If a target read already returned target_found=false once for this same question, do not repeat the same target read again unless the player clearly changed aim; explain what is missing instead.\n"
             "When the player asks for more detail about a just-identified target block and Carpet block diagnostics are visible, prefer carpet.block_info.read.\n"
             "If a follow-up asks for more detail about the same target and observation_brief has a locked block subject, use carpet.block_info.read next instead of a generic fallback reply.\n"
             "When the player asks what nearby place is worth visiting and a POI capability is visible, prefer observe.poi or world.poi.read over delegate_explore.\n"
+            "When the player sounds panicked or asks whether the current night situation is safe, and a scene or threats capability is visible, prefer a fresh threat read before reassuring them.\n"
             "Return JSON only.\n"
             'Reply/guide with {"intent":"reply","final_reply":"..."} or {"intent":"guide","final_reply":"..."}.\n'
             'Inspect/retrieve/execute with {"intent":"execute","capability_request":{"capability_id":"...","arguments":{},"effect_summary":"...","requires_confirmation":false}}.\n'

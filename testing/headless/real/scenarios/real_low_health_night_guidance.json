@@ -41,6 +41,13 @@
       "failed"
     ],
     "confirmation_expected": false,
+    "required_reply_substrings": [
+      "不安全"
+    ],
+    "forbidden_reply_substrings": [
+      "风险等级是低",
+      "没有检测到敌对生物"
+    ],
     "max_duration_ms": 120000
   }
 }

@@ -13,9 +13,11 @@ class ContextManagerPromptRuleTests(unittest.TestCase):
         stable_core = manager._stable_core_text()  # noqa: SLF001
 
         self.assertIn("prefer one of those capabilities over replying from scene hints alone", stable_core)
+        self.assertIn("answer from that snapshot instead of rereading the same technical state", stable_core)
         self.assertIn("use carpet.distance.measure next instead of rereading the same target", stable_core)
         self.assertIn("do not repeat the same target read again", stable_core)
         self.assertIn("use carpet.block_info.read next instead of a generic fallback reply", stable_core)
+        self.assertIn("prefer a fresh threat read before reassuring them", stable_core)
 
     def test_working_memory_view_summarizes_long_completed_actions(self) -> None:
         manager = ContextManager.__new__(ContextManager)
