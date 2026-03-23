@@ -1,0 +1,21 @@
+{
+  "suite": "real",
+  "scenario_id": "real_nearby_threat_basic",
+  "world_template": "overworld_night_danger",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "setup_commands": ["time set night"],
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，附近危险吗？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["game.nearby_entities.read"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

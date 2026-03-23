@@ -1,0 +1,19 @@
+{
+  "suite": "real",
+  "scenario_id": "real_delegate_plan_for_multistep_guidance",
+  "world_template": "home_base_storage",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，帮我先想一个简短计划，但别直接接管。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["agent.plan.delegate"],
+    "max_duration_ms": 120000
+  }
+}

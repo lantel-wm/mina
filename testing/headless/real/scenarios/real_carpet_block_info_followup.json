@@ -1,0 +1,21 @@
+{
+  "suite": "real",
+  "scenario_id": "real_carpet_block_info_followup",
+  "world_template": "technical_carpet_lab",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我看着的是什么方块？"},
+    {"actor_id": "player", "message": "那它再详细一点呢？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["carpet.block_info.read"],
+    "confirmation_expected": false,
+    "max_duration_ms": 180000
+  }
+}

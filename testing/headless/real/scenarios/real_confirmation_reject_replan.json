@@ -1,0 +1,21 @@
+{
+  "suite": "real",
+  "scenario_id": "real_confirmation_reject_replan",
+  "world_template": "experimental_sandbox_lab",
+  "status": "planned",
+  "expectation": "target_state",
+  "feature_flags": {
+    "enable_experimental": true,
+    "enable_dynamic_scripting": true
+  },
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "experimental", "experimental": true}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，替我做实验脚本，但要先确认。"},
+    {"actor_id": "player", "message": "不用了，换个更稳一点的办法。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "suite": "real",
+  "scenario_id": "real_local_knowledge_lookup",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，用你本地知识库告诉我一个和当前生存有关的提示。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["retrieval.local_knowledge.search"],
+    "max_duration_ms": 120000
+  }
+}

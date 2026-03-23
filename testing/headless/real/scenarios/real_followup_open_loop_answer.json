@@ -1,0 +1,20 @@
+{
+  "suite": "real",
+  "scenario_id": "real_followup_open_loop_answer",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我有点不知道接下来该干嘛。"},
+    {"actor_id": "player", "message": "我想先别太忙，你觉得呢？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "confirmation_expected": false,
+    "max_duration_ms": 180000
+  }
+}

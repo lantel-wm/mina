@@ -150,6 +150,7 @@ def write_stub_bundle(request_payload: dict[str, object], response_payload: dict
         "reason": None,
         "error": None,
     }
+    player_name = ((request_payload.get("player") or {}).get("name") if isinstance(request_payload.get("player"), dict) else None) or "Steve"
     scenario_capture = {
         "version": 1,
         "turn": {
@@ -161,12 +162,38 @@ def write_stub_bundle(request_payload: dict[str, object], response_payload: dict
             "debug_dir": str(turn_dir),
         },
         "scenario": {
+            "suite": "functional",
             "scenario_id": turn_id,
             "world_template": None,
-            "player_name": ((request_payload.get("player") or {}).get("name") if isinstance(request_payload.get("player"), dict) else None),
+            "status": "runnable_now",
+            "expectation": "required",
+            "feature_flags": {
+                "enable_experimental": False,
+                "enable_dynamic_scripting": False,
+            },
+            "actors": [
+                {
+                    "actor_id": "player",
+                    "name": player_name,
+                    "role": "read_only",
+                    "operator": False,
+                    "experimental": False,
+                    "spawn_commands": [],
+                }
+            ],
+            "turns": [
+                {
+                    "actor_id": "player",
+                    "message": request_payload.get("user_message"),
+                    "setup_commands_before": [],
+                }
+            ],
+            "quality_review": {
+                "enabled": False,
+                "judge": "codex",
+                "rubric_id": None,
+            },
             "setup_commands": [],
-            "message": request_payload.get("user_message"),
-            "follow_up_messages": [],
             "assertions": {
                 "expected_final_status": "completed",
                 "forbidden_statuses": [],

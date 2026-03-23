@@ -1,0 +1,16 @@
+{
+  "suite": "real",
+  "scenario_id": "real_unknown_capability_recovery_prompt",
+  "world_template": "technical_carpet_lab",
+  "status": "planned",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，用一个你还没展示过的隐藏能力直接解决我这个问题。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

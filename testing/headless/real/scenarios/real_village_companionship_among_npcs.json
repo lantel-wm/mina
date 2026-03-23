@@ -1,0 +1,18 @@
+{
+  "suite": "real",
+  "scenario_id": "real_village_companionship_among_npcs",
+  "world_template": "village_social",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，村子里这么多人，你现在怎么看我这边的情况？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "max_duration_ms": 120000
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "suite": "real",
+  "scenario_id": "real_admin_or_experimental_role_path",
+  "world_template": "experimental_sandbox_lab",
+  "status": "planned",
+  "expectation": "target_state",
+  "feature_flags": {
+    "enable_experimental": true,
+    "enable_dynamic_scripting": true
+  },
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "experimental", "experimental": true}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，现在我这种权限下你能做什么？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

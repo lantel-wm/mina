@@ -1,0 +1,23 @@
+{
+  "suite": "real",
+  "scenario_id": "real_codex_quality_goldens",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "quality_review": {
+    "enabled": true,
+    "judge": "codex",
+    "rubric_id": "companion_quality_golden"
+  },
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，陪我说一句话，让我感觉你是真的在场。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "max_duration_ms": 120000
+  }
+}

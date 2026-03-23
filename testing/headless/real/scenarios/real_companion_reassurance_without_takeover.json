@@ -1,0 +1,19 @@
+{
+  "suite": "real",
+  "scenario_id": "real_companion_reassurance_without_takeover",
+  "world_template": "cave_underground",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我有点紧张，你先安抚我一下，不用替我做事。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
+import shlex
 import shutil
 import signal
 import socket
@@ -12,29 +14,47 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.request import ProxyHandler, build_opener
 
 from mina_agent.debug import load_debug_index, resolve_turn_bundle
-from mina_agent.dev.scenarios import HeadlessScenario, ObservedScenarioResult, ScenarioAssertions, evaluate_assertions, load_scenarios
+from mina_agent.dev.scenarios import (
+    ActorSpec,
+    HeadlessScenario,
+    INFRA_FAILURE_CATEGORIES,
+    ObservedScenarioResult,
+    QualityReviewResult,
+    ScenarioAssertions,
+    ScenarioLoadResult,
+    SuiteName,
+    evaluate_assertions,
+    is_infra_failure,
+    load_scenarios,
+)
 
 
-DEFAULT_SCENARIO_DIR = Path("testing/headless/scenarios")
+DEFAULT_FUNCTIONAL_SCENARIO_DIR = Path("testing/headless/functional/scenarios")
+DEFAULT_REAL_SCENARIO_DIR = Path("testing/headless/real/scenarios")
 DEFAULT_WORLD_TEMPLATE_DIR = Path("testing/headless/world_templates")
-DEFAULT_OUTPUT_ROOT = Path("tmp/headless")
+DEFAULT_FUNCTIONAL_OUTPUT_ROOT = Path("tmp/headless/functional")
+DEFAULT_REAL_OUTPUT_ROOT = Path("tmp/headless/real")
 DEFAULT_AGENT_HOST = "127.0.0.1"
 DEFAULT_AGENT_PORT = 0
 DEFAULT_SERVER_READY_TIMEOUT = 180.0
 DEFAULT_AGENT_READY_TIMEOUT = 30.0
 DEFAULT_TURN_TIMEOUT = 180.0
+DEFAULT_CODEX_REVIEW_TIMEOUT = 60.0
+DEFAULT_PROGRESS_HEARTBEAT = 5.0
 
 
 @dataclass(slots=True)
 class TurnRunResult:
     turn_id: str
+    actor_id: str
     message: str
     bundle_dir: Path
     final_status: str
@@ -43,6 +63,21 @@ class TurnRunResult:
     selected_capability_ids: list[str]
     started_at: str | None
     ended_at: str | None
+
+
+@dataclass(slots=True)
+class ScenarioExecutionRecord:
+    scenario_id: str
+    suite: str
+    expectation: str
+    runnable_status: str
+    outcome: str
+    category: str | None
+    detail: str | None
+    infra_failure: bool
+    turn_ids: list[str]
+    bundle_dirs: list[str]
+    quality_review: dict[str, Any] | None
 
 
 class LineProcess:
@@ -84,8 +119,10 @@ class LineProcess:
         self._process.stdin.write(line + "\n")
         self._process.stdin.flush()
 
-    def wait_for_substring(self, substring: str, timeout: float) -> str:
-        deadline = time.time() + timeout
+    def wait_for_substring(self, substring: str, timeout: float, *, progress_label: str | None = None) -> str:
+        started = time.time()
+        deadline = started + timeout
+        next_heartbeat = started + DEFAULT_PROGRESS_HEARTBEAT
         while time.time() < deadline:
             if self.poll() is not None:
                 raise RuntimeError(f"{self._name} exited before emitting expected output: {substring}")
@@ -93,6 +130,13 @@ class LineProcess:
             try:
                 line = self._queue.get(timeout=min(0.5, remaining))
             except queue.Empty:
+                if progress_label is not None and time.time() >= next_heartbeat:
+                    last_line = self._lines[-1] if self._lines else None
+                    suffix = f" | last output: {last_line}" if last_line else ""
+                    log_status(
+                        f"{progress_label}... {int(time.time() - started)}s elapsed / {int(timeout)}s timeout{suffix}"
+                    )
+                    next_heartbeat = time.time() + DEFAULT_PROGRESS_HEARTBEAT
                 continue
             if substring in line:
                 return line
@@ -120,9 +164,6 @@ class LineProcess:
         if self._process is None:
             return None
         return self._process.poll()
-
-    def lines(self) -> list[str]:
-        return list(self._lines)
 
     def _terminate_group(self, sig: int) -> None:
         if self._process is None:
@@ -153,7 +194,7 @@ class ActiveRunDirectory:
                 shutil.copytree(source, target)
 
     def sync_back(self) -> None:
-        for name in ("mina-dev", "logs", "world", "server.properties", "eula.txt", "ops.json", "whitelist.json"):
+        for name in ("mina-dev", "logs", "world", "server.properties", "eula.txt", "ops.json", "whitelist.json", "config"):
             source = self._active_run_dir / name
             target = self._materialized_run_dir / name
             if not source.exists():
@@ -172,9 +213,6 @@ class ActiveRunDirectory:
         backup_run_dir = self._backup_dir / "run"
         if backup_run_dir.exists():
             shutil.move(str(backup_run_dir), str(self._active_run_dir))
-        self._cleanup_backup()
-
-    def _cleanup_backup(self) -> None:
         try:
             shutil.rmtree(self._backup_dir)
         except FileNotFoundError:
@@ -185,17 +223,29 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Mina headless testing and trace tooling.")
     subparsers = parser.add_subparsers(dest="command")
 
-    run_parser = subparsers.add_parser("run-headless", help="Run headless Mina scenarios against the server bridge.")
-    run_parser.add_argument("--scenario-dir", default=str(DEFAULT_SCENARIO_DIR))
-    run_parser.add_argument("--world-template-dir", default=str(DEFAULT_WORLD_TEMPLATE_DIR))
-    run_parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
-    run_parser.add_argument("--scenario-id", action="append", default=[])
-    run_parser.add_argument("--agent-mode", choices=["real", "stub"], default="real")
-    run_parser.add_argument("--agent-port", type=int, default=DEFAULT_AGENT_PORT)
-    run_parser.add_argument("--server-ready-timeout", type=float, default=DEFAULT_SERVER_READY_TIMEOUT)
-    run_parser.add_argument("--agent-ready-timeout", type=float, default=DEFAULT_AGENT_READY_TIMEOUT)
-    run_parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT)
-    run_parser.add_argument("--keep-going", action="store_true")
+    functional_parser = subparsers.add_parser("run-functional", help="Run deterministic functional headless tests.")
+    functional_parser.add_argument("--scenario-dir", default=str(DEFAULT_FUNCTIONAL_SCENARIO_DIR))
+    functional_parser.add_argument("--world-template-dir", default=str(DEFAULT_WORLD_TEMPLATE_DIR))
+    functional_parser.add_argument("--output-root", default=str(DEFAULT_FUNCTIONAL_OUTPUT_ROOT))
+    functional_parser.add_argument("--scenario-id", action="append", default=[])
+    functional_parser.add_argument("--agent-mode", choices=["stub", "real"], default="stub")
+    functional_parser.add_argument("--agent-port", type=int, default=DEFAULT_AGENT_PORT)
+    functional_parser.add_argument("--server-ready-timeout", type=float, default=DEFAULT_SERVER_READY_TIMEOUT)
+    functional_parser.add_argument("--agent-ready-timeout", type=float, default=DEFAULT_AGENT_READY_TIMEOUT)
+    functional_parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT)
+
+    real_parser = subparsers.add_parser("run-real", help="Run the full real-model headless evaluation suite.")
+    real_parser.add_argument("--scenario-dir", default=str(DEFAULT_REAL_SCENARIO_DIR))
+    real_parser.add_argument("--world-template-dir", default=str(DEFAULT_WORLD_TEMPLATE_DIR))
+    real_parser.add_argument("--output-root", default=str(DEFAULT_REAL_OUTPUT_ROOT))
+    real_parser.add_argument("--scenario-id", action="append", default=[])
+    real_parser.add_argument("--agent-port", type=int, default=DEFAULT_AGENT_PORT)
+    real_parser.add_argument("--server-ready-timeout", type=float, default=DEFAULT_SERVER_READY_TIMEOUT)
+    real_parser.add_argument("--agent-ready-timeout", type=float, default=DEFAULT_AGENT_READY_TIMEOUT)
+    real_parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT)
+    real_parser.add_argument("--strict-real", action="store_true")
+    real_parser.add_argument("--include-known-issues", action="store_true")
+    real_parser.add_argument("--max-infra-failures", type=int, default=1)
 
     recent_parser = subparsers.add_parser("recent-turns", help="List recent debug-traced turns.")
     recent_parser.add_argument("--debug-dir", default="agent_service/data/debug")
@@ -206,157 +256,502 @@ def main(argv: list[str] | None = None) -> int:
     promote_parser = subparsers.add_parser("promote-trace", help="Promote a captured trace bundle into a checked-in scenario.")
     promote_parser.add_argument("--debug-dir", default="agent_service/data/debug")
     promote_parser.add_argument("--turn-id", required=True)
+    promote_parser.add_argument("--suite", choices=["functional", "real"], default="real")
     promote_parser.add_argument("--scenario-id")
     promote_parser.add_argument("--world-template")
-    promote_parser.add_argument("--output-dir", default=str(DEFAULT_SCENARIO_DIR))
+    promote_parser.add_argument("--output-dir")
     promote_parser.add_argument("--force", action="store_true")
 
     args = parser.parse_args(argv)
-    command = args.command or "run-headless"
-    if command == "run-headless":
-        return run_headless(args)
-    if command == "recent-turns":
+    if args.command == "run-functional":
+        return run_functional(args)
+    if args.command == "run-real":
+        return run_real(args)
+    if args.command == "recent-turns":
         return recent_turns(args)
-    if command == "promote-trace":
+    if args.command == "promote-trace":
         return promote_trace(args)
     parser.print_help()
     return 1
 
 
-def run_headless(args: argparse.Namespace) -> int:
+def run_functional(args: argparse.Namespace) -> int:
+    records, _, _ = execute_suite(
+        suite="functional",
+        scenario_dir=Path(args.scenario_dir),
+        world_template_dir=Path(args.world_template_dir),
+        output_root=Path(args.output_root),
+        scenario_ids=args.scenario_id,
+        agent_mode=args.agent_mode,
+        agent_port=args.agent_port,
+        server_ready_timeout=args.server_ready_timeout,
+        agent_ready_timeout=args.agent_ready_timeout,
+        turn_timeout=args.turn_timeout,
+        include_known_issues=False,
+        max_infra_failures=1,
+    )
+    failed = [record for record in records if record.outcome in {"infra_failure", "behavior_gap"}]
+    print_suite_summary("functional", records)
+    return 1 if failed else 0
+
+
+def run_real(args: argparse.Namespace) -> int:
+    records, run_root, load_result = execute_suite(
+        suite="real",
+        scenario_dir=Path(args.scenario_dir),
+        world_template_dir=Path(args.world_template_dir),
+        output_root=Path(args.output_root),
+        scenario_ids=args.scenario_id,
+        agent_mode="real",
+        agent_port=args.agent_port,
+        server_ready_timeout=args.server_ready_timeout,
+        agent_ready_timeout=args.agent_ready_timeout,
+        turn_timeout=args.turn_timeout,
+        include_known_issues=args.include_known_issues,
+        max_infra_failures=max(args.max_infra_failures, 1),
+    )
+    write_real_reports(run_root, records, load_result)
+    print_suite_summary("real", records, run_root=run_root)
+
+    infra_failures = [record for record in records if record.outcome == "infra_failure"]
+    required_behavior_failures = [
+        record
+        for record in records
+        if record.outcome == "behavior_gap" and record.expectation == "required"
+    ]
+    any_behavior_failures = [record for record in records if record.outcome == "behavior_gap"]
+
+    if infra_failures:
+        return 1
+    if required_behavior_failures:
+        return 1
+    if args.strict_real and any_behavior_failures:
+        return 1
+    return 0
+
+
+def execute_suite(
+    *,
+    suite: SuiteName,
+    scenario_dir: Path,
+    world_template_dir: Path,
+    output_root: Path,
+    scenario_ids: list[str],
+    agent_mode: str,
+    agent_port: int,
+    server_ready_timeout: float,
+    agent_ready_timeout: float,
+    turn_timeout: float,
+    include_known_issues: bool,
+    max_infra_failures: int,
+) -> tuple[list[ScenarioExecutionRecord], Path, ScenarioLoadResult]:
     repo_root = find_repo_root(Path.cwd())
-    scenario_dir = repo_root / Path(args.scenario_dir)
-    world_template_dir = repo_root / Path(args.world_template_dir)
-    output_root = repo_root / Path(args.output_root)
+    scenario_dir = repo_root / scenario_dir
+    world_template_dir = repo_root / world_template_dir
+    output_root = repo_root / output_root
     active_run_dir = repo_root / "run"
     if output_root == active_run_dir or active_run_dir in output_root.parents:
-        print(f"Output root must not live under the active run directory: {output_root}", file=sys.stderr)
-        return 1
-    agent_port = args.agent_port or find_free_port()
-    scenarios = load_scenarios(scenario_dir, args.scenario_id or None)
-    if not scenarios:
-        print(f"No scenarios found in {scenario_dir}", file=sys.stderr)
-        return 1
+        raise RuntimeError(f"Output root must not live under the active run directory: {output_root}")
+
+    effective_port = agent_port or find_free_port()
+    load_result = load_scenarios(
+        scenario_dir,
+        suite=suite,
+        scenario_ids=scenario_ids or None,
+        include_known_issues=include_known_issues,
+    )
+    if not load_result.runnable and not load_result.planned and not load_result.known_issues:
+        raise RuntimeError(f"No scenarios found in {scenario_dir}")
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_root = output_root / run_id
     run_root.mkdir(parents=True, exist_ok=True)
-    print(f"Headless run output: {run_root}")
+    print(f"{suite} run output: {run_root}", flush=True)
+    log_status(
+        f"Loaded {suite} scenarios: runnable={len(load_result.runnable)} planned={len(load_result.planned)} "
+        f"known_issues={len(load_result.known_issues)}"
+    )
 
-    failures: list[tuple[str, str]] = []
-    grouped = group_scenarios(scenarios)
-    for group_index, (world_template, group_scenarios_list) in enumerate(grouped.items(), start=1):
-        group_root = run_root / f"{group_index:02d}_{world_template}"
+    records: list[ScenarioExecutionRecord] = []
+    for planned in load_result.planned:
+        records.append(
+            ScenarioExecutionRecord(
+                scenario_id=planned.scenario_id,
+                suite=planned.suite,
+                expectation=planned.expectation,
+                runnable_status=planned.status,
+                outcome="skipped_planned",
+                category=None,
+                detail=None,
+                infra_failure=False,
+                turn_ids=[],
+                bundle_dirs=[],
+                quality_review=None,
+            )
+        )
+    for known_issue in load_result.known_issues:
+        records.append(
+            ScenarioExecutionRecord(
+                scenario_id=known_issue.scenario_id,
+                suite=known_issue.suite,
+                expectation=known_issue.expectation,
+                runnable_status=known_issue.status,
+                outcome="skipped_known_issue",
+                category=None,
+                detail=None,
+                infra_failure=False,
+                turn_ids=[],
+                bundle_dirs=[],
+                quality_review=None,
+            )
+        )
+
+    grouped = group_scenarios(load_result.runnable)
+    infra_failures = 0
+    total_groups = len(grouped)
+    total_runnable = len(load_result.runnable)
+    scenario_counter = 0
+    for group_index, (group_key, group_scenarios_list) in enumerate(grouped.items(), start=1):
+        world_template = group_scenarios_list[0].world_template
+        group_root = run_root / f"{group_index:02d}_{group_key}"
         server_run_dir = group_root / "server"
-        materialize_run_directory(world_template_dir, world_template, server_run_dir)
+        log_status(
+            f"[{group_index}/{total_groups}] Preparing group {group_key} "
+            f"(template={world_template}, scenarios={len(group_scenarios_list)})"
+        )
+        prepare_server_run_directory(server_run_dir, world_template_dir, world_template, group_scenarios_list)
         run_swap = ActiveRunDirectory(repo_root, server_run_dir)
         run_swap.activate()
+        cleanup_root_eula = ensure_repo_root_eula(repo_root)
 
         server_env = os.environ.copy()
-        server_env["MINA_AGENT_BASE_URL"] = f"http://{DEFAULT_AGENT_HOST}:{agent_port}"
+        server_env["MINA_AGENT_BASE_URL"] = f"http://{DEFAULT_AGENT_HOST}:{effective_port}"
+        server_env["MINA_CONFIG_FILE"] = str((active_run_dir / "config" / "mina.properties").resolve())
         server = LineProcess(
             ["./gradlew", "runServer", "--no-daemon"],
             cwd=repo_root,
             env=server_env,
             name="server",
         )
-        cleanup_root_eula = ensure_repo_root_eula(repo_root)
+        log_status(f"[{group_index}/{total_groups}] Starting Fabric server")
         server.start()
+        group_failed = False
         try:
-            server.wait_for_substring("Done (", args.server_ready_timeout)
-        except Exception as exc:
-            failures.append((world_template, f"startup_failure: server failed to start: {exc}"))
-            server.terminate(timeout=5.0)
-            cleanup_root_eula()
-            run_swap.restore()
-            if not args.keep_going:
-                return 1
-            continue
-
-        known_players: set[str] = set()
-        dev_log_path = active_run_dir / "mina-dev" / "turns.jsonl"
-        dev_log_offset = 0
-        try:
+            server.wait_for_substring(
+                "Done (",
+                server_ready_timeout,
+                progress_label=f"[{group_index}/{total_groups}] Waiting for Fabric server startup",
+            )
+            log_status(f"[{group_index}/{total_groups}] Fabric server ready")
+            active_dev_log = active_run_dir / "mina-dev" / "turns.jsonl"
+            dev_log_offset = 0
+            known_actors: set[str] = set()
             for scenario in group_scenarios_list:
+                scenario_counter += 1
                 scenario_root = group_root / scenario.scenario_id
                 scenario_root.mkdir(parents=True, exist_ok=True)
                 agent_data_dir = scenario_root / "agent_data"
-                agent_process = start_agent_process(
-                        repo_root=repo_root,
-                        mode=args.agent_mode,
-                        agent_data_dir=agent_data_dir,
-                        port=agent_port,
-                    )
+                log_status(
+                    f"Starting scenario {scenario_counter}/{total_runnable}: {scenario.scenario_id} "
+                    f"({len(scenario.turns)} turn(s), actors={', '.join(actor.name for actor in scenario.actors)})"
+                )
+                agent = start_agent_process(repo_root=repo_root, mode=agent_mode, agent_data_dir=agent_data_dir, port=effective_port)
                 try:
+                    log_status(f"Scenario {scenario.scenario_id}: starting {agent_mode} agent on port {effective_port}")
                     ensure_agent_ready(
-                        mode=args.agent_mode,
+                        mode=agent_mode,
                         host=DEFAULT_AGENT_HOST,
-                        port=agent_port,
-                        timeout=args.agent_ready_timeout,
+                        port=effective_port,
+                        timeout=agent_ready_timeout,
+                        progress_label=f"Scenario {scenario.scenario_id}: waiting for agent health",
                     )
-                except Exception as exc:
-                    agent_process.terminate(timeout=5.0)
-                    failures.append((scenario.scenario_id, f"startup_failure: agent failed to start: {exc}"))
-                    if not args.keep_going:
-                        server.terminate(graceful_line="stop")
-                        return 1
-                    continue
-
-                try:
-                    if scenario.player_name not in known_players:
-                        server.send_line(f"player {scenario.player_name} spawn")
-                        server.wait_for_substring(f"{scenario.player_name} joined the game", 30.0)
-                        known_players.add(scenario.player_name)
-                    for command in scenario.setup_commands:
-                        server.send_line(command)
-                        time.sleep(0.25)
+                    log_status(f"Scenario {scenario.scenario_id}: agent ready")
                     result, dev_log_offset = run_scenario(
                         scenario=scenario,
                         server=server,
-                        dev_log_path=dev_log_path,
+                        known_actors=known_actors,
+                        dev_log_path=active_dev_log,
                         dev_log_offset=dev_log_offset,
                         debug_dir=agent_data_dir / "debug",
-                        timeout=args.turn_timeout,
+                        timeout=turn_timeout,
                     )
+                    quality_review = maybe_run_quality_review(repo_root, scenario, result)
+                    observed = build_observed_result(result, quality_review)
                     failure_category, failure_detail = classify_structural_failure(result)
                     if failure_category is None:
-                        failure_category, failure_detail = evaluate_assertions(scenario.assertions, build_observed_result(result))
+                        failure_category, failure_detail = evaluate_assertions(scenario.assertions, observed)
                     if failure_category is None:
-                        print(f"[PASS] {scenario.scenario_id} -> {result[-1].turn_id}")
+                        print(f"[PASS] {scenario.scenario_id} -> {result[-1].turn_id}", flush=True)
+                        records.append(
+                            ScenarioExecutionRecord(
+                                scenario_id=scenario.scenario_id,
+                                suite=scenario.suite,
+                                expectation=scenario.expectation,
+                                runnable_status=scenario.status,
+                                outcome="passed",
+                                category=None,
+                                detail=None,
+                                infra_failure=False,
+                                turn_ids=[item.turn_id for item in result],
+                                bundle_dirs=[str(item.bundle_dir) for item in result],
+                                quality_review=quality_review.model_dump(by_alias=True) if quality_review is not None else None,
+                            )
+                        )
                     else:
-                        bundle_dir = result[-1].bundle_dir
+                        infra = is_infra_failure(failure_category)
+                        if infra:
+                            infra_failures += 1
+                            outcome = "infra_failure"
+                        else:
+                            outcome = "behavior_gap"
                         print(
                             f"[FAIL] {scenario.scenario_id} [{failure_category}] {failure_detail}\n"
                             f"  turn_id={result[-1].turn_id}\n"
-                            f"  bundle={bundle_dir}",
+                            f"  bundle={result[-1].bundle_dir}",
                             file=sys.stderr,
+                            flush=True,
                         )
-                        failures.append((scenario.scenario_id, f"{failure_category}: {failure_detail}"))
-                        if not args.keep_going:
-                            agent_process.terminate(timeout=5.0)
-                            server.terminate(graceful_line="stop")
-                            return 1
-                except Exception as exc:
-                    failures.append((scenario.scenario_id, str(exc)))
-                    print(f"[FAIL] {scenario.scenario_id} {exc}", file=sys.stderr)
-                    if not args.keep_going:
-                        agent_process.terminate(timeout=5.0)
-                        server.terminate(graceful_line="stop")
-                        return 1
+                        records.append(
+                            ScenarioExecutionRecord(
+                                scenario_id=scenario.scenario_id,
+                                suite=scenario.suite,
+                                expectation=scenario.expectation,
+                                runnable_status=scenario.status,
+                                outcome=outcome,
+                                category=failure_category,
+                                detail=failure_detail,
+                                infra_failure=infra,
+                                turn_ids=[item.turn_id for item in result],
+                                bundle_dirs=[str(item.bundle_dir) for item in result],
+                                quality_review=quality_review.model_dump(by_alias=True) if quality_review is not None else None,
+                            )
+                        )
+                        if infra and infra_failures >= max_infra_failures:
+                            group_failed = True
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    category, detail = normalize_exception(exc)
+                    infra = is_infra_failure(category)
+                    if infra:
+                        infra_failures += 1
+                    print(f"[FAIL] {scenario.scenario_id} [{category}] {detail}", file=sys.stderr, flush=True)
+                    records.append(
+                        ScenarioExecutionRecord(
+                            scenario_id=scenario.scenario_id,
+                            suite=scenario.suite,
+                            expectation=scenario.expectation,
+                            runnable_status=scenario.status,
+                            outcome="infra_failure" if infra else "behavior_gap",
+                            category=category,
+                            detail=detail,
+                            infra_failure=infra,
+                            turn_ids=[],
+                            bundle_dirs=[],
+                            quality_review=None,
+                        )
+                    )
+                    if infra and infra_failures >= max_infra_failures:
+                        group_failed = True
+                        break
                 finally:
-                    agent_process.terminate(timeout=5.0)
+                    agent.terminate(timeout=5.0)
+            if group_failed:
+                break
         finally:
             server.terminate(graceful_line="stop")
             run_swap.sync_back()
             run_swap.restore()
             cleanup_root_eula()
 
-    if failures:
-        print("\nFailures:", file=sys.stderr)
-        for scenario_id, detail in failures:
-            print(f"- {scenario_id}: {detail}", file=sys.stderr)
-        return 1
-    return 0
+    return records, run_root, load_result
+
+
+def run_scenario(
+    *,
+    scenario: HeadlessScenario,
+    server: LineProcess,
+    known_actors: set[str],
+    dev_log_path: Path,
+    dev_log_offset: int,
+    debug_dir: Path,
+    timeout: float,
+) -> tuple[list[TurnRunResult], int]:
+    for actor in scenario.actors:
+        ensure_actor_spawned(server, actor, known_actors)
+    for command in scenario.setup_commands:
+        server.send_line(command)
+        time.sleep(0.2)
+
+    results: list[TurnRunResult] = []
+    current_offset = dev_log_offset
+    for turn_index, turn in enumerate(scenario.turns):
+        actor = scenario.actor(turn.actor_id)
+        log_status(
+            f"Scenario {scenario.scenario_id}: turn {turn_index + 1}/{len(scenario.turns)} "
+            f"as {actor.name}: {truncate_for_status(turn.message)}"
+        )
+        for command in turn.setup_commands_before:
+            server.send_line(command)
+            time.sleep(0.2)
+        normalized_message = normalize_message(turn.message)
+        current_offset = read_jsonl_offset(dev_log_path)
+        server.send_line(f"execute as {actor.name} run mina {normalized_message}")
+        accepted, current_offset = wait_for_dev_log_entry(
+            dev_log_path,
+            current_offset,
+            timeout,
+            lambda entry: (
+                entry.get("status") == "accepted"
+                and entry.get("player_name") == actor.name
+                and entry.get("user_message") == normalized_message
+            ),
+            "accepted turn",
+            "missing_accepted_turn",
+            progress_label=f"Scenario {scenario.scenario_id}: waiting for accepted turn {turn_index + 1}",
+        )
+        turn_id = str(accepted["turn_id"])
+        log_status(f"Scenario {scenario.scenario_id}: accepted turn {turn_index + 1} -> {turn_id}")
+        completed, current_offset = wait_for_dev_log_entry(
+            dev_log_path,
+            current_offset,
+            timeout,
+            lambda entry: entry.get("turn_id") == turn_id and entry.get("status") in {"completed", "failed"},
+            "completed turn",
+            "timeout",
+            progress_label=f"Scenario {scenario.scenario_id}: waiting for completed turn {turn_index + 1}",
+        )
+        bundle_dir = wait_for_bundle(debug_dir, turn_id, timeout)
+        if bundle_dir is None:
+            raise RuntimeError(f"missing_trace_bundle: no bundle for turn {turn_id}")
+        log_status(f"Scenario {scenario.scenario_id}: bundle ready for turn {turn_index + 1} -> {bundle_dir}")
+        enrich_capture(bundle_dir, scenario, turn_index)
+        final_payload = json.loads((bundle_dir / "response.final.json").read_text(encoding="utf-8"))
+        capture = json.loads((bundle_dir / "scenario.capture.json").read_text(encoding="utf-8"))
+        turn_result = TurnRunResult(
+            turn_id=turn_id,
+            actor_id=turn.actor_id,
+            message=normalized_message,
+            bundle_dir=bundle_dir,
+            final_status=str(final_payload.get("status") or "unknown"),
+            final_reply=str(final_payload.get("final_reply") or ""),
+            confirmation_expected=bool(final_payload.get("pending_confirmation_id")),
+            selected_capability_ids=list(capture.get("selected_capability_ids") or []),
+            started_at=accepted.get("started_at"),
+            ended_at=completed.get("ended_at"),
+        )
+        if turn.assertions_override is not None:
+            override_review = QualityReviewResult(status="skipped_disabled")
+            observed = ObservedScenarioResult(
+                final_status=turn_result.final_status,
+                selected_capability_ids=turn_result.selected_capability_ids,
+                confirmation_expected=turn_result.confirmation_expected,
+                final_reply=turn_result.final_reply,
+                duration_ms=duration_ms(turn_result.started_at, turn_result.ended_at),
+                quality_review=override_review,
+            )
+            category, detail = evaluate_assertions(turn.assertions_override, observed)
+            if category is not None:
+                raise RuntimeError(f"{category}: turn-level assertion failed for {scenario.scenario_id}: {detail}")
+        results.append(turn_result)
+    return results, current_offset
+
+
+def ensure_actor_spawned(server: LineProcess, actor: ActorSpec, known_actors: set[str]) -> None:
+    if actor.actor_id in known_actors:
+        return
+    log_status(f"Spawning fake player {actor.name} (role={actor.role})")
+    server.send_line(f"player {actor.name} spawn")
+    server.wait_for_substring(
+        f"{actor.name} joined the game",
+        30.0,
+        progress_label=f"Waiting for fake player {actor.name} to join",
+    )
+    for command in actor.spawn_commands:
+        server.send_line(command)
+        time.sleep(0.2)
+    known_actors.add(actor.actor_id)
+    log_status(f"Fake player {actor.name} ready")
+
+
+def build_observed_result(results: list[TurnRunResult], quality_review: QualityReviewResult | None) -> ObservedScenarioResult:
+    selected_capability_ids: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        for capability_id in result.selected_capability_ids:
+            if capability_id not in seen:
+                seen.add(capability_id)
+                selected_capability_ids.append(capability_id)
+    return ObservedScenarioResult(
+        final_status=results[-1].final_status,
+        selected_capability_ids=selected_capability_ids,
+        confirmation_expected=results[-1].confirmation_expected,
+        final_reply=results[-1].final_reply,
+        duration_ms=duration_ms(results[0].started_at, results[-1].ended_at),
+        quality_review=quality_review,
+    )
+
+
+def maybe_run_quality_review(repo_root: Path, scenario: HeadlessScenario, results: list[TurnRunResult]) -> QualityReviewResult:
+    if not scenario.quality_review.enabled:
+        return QualityReviewResult(status="skipped_disabled")
+    log_status(f"Scenario {scenario.scenario_id}: running quality review ({scenario.quality_review.judge})")
+    review_cmd = os.getenv("MINA_CODEX_REVIEW_CMD", "").strip()
+    if not review_cmd:
+        log_status(f"Scenario {scenario.scenario_id}: quality review skipped because MINA_CODEX_REVIEW_CMD is not configured")
+        return QualityReviewResult(status="skipped_unavailable", rationale="MINA_CODEX_REVIEW_CMD is not configured.")
+
+    payload = {
+        "scenario": scenario.model_dump(),
+        "turns": [
+            {
+                "turn_id": result.turn_id,
+                "actor_id": result.actor_id,
+                "message": result.message,
+                "final_reply": result.final_reply,
+                "selected_capability_ids": result.selected_capability_ids,
+                "bundle_dir": str(result.bundle_dir),
+            }
+            for result in results
+        ],
+        "final_reply": results[-1].final_reply,
+    }
+    try:
+        command = shlex.split(review_cmd)
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=float(os.getenv("MINA_CODEX_REVIEW_TIMEOUT_SECONDS", DEFAULT_CODEX_REVIEW_TIMEOUT)),
+        )
+        if completed.returncode != 0:
+            return QualityReviewResult(status="review_error", error=completed.stderr.strip() or completed.stdout.strip())
+        raw = json.loads(completed.stdout)
+        if isinstance(raw, dict) and "status" not in raw:
+            raw["status"] = "passed" if raw.get("pass") else "failed"
+        result = QualityReviewResult.model_validate(raw)
+        log_status(f"Scenario {scenario.scenario_id}: quality review result -> {result.status}")
+        return result
+    except Exception as exc:  # noqa: BLE001
+        return QualityReviewResult(status="review_error", error=str(exc))
+
+
+def classify_structural_failure(results: list[TurnRunResult]) -> tuple[str | None, str | None]:
+    for result in results:
+        events_path = result.bundle_dir / "events.jsonl"
+        for event in read_jsonl(events_path):
+            payload = event.get("payload") or {}
+            if event.get("event_type") == "capability_rejected" and payload.get("reason") == "unknown_capability":
+                return "unknown_capability_rejection", f"unknown capability selected in turn {result.turn_id}"
+        final_payload = json.loads((result.bundle_dir / "response.final.json").read_text(encoding="utf-8"))
+        if final_payload.get("reason") == "unknown_capability":
+            return "unknown_capability_rejection", f"unknown capability selected in turn {result.turn_id}"
+    if results[-1].final_status == "failed":
+        final_payload = json.loads((results[-1].bundle_dir / "response.final.json").read_text(encoding="utf-8"))
+        reason = final_payload.get("reason") or final_payload.get("error") or results[-1].final_reply
+        return "runtime_exception", f"final turn failed: {reason}"
+    return None, None
 
 
 def recent_turns(args: argparse.Namespace) -> int:
@@ -387,126 +782,44 @@ def promote_trace(args: argparse.Namespace) -> int:
     if bundle_dir is None:
         print(f"Could not resolve turn bundle for {args.turn_id}", file=sys.stderr)
         return 1
+
     capture_path = bundle_dir / "scenario.capture.json"
     if not capture_path.exists():
         print(f"Scenario capture missing: {capture_path}", file=sys.stderr)
         return 1
+
     capture = json.loads(capture_path.read_text(encoding="utf-8"))
-    scenario = dict(capture.get("scenario") or {})
+    raw_scenario = dict(capture.get("scenario") or {})
     suggested_assertions = ((capture.get("assertion_slots") or {}).get("suggested_assertions") or {})
-    scenario["assertions"] = suggested_assertions or scenario.get("assertions") or {}
-    scenario["scenario_id"] = args.scenario_id or scenario.get("scenario_id") or args.turn_id
-    scenario["world_template"] = args.world_template or scenario.get("world_template")
-    if not scenario.get("world_template"):
+    if should_seed_assertions_from_capture(raw_scenario) and isinstance(suggested_assertions, dict):
+        raw_scenario["assertions"] = suggested_assertions
+    raw_scenario["suite"] = args.suite
+    raw_scenario["expectation"] = "required" if args.suite == "functional" else "target_state"
+    raw_scenario["status"] = "runnable_now"
+    raw_scenario["quality_review"] = raw_scenario.get("quality_review") or {"enabled": False}
+    if args.world_template is not None:
+        raw_scenario["world_template"] = args.world_template
+    if not raw_scenario.get("world_template"):
         print("Promoted scenarios require --world-template when the capture has no world_template.", file=sys.stderr)
         return 1
+    if args.scenario_id is not None:
+        raw_scenario["scenario_id"] = args.scenario_id
+    scenario = HeadlessScenario.model_validate(raw_scenario)
 
-    output_dir = repo_root / Path(args.output_dir)
+    if args.output_dir is not None:
+        output_dir = repo_root / Path(args.output_dir)
+    elif args.suite == "functional":
+        output_dir = repo_root / DEFAULT_FUNCTIONAL_SCENARIO_DIR
+    else:
+        output_dir = repo_root / DEFAULT_REAL_SCENARIO_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{scenario['scenario_id']}.json"
+    output_path = output_dir / f"{scenario.scenario_id}.json"
     if output_path.exists() and not args.force:
         print(f"Refusing to overwrite existing scenario without --force: {output_path}", file=sys.stderr)
         return 1
-    output_path.write_text(json.dumps(scenario, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(scenario.model_dump(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(output_path)
     return 0
-
-
-def run_scenario(
-    *,
-    scenario: HeadlessScenario,
-    server: LineProcess,
-    dev_log_path: Path,
-    dev_log_offset: int,
-    debug_dir: Path,
-    timeout: float,
-) -> tuple[list[TurnRunResult], int]:
-    results: list[TurnRunResult] = []
-    current_offset = dev_log_offset
-    for turn_index, message in enumerate([scenario.message, *scenario.follow_up_messages]):
-        normalized_message = normalize_message(message)
-        current_offset = read_jsonl_offset(dev_log_path)
-        server.send_line(f"execute as {scenario.player_name} run mina {normalized_message}")
-        accepted, current_offset = wait_for_dev_log_entry(
-            dev_log_path,
-            current_offset,
-            timeout,
-            lambda entry: (
-                entry.get("status") == "accepted"
-                and entry.get("player_name") == scenario.player_name
-                and entry.get("user_message") == normalized_message
-            ),
-            "accepted turn",
-            "missing_accepted_turn",
-        )
-        turn_id = str(accepted["turn_id"])
-        completed, current_offset = wait_for_dev_log_entry(
-            dev_log_path,
-            current_offset,
-            timeout,
-            lambda entry: entry.get("turn_id") == turn_id and entry.get("status") in {"completed", "failed"},
-            "completed turn",
-            "timeout",
-        )
-        bundle_dir = wait_for_bundle(debug_dir, turn_id, timeout)
-        if bundle_dir is None:
-            raise RuntimeError(f"missing_trace_bundle: no bundle for turn {turn_id}")
-        enrich_capture(bundle_dir, scenario, turn_index)
-        final_payload = json.loads((bundle_dir / "response.final.json").read_text(encoding="utf-8"))
-        capture = json.loads((bundle_dir / "scenario.capture.json").read_text(encoding="utf-8"))
-        results.append(
-            TurnRunResult(
-                turn_id=turn_id,
-                message=normalized_message,
-                bundle_dir=bundle_dir,
-                final_status=str(final_payload.get("status") or "unknown"),
-                final_reply=str(final_payload.get("final_reply") or ""),
-                confirmation_expected=bool(final_payload.get("pending_confirmation_id")),
-                selected_capability_ids=list(capture.get("selected_capability_ids") or []),
-                started_at=accepted.get("started_at"),
-                ended_at=completed.get("ended_at"),
-            )
-        )
-    return results, current_offset
-
-
-def build_observed_result(results: list[TurnRunResult]) -> ObservedScenarioResult:
-    selected_capability_ids: list[str] = []
-    seen: set[str] = set()
-    for result in results:
-        for capability_id in result.selected_capability_ids:
-            if capability_id not in seen:
-                seen.add(capability_id)
-                selected_capability_ids.append(capability_id)
-    first_started = parse_iso8601(results[0].started_at)
-    last_ended = parse_iso8601(results[-1].ended_at)
-    duration_ms = None
-    if first_started is not None and last_ended is not None:
-        duration_ms = max(int((last_ended - first_started).total_seconds() * 1000), 0)
-    return ObservedScenarioResult(
-        final_status=results[-1].final_status,
-        selected_capability_ids=selected_capability_ids,
-        confirmation_expected=results[-1].confirmation_expected,
-        final_reply=results[-1].final_reply,
-        duration_ms=duration_ms,
-    )
-
-
-def classify_structural_failure(results: list[TurnRunResult]) -> tuple[str | None, str | None]:
-    for result in results:
-        events_path = result.bundle_dir / "events.jsonl"
-        for event in read_jsonl(events_path):
-            payload = event.get("payload") or {}
-            if event.get("event_type") == "capability_rejected" and payload.get("reason") == "unknown_capability":
-                return "unknown_capability_rejection", f"unknown capability selected in turn {result.turn_id}"
-        final_payload = json.loads((result.bundle_dir / "response.final.json").read_text(encoding="utf-8"))
-        if final_payload.get("reason") == "unknown_capability":
-            return "unknown_capability_rejection", f"unknown capability selected in turn {result.turn_id}"
-    if results[-1].final_status == "failed":
-        final_payload = json.loads((results[-1].bundle_dir / "response.final.json").read_text(encoding="utf-8"))
-        reason = final_payload.get("reason") or final_payload.get("error") or results[-1].final_reply
-        return "runtime_exception", f"final turn failed: {reason}"
-    return None, None
 
 
 def start_agent_process(*, repo_root: Path, mode: str, agent_data_dir: Path, port: int) -> LineProcess:
@@ -534,8 +847,14 @@ def start_agent_process(*, repo_root: Path, mode: str, agent_data_dir: Path, por
     return process
 
 
-def ensure_agent_ready(*, mode: str, host: str, port: int, timeout: float) -> None:
-    deadline = time.time() + timeout
+def should_seed_assertions_from_capture(raw_scenario: dict[str, Any]) -> bool:
+    return not {"suite", "actors", "turns"}.issubset(raw_scenario.keys())
+
+
+def ensure_agent_ready(*, mode: str, host: str, port: int, timeout: float, progress_label: str | None = None) -> None:
+    started = time.time()
+    deadline = started + timeout
+    next_heartbeat = started + DEFAULT_PROGRESS_HEARTBEAT
     last_error: Exception | None = None
     opener = build_opener(ProxyHandler({}))
     while time.time() < deadline:
@@ -547,8 +866,12 @@ def ensure_agent_ready(*, mode: str, host: str, port: int, timeout: float) -> No
             return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            if progress_label is not None and time.time() >= next_heartbeat:
+                detail = f" last error: {last_error}" if last_error is not None else ""
+                log_status(f"{progress_label}... {int(time.time() - started)}s elapsed / {int(timeout)}s timeout.{detail}")
+                next_heartbeat = time.time() + DEFAULT_PROGRESS_HEARTBEAT
             time.sleep(0.2)
-    raise RuntimeError(f"agent health check failed: {last_error}")
+    raise RuntimeError(f"startup_failure: agent health check failed: {last_error}")
 
 
 def wait_for_dev_log_entry(
@@ -558,24 +881,40 @@ def wait_for_dev_log_entry(
     predicate: Any,
     label: str,
     failure_category: str,
+    progress_label: str | None = None,
 ) -> tuple[dict[str, Any], int]:
-    deadline = time.time() + timeout
+    started = time.time()
+    deadline = started + timeout
     current_offset = offset
+    next_heartbeat = started + DEFAULT_PROGRESS_HEARTBEAT
     while time.time() < deadline:
-        entries, current_offset = read_new_jsonl_entries(path, current_offset)
-        for entry in entries:
+        matched = False
+        while True:
+            entry, next_offset = read_next_jsonl_entry(path, current_offset)
+            if entry is None:
+                break
+            current_offset = next_offset
+            matched = True
             if predicate(entry):
                 return entry, current_offset
+        if not matched and progress_label is not None and time.time() >= next_heartbeat:
+            log_status(f"{progress_label}... {int(time.time() - started)}s elapsed / {int(timeout)}s timeout")
+            next_heartbeat = time.time() + DEFAULT_PROGRESS_HEARTBEAT
         time.sleep(0.1)
     raise RuntimeError(f"{failure_category}: did not observe {label} in {path}")
 
 
 def wait_for_bundle(debug_dir: Path, turn_id: str, timeout: float) -> Path | None:
-    deadline = time.time() + timeout
+    started = time.time()
+    deadline = started + timeout
+    next_heartbeat = started + DEFAULT_PROGRESS_HEARTBEAT
     while time.time() < deadline:
         bundle_dir = resolve_turn_bundle(debug_dir, turn_id)
         if bundle_dir is not None and (bundle_dir / "scenario.capture.json").exists() and (bundle_dir / "response.final.json").exists():
             return bundle_dir
+        if time.time() >= next_heartbeat:
+            log_status(f"Waiting for debug bundle {turn_id}... {int(time.time() - started)}s elapsed / {int(timeout)}s timeout")
+            next_heartbeat = time.time() + DEFAULT_PROGRESS_HEARTBEAT
         time.sleep(0.1)
     return None
 
@@ -591,8 +930,28 @@ def enrich_capture(bundle_dir: Path, scenario: HeadlessScenario, turn_index: int
 def group_scenarios(scenarios: list[HeadlessScenario]) -> dict[str, list[HeadlessScenario]]:
     grouped: dict[str, list[HeadlessScenario]] = {}
     for scenario in scenarios:
-        grouped.setdefault(scenario.world_template, []).append(scenario)
+        grouped.setdefault(scenario_group_key(scenario), []).append(scenario)
     return grouped
+
+
+def scenario_group_key(scenario: HeadlessScenario) -> str:
+    role_key = ",".join(f"{actor.name}:{actor.role}:{int(actor.operator)}:{int(actor.experimental)}" for actor in scenario.actors)
+    feature_key = f"exp{int(scenario.feature_flags.enable_experimental)}_dyn{int(scenario.feature_flags.enable_dynamic_scripting)}"
+    return f"{scenario.world_template}__{feature_key}__{short_hash(role_key)}"
+
+
+def short_hash(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+
+
+def prepare_server_run_directory(
+    server_run_dir: Path,
+    world_template_root: Path,
+    world_template: str,
+    scenarios: list[HeadlessScenario],
+) -> None:
+    materialize_run_directory(world_template_root, world_template, server_run_dir)
+    write_mina_properties(server_run_dir, scenarios)
 
 
 def materialize_run_directory(world_template_root: Path, template_id: str, run_dir: Path) -> None:
@@ -626,6 +985,52 @@ def materialize_run_directory(world_template_root: Path, template_id: str, run_d
     base_server_properties = load_properties_file(seed_run_dir / "server.properties")
     base_server_properties.update({str(key): str(value) for key, value in (metadata.get("server_properties") or {}).items()})
     write_server_properties(run_dir / "server.properties", base_server_properties)
+
+
+def write_mina_properties(run_dir: Path, scenarios: list[HeadlessScenario]) -> None:
+    config_dir = run_dir / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    target = config_dir / "mina.properties"
+    lines = [
+        "# Mina headless suite config",
+        f"mina.enable_experimental={str(scenarios[0].feature_flags.enable_experimental).lower()}",
+        f"mina.enable_dynamic_scripting={str(scenarios[0].feature_flags.enable_dynamic_scripting).lower()}",
+    ]
+    for actor in merged_actors(scenarios):
+        if actor.role != "read_only":
+            lines.append(f"role.override.{offline_player_uuid(actor.name)}={actor.role}")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_ops_file(run_dir / "ops.json", merged_actors(scenarios))
+
+
+def merged_actors(scenarios: list[HeadlessScenario]) -> list[ActorSpec]:
+    merged: dict[str, ActorSpec] = {}
+    for scenario in scenarios:
+        for actor in scenario.actors:
+            merged.setdefault(actor.name, actor)
+    return list(merged.values())
+
+
+def write_ops_file(target: Path, actors: list[ActorSpec]) -> None:
+    ops = []
+    for actor in actors:
+        if actor.operator or actor.experimental:
+            ops.append(
+                {
+                    "uuid": offline_player_uuid(actor.name),
+                    "name": actor.name,
+                    "level": 4,
+                    "bypassesPlayerLimit": False,
+                }
+            )
+    target.write_text(json.dumps(ops, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def offline_player_uuid(name: str) -> str:
+    digest = bytearray(hashlib.md5(f"OfflinePlayer:{name}".encode("utf-8")).digest())
+    digest[6] = (digest[6] & 0x0F) | 0x30
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(digest)))
 
 
 def ensure_repo_root_eula(repo_root: Path) -> Any:
@@ -673,7 +1078,6 @@ def write_server_properties(target: Path, overrides: dict[str, Any]) -> None:
         "simulation-distance": "12",
         "spawn-protection": "0",
         "view-distance": "12",
-        "white-list": "false",
     }
     for key, value in overrides.items():
         properties[str(key)] = str(value)
@@ -695,17 +1099,79 @@ def load_properties_file(path: Path) -> dict[str, str]:
     return result
 
 
-def read_new_jsonl_entries(path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
+def write_real_reports(run_root: Path, records: list[ScenarioExecutionRecord], load_result: ScenarioLoadResult) -> None:
+    summary = {
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "counts": {
+            "passed": sum(1 for record in records if record.outcome == "passed"),
+            "infra_failures": sum(1 for record in records if record.outcome == "infra_failure"),
+            "behavior_gaps": sum(1 for record in records if record.outcome == "behavior_gap"),
+            "skipped_planned": sum(1 for record in records if record.outcome == "skipped_planned"),
+            "skipped_known_issue": sum(1 for record in records if record.outcome == "skipped_known_issue"),
+        },
+        "runnable_count": len(load_result.runnable),
+        "planned_count": len(load_result.planned),
+        "known_issue_count": len(load_result.known_issues),
+        "records": [asdict(record) for record in records],
+    }
+    (run_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    failing_cases = [asdict(record) for record in records if record.outcome in {"infra_failure", "behavior_gap"}]
+    (run_root / "failing_cases.json").write_text(json.dumps(failing_cases, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    target_state_gaps = [
+        asdict(record)
+        for record in records
+        if record.outcome == "behavior_gap" and record.expectation in {"target_state", "known_issue"}
+    ]
+    (run_root / "target_state_gaps.json").write_text(json.dumps(target_state_gaps, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    lines = [
+        "# Real Suite Scorecard",
+        "",
+        f"- Passed: {summary['counts']['passed']}",
+        f"- Infra failures: {summary['counts']['infra_failures']}",
+        f"- Behavior gaps: {summary['counts']['behavior_gaps']}",
+        f"- Skipped planned: {summary['counts']['skipped_planned']}",
+        f"- Skipped known issues: {summary['counts']['skipped_known_issue']}",
+        "",
+        "## Infra Failures",
+    ]
+    infra = [record for record in records if record.outcome == "infra_failure"]
+    if infra:
+        lines.extend([f"- {record.scenario_id}: {record.category}: {record.detail}" for record in infra])
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Required Failures"])
+    required_failures = [record for record in records if record.outcome == "behavior_gap" and record.expectation == "required"]
+    if required_failures:
+        lines.extend([f"- {record.scenario_id}: {record.category}: {record.detail}" for record in required_failures])
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Target-State Gaps"])
+    if target_state_gaps:
+        lines.extend([f"- {record['scenario_id']}: {record['category']}: {record['detail']}" for record in target_state_gaps])
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Known Issues Still Reproducing"])
+    known_issue_failures = [record for record in records if record.outcome == "behavior_gap" and record.expectation == "known_issue"]
+    if known_issue_failures:
+        lines.extend([f"- {record.scenario_id}: {record.category}: {record.detail}" for record in known_issue_failures])
+    else:
+        lines.append("- none")
+    (run_root / "scorecard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_next_jsonl_entry(path: Path, offset: int) -> tuple[dict[str, Any] | None, int]:
     if not path.exists():
-        return [], offset
+        return None, offset
     with path.open("r", encoding="utf-8") as handle:
         handle.seek(offset)
-        chunk = handle.read()
+        line = handle.readline()
         new_offset = handle.tell()
-    if not chunk:
-        return [], new_offset
-    entries = [json.loads(line) for line in chunk.splitlines() if line.strip()]
-    return entries, new_offset
+    if not line.strip():
+        return None, offset
+    return json.loads(line), new_offset
 
 
 def read_jsonl_offset(path: Path) -> int:
@@ -724,6 +1190,21 @@ def normalize_message(message: str) -> str:
     if "\n" in message or "\r" in message:
         return " ".join(part for part in message.splitlines() if part.strip())
     return message
+
+
+def truncate_for_status(message: str, limit: int = 64) -> str:
+    normalized = normalize_message(message)
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1] + "..."
+
+
+def duration_ms(started_at: str | None, ended_at: str | None) -> int | None:
+    start = parse_iso8601(started_at)
+    end = parse_iso8601(ended_at)
+    if start is None or end is None:
+        return None
+    return max(int((end - start).total_seconds() * 1000), 0)
 
 
 def find_free_port() -> int:
@@ -745,6 +1226,54 @@ def parse_iso8601(value: str | None) -> datetime | None:
         return datetime.fromisoformat(normalized)
     except ValueError:
         return None
+
+
+def normalize_exception(exc: Exception) -> tuple[str, str]:
+    message = str(exc)
+    if ": " in message:
+        category, detail = message.split(": ", 1)
+        if category in INFRA_FAILURE_CATEGORIES or category.endswith("_failure") or category in {
+            "unknown_capability_rejection",
+            "reply_assertion_failure",
+            "missing_required_capability",
+            "quality_review_failure",
+            "runtime_exception",
+        }:
+            return category, detail
+    return "runtime_exception", message
+
+
+def log_status(message: str) -> None:
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{stamp}] {message}", flush=True)
+
+
+def suite_counts(records: list[ScenarioExecutionRecord]) -> dict[str, int]:
+    return {
+        "passed": sum(1 for record in records if record.outcome == "passed"),
+        "infra_failures": sum(1 for record in records if record.outcome == "infra_failure"),
+        "behavior_gaps": sum(1 for record in records if record.outcome == "behavior_gap"),
+        "skipped_planned": sum(1 for record in records if record.outcome == "skipped_planned"),
+        "skipped_known_issue": sum(1 for record in records if record.outcome == "skipped_known_issue"),
+    }
+
+
+def print_suite_summary(suite: str, records: list[ScenarioExecutionRecord], *, run_root: Path | None = None) -> None:
+    counts = suite_counts(records)
+    print(
+        (
+            f"{suite} summary: "
+            f"passed={counts['passed']} "
+            f"infra_failures={counts['infra_failures']} "
+            f"behavior_gaps={counts['behavior_gaps']} "
+            f"skipped_planned={counts['skipped_planned']} "
+            f"skipped_known_issue={counts['skipped_known_issue']}"
+        ),
+        flush=True,
+    )
+    if run_root is not None and suite == "real":
+        print(f"real reports: {run_root / 'scorecard.md'}", flush=True)
+        print(f"real target-state gaps: {run_root / 'target_state_gaps.json'}", flush=True)
 
 
 def find_repo_root(start: Path) -> Path:

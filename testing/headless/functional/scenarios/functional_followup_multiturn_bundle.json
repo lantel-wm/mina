@@ -1,0 +1,34 @@
+{
+  "suite": "functional",
+  "scenario_id": "functional_followup_multiturn_bundle",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "required",
+  "actors": [
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "message": "Mina，先记住我想去找村庄。"
+    },
+    {
+      "actor_id": "player",
+      "message": "刚才我想做什么来着？"
+    }
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_reply_substrings": [
+      "stub-ok"
+    ],
+    "max_duration_ms": 120000
+  }
+}

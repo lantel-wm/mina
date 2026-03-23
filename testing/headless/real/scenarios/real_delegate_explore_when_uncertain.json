@@ -1,0 +1,19 @@
+{
+  "suite": "real",
+  "scenario_id": "real_delegate_explore_when_uncertain",
+  "world_template": "cave_underground",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我现在这附近到底有什么线索？你先自己理一下。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["agent.explore.delegate"],
+    "max_duration_ms": 120000
+  }
+}

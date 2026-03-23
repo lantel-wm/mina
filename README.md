@@ -91,33 +91,47 @@ Install the editable Python package once:
 ./.venv/bin/python -m pip install -e agent_service
 ```
 
-Run the default real-model scenario set:
+Run the deterministic functional suite:
 
 ```bash
-./.venv/bin/python -m mina_agent.dev.cli run-headless
+./.venv/bin/python -m mina_agent.dev.cli run-functional
 ```
 
-Run the included smoke scenario against the local stub agent:
+Run the full real-model target-state suite:
 
 ```bash
-./.venv/bin/python -m mina_agent.dev.cli run-headless --agent-mode stub --scenario-id companion_smoke
+./.venv/bin/python -m mina_agent.dev.cli run-real
 ```
 
-Headless outputs are stored under `tmp/headless/<timestamp>/`. Each scenario run keeps:
+Run the real suite in strict mode so any behavior gap returns non-zero:
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli run-real --strict-real
+```
+
+Run the included functional smoke scenario against the local stub agent:
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli run-functional --scenario-id functional_stub_companion_smoke
+```
+
+Headless outputs are stored under `tmp/headless/functional/<timestamp>/` or `tmp/headless/real/<timestamp>/`. Each scenario run keeps:
 
 - an isolated Fabric run dir
 - an isolated Python `agent_data/` directory
 - Java-side turn logs under `<server-run-dir>/mina-dev/turns.jsonl`
 - Python-side debug bundles under `<scenario-run-dir>/agent_data/debug/turns/...`
 
+Real-suite runs also emit `summary.json`, `failing_cases.json`, `target_state_gaps.json`, and `scorecard.md` at the run root.
+
 Useful developer commands:
 
 ```bash
 ./.venv/bin/python -m mina_agent.dev.cli recent-turns --limit 10
-./.venv/bin/python -m mina_agent.dev.cli promote-trace --turn-id <turn_id> --scenario-id <new_case> --world-template default
+./.venv/bin/python -m mina_agent.dev.cli promote-trace --suite real --turn-id <turn_id> --scenario-id <new_case> --world-template overworld_day_spawn
 ```
 
-Scenario files live under `testing/headless/scenarios/`, and world template metadata lives under `testing/headless/world_templates/`.
+Scenario files live under `testing/headless/functional/scenarios/` and `testing/headless/real/scenarios/`. World template metadata lives under `testing/headless/world_templates/`.
 
 ## Local knowledge seed
 

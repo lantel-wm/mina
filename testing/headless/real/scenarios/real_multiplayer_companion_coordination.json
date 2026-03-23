@@ -1,0 +1,17 @@
+{
+  "suite": "real",
+  "scenario_id": "real_multiplayer_companion_coordination",
+  "world_template": "village_social",
+  "status": "planned",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"},
+    {"actor_id": "friend", "name": "Alex", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我们俩现在更适合先做什么？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

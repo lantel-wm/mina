@@ -1,0 +1,25 @@
+{
+  "suite": "real",
+  "scenario_id": "real_low_health_night_guidance",
+  "world_template": "overworld_night_danger",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "quality_review": {
+    "enabled": true,
+    "judge": "codex",
+    "rubric_id": "companion_low_health_guidance"
+  },
+  "setup_commands": ["time set night"],
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我有点慌，晚上这样安全吗？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

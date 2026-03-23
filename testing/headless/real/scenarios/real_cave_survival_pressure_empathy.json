@@ -1,0 +1,23 @@
+{
+  "suite": "real",
+  "scenario_id": "real_cave_survival_pressure_empathy",
+  "world_template": "cave_underground",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "quality_review": {
+    "enabled": true,
+    "judge": "codex",
+    "rubric_id": "companion_pressure_empathy"
+  },
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我在洞里有点压抑，你先陪我稳一下。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "max_duration_ms": 120000
+  }
+}

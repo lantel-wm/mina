@@ -1,0 +1,20 @@
+{
+  "suite": "real",
+  "scenario_id": "real_home_base_multiturn_planning",
+  "world_template": "home_base_storage",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我回到家里了，先帮我理一个简短顺序。"},
+    {"actor_id": "player", "message": "那第二步通常接什么？"},
+    {"actor_id": "player", "message": "最后再提醒我一下重点。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "max_duration_ms": 240000
+  }
+}

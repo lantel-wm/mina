@@ -24,17 +24,15 @@ class HeadlessSmokeTest(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "mina_agent.dev.cli",
-                    "run-headless",
-                    "--agent-mode",
-                    "stub",
+                    "run-functional",
                     "--scenario-dir",
-                    "testing/headless/scenarios",
+                    "testing/headless/functional/scenarios",
                     "--world-template-dir",
                     "testing/headless/world_templates",
                     "--output-root",
                     tmpdir,
                     "--scenario-id",
-                    "companion_smoke",
+                    "functional_stub_companion_smoke",
                 ],
                 cwd=repo_root,
                 env=env,
@@ -44,7 +42,7 @@ class HeadlessSmokeTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
-            self.assertIn("[PASS] companion_smoke", result.stdout)
+            self.assertIn("[PASS] functional_stub_companion_smoke", result.stdout)
 
 
 if __name__ == "__main__":

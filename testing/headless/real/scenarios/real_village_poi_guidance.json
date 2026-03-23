@@ -1,0 +1,20 @@
+{
+  "suite": "real",
+  "scenario_id": "real_village_poi_guidance",
+  "world_template": "village_social",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，附近有什么值得去的地方吗？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["world.poi.read"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

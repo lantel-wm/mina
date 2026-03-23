@@ -1,0 +1,21 @@
+{
+  "suite": "real",
+  "scenario_id": "real_confirmation_modify_intent",
+  "world_template": "experimental_sandbox_lab",
+  "status": "planned",
+  "expectation": "target_state",
+  "feature_flags": {
+    "enable_experimental": true,
+    "enable_dynamic_scripting": true
+  },
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "experimental", "experimental": true}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，替我跑实验脚本，但先确认。"},
+    {"actor_id": "player", "message": "可以，不过把目标改成更小一点。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

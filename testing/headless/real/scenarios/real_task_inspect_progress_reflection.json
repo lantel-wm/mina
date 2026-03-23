@@ -1,0 +1,16 @@
+{
+  "suite": "real",
+  "scenario_id": "real_task_inspect_progress_reflection",
+  "world_template": "home_base_storage",
+  "status": "planned",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我们现在这件事进行到哪了？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

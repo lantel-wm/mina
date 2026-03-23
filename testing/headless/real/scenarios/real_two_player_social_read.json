@@ -1,0 +1,20 @@
+{
+  "suite": "real",
+  "scenario_id": "real_two_player_social_read",
+  "world_template": "village_social",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"},
+    {"actor_id": "friend", "name": "Alex", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，附近除了我还有谁？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["world.social.read"],
+    "max_duration_ms": 120000
+  }
+}

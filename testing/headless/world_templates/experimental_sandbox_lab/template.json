@@ -1,0 +1,14 @@
+{
+  "server_properties": {
+    "difficulty": "normal",
+    "gamemode": "creative",
+    "level-name": "world",
+    "level-seed": "-2032795982907864146",
+    "motd": "mina experimental sandbox lab",
+    "online-mode": "false",
+    "pause-when-empty-seconds": "0",
+    "simulation-distance": "12",
+    "spawn-protection": "0",
+    "view-distance": "12"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "suite": "real",
+  "scenario_id": "real_memory_search_preference_recall",
+  "world_template": "home_base_storage",
+  "status": "planned",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "记住我更喜欢轻松一点的节奏。"},
+    {"actor_id": "player", "message": "你还记得我刚才偏好吗？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "suite": "real",
+  "scenario_id": "real_companion_greeting_day",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，跟我打个招呼，并自然地陪我一句。"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

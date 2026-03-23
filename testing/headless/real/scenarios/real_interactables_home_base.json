@@ -1,0 +1,19 @@
+{
+  "suite": "real",
+  "scenario_id": "real_interactables_home_base",
+  "world_template": "home_base_storage",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我身边有哪些能用的设施？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

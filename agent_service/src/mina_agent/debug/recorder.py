@@ -498,13 +498,40 @@ class FileDebugRecorder(DebugRecorder):
         if isinstance(final_response, dict):
             confirmation_expected = bool(final_response.get("pending_confirmation_id"))
 
+        player_name = ((user_input.get("player") or {}).get("name")) or "Steve"
         scenario = {
+            "suite": "real",
             "scenario_id": turn.get("turn_id"),
             "world_template": None,
-            "player_name": ((user_input.get("player") or {}).get("name")),
+            "status": "runnable_now",
+            "expectation": "target_state",
+            "feature_flags": {
+                "enable_experimental": False,
+                "enable_dynamic_scripting": False,
+            },
+            "actors": [
+                {
+                    "actor_id": "player",
+                    "name": player_name,
+                    "role": "read_only",
+                    "operator": False,
+                    "experimental": False,
+                    "spawn_commands": [],
+                }
+            ],
+            "turns": [
+                {
+                    "actor_id": "player",
+                    "message": user_input.get("user_message"),
+                    "setup_commands_before": [],
+                }
+            ],
+            "quality_review": {
+                "enabled": False,
+                "judge": "codex",
+                "rubric_id": None,
+            },
             "setup_commands": [],
-            "message": user_input.get("user_message"),
-            "follow_up_messages": [],
             "assertions": {
                 "expected_final_status": turn.get("status") if turn.get("status") in {"completed", "failed"} else None,
                 "forbidden_statuses": [],

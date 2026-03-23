@@ -1,59 +1,64 @@
 # Mina Headless Testing Workflow
 
-## Overview
+## 概述
 
-Mina now supports a headless `server-in-loop` testing workflow:
+Mina 的 headless 测试现在明确分成两条线：
 
-- no GUI Minecraft client is required
-- the Fabric server still runs for real
-- Carpet fake players are used as the automation actors
-- Mina is triggered via `execute as <player> run mina <message>`
-- Java-side turn logs and Python-side debug bundles are produced automatically
+- `functional`：确定性工程测试，硬门禁，任何失败都算回归
+- `real`：真实模型目标状态评估，统一使用真实 LLM，全量跑 `real` 场景，允许部分行为失败，但不允许基础设施失败
 
-This workflow is intended to replace the old manual loop of:
+两条线都使用同一套 server-in-loop 机制：
 
-1. start the Fabric server manually
-2. start the Python agent manually
-3. join with a real client
-4. type `/mina ...`
-5. manually hunt for the right debug trace
+- 真实 Fabric server 启动
+- 用 Carpet fake player 代替 GUI 客户端
+- 通过 `execute as <player> run mina <message>` 触发 Mina
+- 自动生成 Java turn log 和 Python debug bundle
 
-## One-Time Setup
+这套流程的目标是替代手动开游戏、手动输入 `/mina`、手动定位 trace 的旧测试方式。
 
-Run from the repo root [mina](/Users/zhaozhiyu/Projects/mina):
+## 一次性准备
+
+在仓库根目录 [mina](/Users/zhaozhiyu/Projects/mina) 下执行：
 
 ```bash
 cd /Users/zhaozhiyu/Projects/mina
 ./.venv/bin/python -m pip install -e agent_service
 ```
 
-Recommended invocation style:
+推荐统一使用：
 
 ```bash
 PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli ...
 ```
 
-If you have already reinstalled the editable package, you can also use:
+如果已经通过 editable install 安装过，也可以直接用：
 
 ```bash
 ./.venv/bin/mina-dev ...
 ```
 
-## Important Paths
+## 目录结构
 
-Scenario files:
+场景目录：
 
-- [testing/headless/scenarios](/Users/zhaozhiyu/Projects/mina/testing/headless/scenarios)
+- functional: [testing/headless/functional/scenarios](/Users/zhaozhiyu/Projects/mina/testing/headless/functional/scenarios)
+- real: [testing/headless/real/scenarios](/Users/zhaozhiyu/Projects/mina/testing/headless/real/scenarios)
 
-World template metadata:
+世界模板目录：
 
 - [testing/headless/world_templates](/Users/zhaozhiyu/Projects/mina/testing/headless/world_templates)
 
-Java-side dev turn log during a run:
+默认输出目录：
 
-- `run/mina-dev/turns.jsonl`
+- functional: `tmp/headless/functional/<timestamp>/`
+- real: `tmp/headless/real/<timestamp>/`
 
-Python-side debug bundle during a scenario run:
+Java 侧 turn log：
+
+- 运行期间写到活动 `run/mina-dev/turns.jsonl`
+- 场景结束后同步到本次输出目录里的 `server/mina-dev/turns.jsonl`
+
+Python 侧 debug bundle：
 
 - `<scenario-output>/agent_data/debug/index.jsonl`
 - `<scenario-output>/agent_data/debug/turns/<date>/<turn_dir>/request.start.json`
@@ -61,15 +66,51 @@ Python-side debug bundle during a scenario run:
 - `<scenario-output>/agent_data/debug/turns/<date>/<turn_dir>/response.final.json`
 - `<scenario-output>/agent_data/debug/turns/<date>/<turn_dir>/scenario.capture.json`
 
-Default headless output root:
+不要把 `--output-root` 放到 `run/` 目录下面。
 
-- `tmp/headless/<timestamp>/`
+## 运行 Functional Suite
 
-Do not place `--output-root` inside `run/`.
+`functional` 只跑功能性场景，默认用 stub agent，适合验证：
 
-## Running Real-Model Headless Regression
+- server 启动与 fake player 触发链路
+- Java turn log 写入
+- Python debug bundle 生成
+- 多 turn capture
+- headless runner 基础流程
 
-Set the model provider variables first:
+直接运行：
+
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-functional
+```
+
+只跑某个功能场景：
+
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-functional \
+  --scenario-id functional_stub_companion_smoke
+```
+
+常用参数：
+
+- `--scenario-dir`：默认 `testing/headless/functional/scenarios`
+- `--world-template-dir`：默认 `testing/headless/world_templates`
+- `--output-root`：默认 `tmp/headless/functional`
+- `--agent-mode`：默认 `stub`，也可以显式改成 `real`
+- `--agent-port`：默认自动选择空闲端口
+- `--server-ready-timeout`
+- `--agent-ready-timeout`
+- `--turn-timeout`
+
+退出码语义：
+
+- 只要有任何 `infra_failure` 或 `behavior_gap`，`run-functional` 就返回非零
+
+## 运行 Real Suite
+
+`real` 套件统一使用真实模型，不再分层。它描述的是 Mina 的目标状态，而不是当前硬门禁。
+
+先设置模型环境变量：
 
 ```bash
 cd /Users/zhaozhiyu/Projects/mina
@@ -78,65 +119,78 @@ export MINA_BASE_URL='https://api.deepseek.com/v1'
 export MINA_MODEL='deepseek-chat'
 ```
 
-Run the default scenario set:
+运行整套 `real` 场景：
 
 ```bash
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-headless
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real
 ```
 
-Run selected scenarios only:
+只跑某一个真实场景：
 
 ```bash
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-headless \
-  --scenario-id companion_smoke
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
+  --scenario-id real_companion_greeting_day
 ```
 
-Useful `run-headless` options:
-
-- `--scenario-dir`: defaults to `testing/headless/scenarios`
-- `--world-template-dir`: defaults to `testing/headless/world_templates`
-- `--output-root`: defaults to `tmp/headless`
-- `--agent-port`: defaults to auto-selecting a free local port
-- `--server-ready-timeout`: server boot timeout
-- `--agent-ready-timeout`: agent boot timeout
-- `--turn-timeout`: per-turn timeout
-- `--keep-going`: continue after a scenario failure
-
-## Running the Stub Smoke Path
-
-This is the fastest end-to-end validation path. It verifies:
-
-- server boot
-- fake player spawn
-- Mina submission
-- Java dev turn logging
-- Python debug bundle generation
-
-It does not validate real-model quality.
-
-Run the stub workflow directly:
+已知问题场景默认不会执行；如果要一起跑：
 
 ```bash
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-headless \
-  --agent-mode stub \
-  --scenario-id companion_smoke
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
+  --include-known-issues
 ```
 
-Run the gated smoke test:
+如果希望任何行为缺口都返回非零：
 
 ```bash
-MINA_RUN_HEADLESS_SMOKE=1 ./.venv/bin/python -m pytest agent_service/tests/test_headless_smoke.py -q
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
+  --strict-real
 ```
 
-## Inspecting Recent Turns
+常用参数：
 
-Show recent turns from the default debug directory:
+- `--scenario-dir`：默认 `testing/headless/real/scenarios`
+- `--world-template-dir`：默认 `testing/headless/world_templates`
+- `--output-root`：默认 `tmp/headless/real`
+- `--agent-port`：默认自动选择空闲端口
+- `--server-ready-timeout`
+- `--agent-ready-timeout`
+- `--turn-timeout`
+- `--include-known-issues`
+- `--strict-real`
+- `--max-infra-failures`
+
+退出码语义：
+
+- 出现 `startup_failure`、`missing_accepted_turn`、`timeout`、`missing_trace_bundle` 等基础设施失败时，返回非零
+- `expectation=required` 的 `real` 场景失败时，返回非零
+- `expectation=target_state` 或 `expectation=known_issue` 的行为缺口，默认只记入报告，不让整套命令失败
+- 传 `--strict-real` 后，任何行为缺口都会返回非零
+
+## Real Suite 报告产物
+
+`run-real` 每次运行都会在输出根目录生成：
+
+- `summary.json`
+- `failing_cases.json`
+- `target_state_gaps.json`
+- `scorecard.md`
+
+其中：
+
+- `summary.json`：完整记录、计数、planned/known issue 数量
+- `failing_cases.json`：所有 infra failure 和 behavior gap
+- `target_state_gaps.json`：只保留 `target_state`/`known_issue` 的行为缺口
+- `scorecard.md`：按 `Infra Failures`、`Required Failures`、`Target-State Gaps`、`Known Issues Still Reproducing` 汇总
+
+## 查看最近 Turn
+
+查看默认 debug 目录里的最近 turn：
 
 ```bash
 PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli recent-turns --limit 10
 ```
 
-Filter by player:
+按玩家过滤：
 
 ```bash
 PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli recent-turns \
@@ -144,53 +198,102 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli recent-tur
   --limit 20
 ```
 
-Inspect a specific headless run by pointing to that scenario's `agent_data/debug`:
+按 session 过滤：
 
 ```bash
 PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli recent-turns \
-  --debug-dir /Users/zhaozhiyu/Projects/mina/tmp/headless/20260323_120000/01_default/companion_smoke/agent_data/debug \
+  --session <session_ref> \
   --limit 20
 ```
 
-## Promoting a Trace into a Regression Scenario
+查看某次 headless run 的 turn，需要显式指向那次输出目录里的 `agent_data/debug`：
 
-The normal workflow is:
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli recent-turns \
+  --debug-dir /Users/zhaozhiyu/Projects/mina/tmp/headless/functional/20260323_120000/01_overworld_day_spawn__exp0_dyn0__xxxxxxx/functional_stub_companion_smoke/agent_data/debug \
+  --limit 20
+```
 
-1. reproduce a bad turn
-2. get the `turn_id`
-3. locate the matching bundle
-4. promote that bundle into a checked-in scenario
+## 从 Trace 提升成场景
 
-Example:
+`promote-trace` 用来把某个 turn 的 bundle 直接转成 checked-in 场景文件。
+
+典型流程：
+
+1. 跑出一个问题 turn
+2. 记下 `turn_id`
+3. 用 `recent-turns` 或输出目录定位 `debug_dir`
+4. 运行 `promote-trace`
+5. 按需要手动收紧 assertions
+6. 重新执行该场景
+
+示例：
 
 ```bash
 PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-trace \
   --debug-dir /Users/zhaozhiyu/Projects/mina/agent_service/data/debug \
   --turn-id 170fbc82-b0fc-484c-9f05-e00a1f099916 \
-  --scenario-id my_new_case \
-  --world-template default
+  --suite real \
+  --scenario-id promoted_case \
+  --world-template overworld_day_spawn
 ```
 
-This writes a scenario file under [testing/headless/scenarios](/Users/zhaozhiyu/Projects/mina/testing/headless/scenarios).
-
-If the target file already exists, add:
+如果目标文件已存在，追加：
 
 ```bash
 --force
 ```
 
-## Scenario File Format
+输出目录规则：
 
-Each scenario is a JSON file with this shape:
+- `--suite functional` 默认写到 [testing/headless/functional/scenarios](/Users/zhaozhiyu/Projects/mina/testing/headless/functional/scenarios)
+- `--suite real` 默认写到 [testing/headless/real/scenarios](/Users/zhaozhiyu/Projects/mina/testing/headless/real/scenarios)
+- 也可以显式传 `--output-dir`
+
+提升规则：
+
+- legacy/manual trace 会自动升级到新 schema
+- 如果 capture 里只有旧结构，CLI 会用 `assertion_slots.suggested_assertions` 预填新场景的 `assertions`
+- 如果 capture 里没有 `world_template`，必须手动传 `--world-template`
+
+## 场景 Schema
+
+当前 headless 场景统一使用这套结构：
 
 ```json
 {
-  "scenario_id": "my_case",
-  "world_template": "default",
-  "player_name": "Steve",
-  "setup_commands": ["time set day"],
-  "message": "Mina，跟我说一句话。",
-  "follow_up_messages": [],
+  "suite": "real",
+  "scenario_id": "real_companion_greeting_day",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "feature_flags": {
+    "enable_experimental": false,
+    "enable_dynamic_scripting": false
+  },
+  "actors": [
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only",
+      "operator": false,
+      "experimental": false,
+      "spawn_commands": []
+    }
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "message": "Mina，跟我打个招呼。",
+      "setup_commands_before": []
+    }
+  ],
+  "quality_review": {
+    "enabled": false,
+    "judge": "codex",
+    "rubric_id": null
+  },
+  "setup_commands": [],
   "assertions": {
     "expected_final_status": "completed",
     "forbidden_statuses": ["failed"],
@@ -204,114 +307,152 @@ Each scenario is a JSON file with this shape:
 }
 ```
 
-Field meanings:
+字段含义：
 
-- `scenario_id`: stable scenario name
-- `world_template`: world template id
-- `player_name`: fake player name used by Carpet
-- `setup_commands`: commands to run before Mina is called
-- `message`: first Mina message
-- `follow_up_messages`: optional extra turns in the same scenario
-- `assertions`: pass/fail policy
+- `suite`：`functional` 或 `real`
+- `status`：`runnable_now` 或 `planned`
+- `expectation`：
+  - `required`：失败应被视为硬失败
+  - `target_state`：目标状态，允许暂时失败
+  - `known_issue`：已知问题，默认跳过，只有 `--include-known-issues` 才会跑
+- `feature_flags`：控制实验能力面
+- `actors`：多人场景/权限场景配置
+- `turns`：场景内的多 turn 对话
+- `quality_review`：是否启用外部 Codex 评审
+- `setup_commands`：场景级预设命令
+- `assertions`：结构、能力、弱文本、时长约束
 
-## Assertion Semantics
+## Assertion 语义
 
-- `expected_final_status`: required final status, usually `completed`
-- `forbidden_statuses`: final statuses that should fail the scenario
-- `required_capability_ids`: capability ids that must be used
-- `forbidden_capability_ids`: capability ids that must not be used
-- `confirmation_expected`: whether Mina should end in confirmation mode
-- `required_reply_substrings`: weak positive string checks on the final reply
-- `forbidden_reply_substrings`: weak negative string checks on the final reply
-- `max_duration_ms`: upper bound on total scenario duration
+- `expected_final_status`：通常为 `completed`
+- `forbidden_statuses`：禁止的最终状态
+- `required_capability_ids`：必须出现的 capability id
+- `forbidden_capability_ids`：不允许出现的 capability id
+- `confirmation_expected`：是否应该进入确认态
+- `required_reply_substrings`：最终回复必须包含的片段
+- `forbidden_reply_substrings`：最终回复不应包含的片段
+- `max_duration_ms`：总耗时上限
 
-The workflow intentionally does not do exact full-text reply snapshots for real-model runs.
+`real` 套件故意不做整段回复快照对比，而是采用结构断言、能力断言和弱文本断言。
 
-## World Templates
+## 质量评审
 
-Each world template must at least include a `template.json`.
+部分 `real` 场景可以启用 Codex 质量评审：
 
-Current example:
-
-- [testing/headless/world_templates/default/template.json](/Users/zhaozhiyu/Projects/mina/testing/headless/world_templates/default/template.json)
-
-The runner materializes an isolated server run directory from the template, then executes the scenario against that isolated state.
-
-## What the Runner Actually Does
-
-For each `world_template` group:
-
-1. prepare an isolated server run directory under the current output root
-2. temporarily swap that isolated run directory into the active `run/`
-3. boot the Fabric server with `./gradlew runServer --no-daemon`
-4. start the Python agent or local stub agent on a free local port
-5. spawn the fake player
-6. run setup commands
-7. submit Mina turns through `execute as <player> run mina <message>`
-8. wait for:
-   - Java-side `accepted` and `completed` or `failed` events
-   - Python-side turn bundle creation
-9. copy the resulting server-side artifacts back into the isolated output directory
-10. restore the original `run/`
-
-## How to Debug Failures
-
-Look here first:
-
-1. runner terminal output
-2. `<headless-output>/<group>/<scenario>/server/mina-dev/turns.jsonl`
-3. `<headless-output>/<group>/<scenario>/agent_data/debug/index.jsonl`
-4. turn bundle `response.final.json`
-5. turn bundle `scenario.capture.json`
-6. `<headless-output>/<group>/<scenario>/server/logs/latest.log`
-
-If a scenario fails, the runner prints the exact `turn_id` and bundle path.
-
-## Common Failure Categories
-
-- `startup_failure`: server or agent did not start correctly
-- `missing_accepted_turn`: Mina submission happened but Java-side accepted log was not observed
-- `timeout`: the turn or scenario exceeded the configured timeout
-- `missing_trace_bundle`: Java-side turn completed but Python bundle was not found
-- `runtime_exception`: Mina finished in a failed state
-- `unknown_capability_rejection`: model selected an invalid capability id
-- `missing_required_capability`: required capability assertion failed
-- `reply_assertion_failure`: weak reply text assertion failed
-
-## Important Operational Notes
-
-- Do not run another manual `./gradlew runServer` at the same time as headless testing.
-- The runner temporarily takes over the active `run/` directory, then restores it.
-- Local agent health checks explicitly bypass HTTP proxies, because proxy interception breaks localhost readiness checks.
-- `--agent-port` normally should not be set manually.
-- `recent-turns` defaults to the repo's default debug directory; for headless outputs under `tmp/headless/...`, pass `--debug-dir` explicitly.
-- Stub mode is only for workflow validation, not answer-quality validation.
-- In offline mode, Carpet fake-player spawn may still log Mojang profile lookup warnings or timeouts before continuing.
-
-## Recommended Day-to-Day Loops
-
-Fast loop while building infrastructure:
-
-```bash
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-headless \
-  --agent-mode stub \
-  --scenario-id companion_smoke
+```json
+"quality_review": {
+  "enabled": true,
+  "judge": "codex",
+  "rubric_id": "companion_quality_golden"
+}
 ```
 
-Real-model loop while iterating on agent behavior:
+当前 runner 通过环境变量 `MINA_CODEX_REVIEW_CMD` 调用外部评审命令。未配置时，这类场景会记录为 `skipped_unavailable`，不会导致整套 `real` 失败。
+
+## 世界模板
+
+当前模板池包括：
+
+- `overworld_day_spawn`
+- `overworld_night_danger`
+- `cave_underground`
+- `village_social`
+- `home_base_storage`
+- `technical_carpet_lab`
+- `nether_entry`
+- `experimental_sandbox_lab`
+
+每个模板目录下至少需要 `template.json`。如果模板目录还包含 `world/`、`config/`，runner 会一起物化到临时 run dir。
+
+## Runner 的实际执行方式
+
+对每个分组后的模板配置，runner 会：
+
+1. 按 `world_template + feature_flags + actor role profile` 分组
+2. 为该组物化一个隔离的 server run dir
+3. 临时接管活动 `run/`
+4. 启动 Fabric server
+5. 启动 stub agent 或真实 agent
+6. 生成所需 fake player
+7. 执行场景级和 turn 级 setup commands
+8. 提交 Mina turn
+9. 等待 Java 侧 `accepted -> completed/failed`
+10. 等待 Python bundle 出现
+11. 把 server 产物同步回本次输出目录
+12. 恢复原始 `run/`
+
+之所以采用“接管活动 `run/`”而不是直接改 Loom runDir，是为了规避 `eula` 和停服流程上的不稳定行为。
+
+## 常见失败类别
+
+- `startup_failure`
+- `missing_accepted_turn`
+- `timeout`
+- `missing_trace_bundle`
+- `runtime_exception`
+- `unknown_capability_rejection`
+- `missing_required_capability`
+- `reply_assertion_failure`
+- `quality_review_failure`
+
+其中前四类默认视为基础设施失败。
+
+## 排查顺序
+
+场景失败时，优先查看：
+
+1. runner 终端输出中的 `[FAIL] ... turn_id=... bundle=...`
+2. `<scenario-output>/server/mina-dev/turns.jsonl`
+3. `<scenario-output>/agent_data/debug/index.jsonl`
+4. turn bundle 里的 `response.final.json`
+5. turn bundle 里的 `scenario.capture.json`
+6. `<scenario-output>/server/logs/latest.log`
+
+## 日常推荐用法
+
+快速回归 headless 基建：
+
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-functional
+```
+
+针对某个 functional case 调试：
+
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-functional \
+  --scenario-id functional_followup_multiturn_bundle
+```
+
+评估当前真实模型状态：
 
 ```bash
 export MINA_API_KEY='...'
 export MINA_BASE_URL='https://api.deepseek.com/v1'
 export MINA_MODEL='deepseek-chat'
-PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-headless
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real
 ```
 
-Bug-to-regression loop:
+严格模式下把所有目标状态缺口都当失败：
 
-1. reproduce failure
-2. note the `turn_id`
-3. inspect `scenario.capture.json`
-4. run `promote-trace`
-5. tighten assertions if needed
-6. rerun `run-headless`
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real --strict-real
+```
+
+从失败 trace 生成新回归场景：
+
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli recent-turns --limit 10
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-trace \
+  --turn-id <turn_id> \
+  --suite real \
+  --scenario-id <new_case> \
+  --world-template overworld_day_spawn
+```
+
+## 运行注意事项
+
+- 不要在 headless runner 执行时手动再开一个 `./gradlew runServer`
+- runner 执行期间会暂时接管活动 `run/`
+- 本地健康检查会显式绕过 HTTP 代理；否则某些代理环境会错误拦截 `127.0.0.1`
+- `stub` 模式只验证链路，不验证真实回复质量
+- fake player 在离线模式下可能先尝试 Mojang profile 查询，日志里偶尔会出现 403 或超时，但通常不会影响最终生成

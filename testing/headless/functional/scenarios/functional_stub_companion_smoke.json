@@ -1,0 +1,30 @@
+{
+  "suite": "functional",
+  "scenario_id": "functional_stub_companion_smoke",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "required",
+  "actors": [
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "message": "Mina，打个招呼。"
+    }
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_reply_substrings": [
+      "stub-ok"
+    ],
+    "max_duration_ms": 120000
+  }
+}

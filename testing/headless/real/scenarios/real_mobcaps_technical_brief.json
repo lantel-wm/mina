@@ -1,0 +1,20 @@
+{
+  "suite": "real",
+  "scenario_id": "real_mobcaps_technical_brief",
+  "world_template": "technical_carpet_lab",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，这个维度现在的生物生成情况怎么样？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["carpet.mobcaps.read"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}

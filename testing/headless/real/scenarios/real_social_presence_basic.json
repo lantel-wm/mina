@@ -1,0 +1,21 @@
+{
+  "suite": "real",
+  "scenario_id": "real_social_presence_basic",
+  "world_template": "village_social",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"},
+    {"actor_id": "friend", "name": "Alex", "role": "read_only"}
+  ],
+  "turns": [
+    {"actor_id": "player", "message": "Mina，我现在是一个人吗？"}
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": ["world.social.read"],
+    "confirmation_expected": false,
+    "max_duration_ms": 120000
+  }
+}
