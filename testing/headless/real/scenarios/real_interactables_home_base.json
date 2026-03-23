@@ -28,16 +28,24 @@
   "setup_commands": [
     "time set day",
     "weather clear",
-    "kill @e[type=!minecraft:player,x=-32,y=118,z=-48,distance=..24]",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
     "clear Steve",
     "gamemode survival Steve",
     "effect clear Steve",
-    "fill -38 117 -54 -26 121 -42 minecraft:air",
-    "fill -38 117 -54 -26 117 -42 minecraft:oak_planks",
-    "setblock -32 118 -48 minecraft:chest",
-    "setblock -31 118 -48 minecraft:crafting_table",
-    "setblock -30 118 -48 minecraft:furnace",
-    "setblock -29 118 -48 minecraft:campfire",
-    "tp Steve -32 118 -44 facing -32 118 -48"
+    "fill -101 117 -52 -91 121 -44 minecraft:air",
+    "fill -101 117 -52 -91 117 -44 minecraft:oak_planks",
+    "fill -101 118 -52 -101 120 -44 minecraft:oak_planks",
+    "fill -91 118 -52 -91 120 -44 minecraft:oak_planks",
+    "fill -100 118 -52 -92 120 -52 minecraft:oak_planks",
+    "fill -100 118 -44 -92 120 -44 minecraft:oak_planks",
+    "fill -101 121 -52 -91 121 -44 minecraft:oak_planks",
+    "setblock -97 118 -50 minecraft:chest",
+    "setblock -96 118 -50 minecraft:crafting_table",
+    "setblock -95 118 -50 minecraft:furnace",
+    "setblock -94 118 -50 minecraft:campfire",
+    "setblock -96 118 -44 minecraft:air",
+    "setblock -96 119 -44 minecraft:air",
+    "spawnpoint Steve -96 118 -46",
+    "tp Steve -96 118 -46 facing -96 118 -50"
   ]
 }

@@ -130,6 +130,7 @@ Headless outputs are stored under `tmp/headless/functional/<timestamp>/` or `tmp
 
 Real-suite runs also emit `summary.json`, `failing_cases.json`, `target_state_gaps.json`, and `scorecard.md` at the run root.
 By default they are pruned to review-only artifacts after the run finishes.
+Those review-only artifacts now include per-turn prompt buffers so prompt quality can be reviewed by default.
 
 Useful developer commands:
 

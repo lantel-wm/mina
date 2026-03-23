@@ -480,7 +480,7 @@ class HeadlessCliTests(unittest.TestCase):
             self.assertTrue((bundle_dir / "summary.json").exists())
             self.assertTrue((bundle_dir / "response.final.json").exists())
             self.assertTrue((bundle_dir / "scenario.capture.json").exists())
-            self.assertFalse((bundle_dir / "prompts").exists())
+            self.assertTrue((bundle_dir / "prompts" / "step_001.provider_input.json").exists())
             self.assertFalse((pruned_agent_data / "mina_agent.db").exists())
             self.assertFalse((pruned_agent_data / "sessions").exists())
 
@@ -559,6 +559,9 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["passed"], 1)
         self.assertEqual(summary["counts"]["behavior_gaps"], 1)
         self.assertEqual(summary["counts"]["skipped_planned"], 1)
+        self.assertEqual(summary["runnable_count"], 2)
+        self.assertEqual(summary["planned_count"], 1)
+        self.assertEqual(summary["known_issue_count"], 0)
         self.assertEqual(len(failing_cases), 1)
         self.assertEqual(failing_cases[0]["scenario_id"], "target_gap")
         self.assertEqual(len(target_state_gaps), 1)

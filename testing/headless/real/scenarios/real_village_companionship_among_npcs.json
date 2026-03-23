@@ -27,20 +27,19 @@
   "setup_commands": [
     "time set day",
     "weather clear",
-    "kill @e[type=!minecraft:player,x=-32,y=118,z=48,distance=..24]",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
     "clear Steve",
     "gamemode survival Steve",
     "effect clear Steve",
-    "fill -38 117 42 -26 121 54 minecraft:air",
-    "fill -38 117 42 -26 117 54 minecraft:grass_block",
-    "setblock -32 118 48 minecraft:bell[attachment=floor]",
-    "setblock -29 118 48 minecraft:campfire",
-    "setblock -35 118 48 minecraft:white_bed[part=foot,facing=east]",
-    "setblock -34 118 48 minecraft:white_bed[part=head,facing=east]",
-    "setblock -35 118 50 minecraft:white_bed[part=foot,facing=east]",
-    "setblock -34 118 50 minecraft:white_bed[part=head,facing=east]",
-    "summon minecraft:villager -31.5 118 47.5 {NoAI:1b}",
-    "summon minecraft:villager -33.5 118 49.5 {NoAI:1b}",
-    "tp Steve -32 118 44 facing -32 118 48"
+    "tp Steve -96 118 -48 facing -96 118 -44",
+    "fill -102 118 -54 -90 122 -42 minecraft:air",
+    "setblock -96 118 -44 minecraft:bell[attachment=floor]",
+    "setblock -93 118 -46 minecraft:campfire",
+    "setblock -99 118 -45 minecraft:white_bed[part=foot,facing=east]",
+    "setblock -98 118 -45 minecraft:white_bed[part=head,facing=east]",
+    "setblock -99 118 -47 minecraft:white_bed[part=foot,facing=east]",
+    "setblock -98 118 -47 minecraft:white_bed[part=head,facing=east]",
+    "summon minecraft:villager -95.5 118 -45.5 {NoAI:1b}",
+    "summon minecraft:villager -97.5 118 -45.5 {NoAI:1b}"
   ]
 }

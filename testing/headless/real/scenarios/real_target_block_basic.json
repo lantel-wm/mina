@@ -35,7 +35,7 @@
     "clear Steve",
     "gamemode survival Steve",
     "effect clear Steve",
-    "setblock -96 118 -44 minecraft:gold_block",
-    "tp Steve -96 118 -48 facing -96 118 -44"
+    "fill -97 117 -45 -95 119 -45 minecraft:gold_block",
+    "tp Steve -96 118 -49 facing -96 118 -45"
   ]
 }

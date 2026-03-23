@@ -35,8 +35,9 @@ Review in this order:
 
 1. `infra_failures`
 2. `behavior_gaps`
-3. `passed`
-4. `skipped_planned`
+3. prompt health
+4. `passed`
+5. `skipped_planned`
 
 Interpretation:
 
@@ -77,7 +78,7 @@ Priority files:
 2. `scenario.capture.json`
 3. `events.jsonl`
 4. `summary.json`
-5. `prompts/step_*.provider_input.json` when capability selection looks wrong
+5. `prompts/step_*.provider_input.json`
 
 Questions to answer:
 
@@ -85,6 +86,112 @@ Questions to answer:
 2. Did it use the expected capability ids?
 3. If it failed with `unknown_capability_rejection`, did the model actually hallucinate a bad id, or did runtime lose a valid id?
 4. If a passed reply sounds plausible, is it actually appropriate for the intended template?
+
+## Prompt Review
+
+Prompt review is part of the default `run-real` review flow.
+Do not treat it as an optional deep-dive. Review the prompt before blaming Mina, the fixture, or the assertion.
+
+For every failed scenario, and for at least a few representative passed scenarios, inspect the latest `prompts/step_*.provider_input.json`.
+
+### What To Check
+
+1. Prompt arrangement
+
+- Confirm the assembled context is ordered from stable to volatile.
+- The expected section pattern is:
+  - `stable_core`
+  - `runtime_policy`
+  - `scene_slice`
+  - `observation_brief`
+  - `task_focus`
+  - `confirmation_loop` when relevant
+  - `dialogue_continuity`
+  - `dialogue_history`
+  - `recoverable_history`
+  - `capability_brief`
+- If highly volatile data is injected before stable sections, flag it as a prompt-layout problem.
+- If `capability_brief` is missing, truncated, or buried behind irrelevant noise, treat capability-selection failures as prompt problems first.
+
+2. Prefix-cache friendliness
+
+- Compare `step_001.provider_input.json` and later step prompt files for the same turn.
+- The early system prompt prefix should stay highly stable across steps within the same run group.
+- Stable instructions and stable policy text should remain at the front; dynamic facts should be appended later.
+- If early prompt bytes change every step because dynamic sections are inserted too early, flag poor prefix-cache utilization.
+- If two similar scenarios in the same group produce wildly different early system prefixes, inspect why.
+
+3. Duplicate content
+
+- Check whether the same fact is repeated across `scene_slice`, `observation_brief`, `task_focus`, and dialogue blocks.
+- Check for repeated runtime notes, repeated delegate summaries, or repeated capability descriptions.
+- Repetition is especially suspicious when it inflates prompt size without adding new constraints.
+- If the same actionable fact appears in 2-3 sections verbatim, flag it as prompt bloat.
+
+4. Content sufficiency
+
+- Verify that the prompt contains the actual facts needed for the user request.
+- For target questions, confirm prompt contains target status or a visible target-read capability.
+- For social questions, confirm prompt contains nearby-player facts or at least `server_env.current_players`.
+- For village / POI questions, confirm the prompt makes the POI capability visible and the village setup facts reachable.
+- For low-health / night-danger questions, confirm prompt contains real health, threat, and position state after setup.
+- For local knowledge questions, confirm prompt clearly exposes `retrieval.local_knowledge.search` and the user’s explicit preference not to rely on live observation.
+
+5. Truncation and budget pressure
+
+- Inspect `summary.json` message stats and truncation fields alongside the prompt files.
+- If prompt size is near budget, ask whether important facts were slimmed or displaced.
+- If a wrong answer coincides with heavy truncation, treat prompt compaction and duplication as first-order suspects.
+
+6. Prompt-to-output alignment
+
+- Ask whether Mina’s bad choice was actually encouraged by the prompt.
+- If the prompt strongly nudges delegate behavior when a direct capability should be preferred, that is a prompt-policy problem.
+- If the prompt lacks explicit instructions for a user-stated preference such as “别直接接管” or “直接用本地知识库”, treat that as prompt insufficiency.
+
+### Practical Commands
+
+List prompt files:
+
+```bash
+find "$RUN_ROOT" -path '*/prompts/step_*.provider_input.json' | sort
+```
+
+Compare early prompt prefixes across steps:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import json
+
+prompt_files = sorted(Path(".").glob("$RUN_ROOT/**/prompts/step_*.provider_input.json"))
+for path in prompt_files[:10]:
+    payload = json.loads(path.read_text())
+    first = payload[0]["content"] if payload else ""
+    print(path)
+    print(first[:1200].replace("\n", "\\n"))
+    print()
+PY
+```
+
+Quick duplication sniff:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import json
+from collections import Counter
+
+for path in sorted(Path(".").glob("$RUN_ROOT/**/prompts/step_*.provider_input.json"))[:10]:
+    payload = json.loads(path.read_text())
+    text = "\n".join(str(item.get("content", "")) for item in payload if isinstance(item, dict))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    dupes = [line for line, count in Counter(lines).items() if count > 1]
+    if dupes:
+        print(path)
+        print("duplicates:", dupes[:10])
+PY
+```
 
 ## Important Distinction: Behavior Gap vs Fixture Problem
 
@@ -145,12 +252,12 @@ Treat artifacts in three buckets.
 - per-turn `response.final.json`
 - per-turn `scenario.capture.json`
 - per-turn `events.jsonl`
+- per-turn `prompts/step_*.provider_input.json`
 
 These are small and high-value for debugging and discussion.
 
 ### Keep conditionally
 
-- `prompts/step_*.provider_input.json`
 - `agent_data/mina_agent.db`
 - `server/logs/debug.log`
 

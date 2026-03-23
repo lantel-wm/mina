@@ -379,7 +379,7 @@ public final class CapabilityExecutorRegistry {
                         "summary", "string"
                 ),
                 "technical",
-                false,
+                true,
                 "diagnostic",
                 "live",
                 (player, role) -> carpetAvailable,
@@ -398,7 +398,7 @@ public final class CapabilityExecutorRegistry {
                 ),
                 Map.of(),
                 "technical",
-                false,
+                true,
                 "raw",
                 "live",
                 (player, role) -> carpetAvailable,

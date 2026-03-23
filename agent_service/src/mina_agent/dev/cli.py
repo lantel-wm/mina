@@ -1115,6 +1115,10 @@ def load_properties_file(path: Path) -> dict[str, str]:
 
 
 def write_real_reports(run_root: Path, records: list[ScenarioExecutionRecord], load_result: ScenarioLoadResult) -> None:
+    del load_result
+    runnable_count = sum(1 for record in records if record.runnable_status == "runnable_now")
+    planned_count = sum(1 for record in records if record.runnable_status == "planned")
+    known_issue_count = sum(1 for record in records if record.expectation == "known_issue")
     summary = {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "counts": {
@@ -1124,9 +1128,9 @@ def write_real_reports(run_root: Path, records: list[ScenarioExecutionRecord], l
             "skipped_planned": sum(1 for record in records if record.outcome == "skipped_planned"),
             "skipped_known_issue": sum(1 for record in records if record.outcome == "skipped_known_issue"),
         },
-        "runnable_count": len(load_result.runnable),
-        "planned_count": len(load_result.planned),
-        "known_issue_count": len(load_result.known_issues),
+        "runnable_count": runnable_count,
+        "planned_count": planned_count,
+        "known_issue_count": known_issue_count,
         "records": [asdict(record) for record in records],
     }
     (run_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1335,6 +1339,11 @@ def collect_review_agent_files(agent_data_dir: Path) -> dict[Path, bytes]:
                 source = turn_dir / filename
                 if source.exists() and source.is_file():
                     preserved[rel_turn_dir / filename] = source.read_bytes()
+            prompts_dir = turn_dir / "prompts"
+            if prompts_dir.exists():
+                for prompt_file in sorted(prompts_dir.rglob("*")):
+                    if prompt_file.is_file():
+                        preserved[prompt_file.relative_to(agent_data_dir)] = prompt_file.read_bytes()
     return preserved
 
 

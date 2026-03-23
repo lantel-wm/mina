@@ -34,15 +34,15 @@
   "setup_commands": [
     "time set day",
     "weather clear",
-    "kill @e[type=!minecraft:player,x=-160,y=118,z=-48,distance=..24]",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
     "clear Steve",
     "gamemode creative Steve",
     "effect clear Steve",
-    "fill -166 117 -54 -154 122 -42 minecraft:air",
-    "fill -166 117 -54 -154 117 -42 minecraft:smooth_stone",
-    "setblock -160 118 -44 minecraft:observer[facing=south]",
-    "setblock -159 118 -44 minecraft:note_block",
-    "setblock -158 118 -44 minecraft:stonecutter",
-    "tp Steve -160 118 -48 facing -160 118 -44"
+    "fill -102 117 -54 -90 122 -42 minecraft:air",
+    "fill -102 117 -54 -90 117 -42 minecraft:smooth_stone",
+    "setblock -96 118 -44 minecraft:observer[facing=south]",
+    "setblock -95 118 -44 minecraft:note_block",
+    "setblock -94 118 -44 minecraft:stonecutter",
+    "tp Steve -96 118 -48 facing -96 118 -44"
   ]
 }

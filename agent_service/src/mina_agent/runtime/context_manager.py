@@ -10,7 +10,7 @@ from mina_agent.memory.store import Store
 from mina_agent.runtime.context_pack import ContextPack, ContextSlot, TrimPolicy
 from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.runtime.prompt_token_estimator import PromptTokenEstimator
-from mina_agent.runtime.models import TurnState
+from mina_agent.runtime.models import ObservationRef, TurnState
 from mina_agent.schemas import CapabilityDescriptor, ContextCompactionResult, TurnStartRequest
 
 
@@ -558,6 +558,16 @@ class ContextManager:
             "Do not call the same capability again with the same resolved arguments after you already have a fresh result. Answer from that observation or change strategy.\n"
             "When a direct target inspection capability is visible and the player is asking what they are currently looking at, prefer that live read before delegate_explore.\n"
             "If observation_brief already identifies the current target block or entity, answer directly instead of rereading the same target.\n"
+            "When the player explicitly asks you to use local knowledge or says not to rely on live observation, prefer retrieval.local_knowledge.search if it is visible.\n"
+            "When the player explicitly asks you to first explore on your own before answering, prefer agent.explore.delegate if it is visible.\n"
+            "When the player explicitly asks for a plan but says not to take over, prefer agent.plan.delegate if it is visible.\n"
+            "When the player asks for technical state, diagnostics, or observability and observe.technical or carpet.observability.read is visible, prefer one of those capabilities over replying from scene hints alone.\n"
+            "When the player asks how far they are from the thing they are currently looking at and distance measurement is visible, inspect the target if needed and then use carpet.distance.measure.\n"
+            "If a target read already produced a locked target or observation_brief identifies the target, use carpet.distance.measure next instead of rereading the same target.\n"
+            "If a target read already returned target_found=false once for this same question, do not repeat the same target read again unless the player clearly changed aim; explain what is missing instead.\n"
+            "When the player asks for more detail about a just-identified target block and Carpet block diagnostics are visible, prefer carpet.block_info.read.\n"
+            "If a follow-up asks for more detail about the same target and observation_brief has a locked block subject, use carpet.block_info.read next instead of a generic fallback reply.\n"
+            "When the player asks what nearby place is worth visiting and a POI capability is visible, prefer observe.poi or world.poi.read over delegate_explore.\n"
             "Return JSON only.\n"
             'Reply/guide with {"intent":"reply","final_reply":"..."} or {"intent":"guide","final_reply":"..."}.\n'
             'Inspect/retrieve/execute with {"intent":"execute","capability_request":{"capability_id":"...","arguments":{},"effect_summary":"...","requires_confirmation":false}}.\n'
@@ -646,7 +656,7 @@ class ContextManager:
     def _build_observation_brief(self, turn_state: TurnState) -> dict[str, Any]:
         latest_observations: list[dict[str, Any]] = []
         for observation in reversed(turn_state.observations[-6:]):
-            entry = observation.context_entry()
+            entry = self._observation_brief_entry(observation)
             entry["created_at"] = observation.created_at
             latest_observations.append(entry)
         block_subject_lock = turn_state.block_subject_lock.model_dump() if turn_state.block_subject_lock is not None else None
@@ -656,6 +666,36 @@ class ContextManager:
             "block_subject_lock": block_subject_lock,
             "runtime_notes": turn_state.runtime_notes[-4:],
         }
+
+    def _observation_brief_entry(self, observation: ObservationRef) -> dict[str, Any]:
+        entry = observation.context_entry()
+        if not self._is_delegate_observation_source(observation.source):
+            return entry
+        compact = {
+            "observation_id": observation.observation_id,
+            "source": observation.source,
+            "summary": observation.summary,
+            "salience": observation.salience,
+        }
+        role = self._delegate_role_from_source(observation.source)
+        payload = observation.payload if isinstance(observation.payload, dict) else {}
+        if role is not None:
+            compact["delegate_role"] = role
+        if observation.artifact_ref is not None:
+            compact["artifact_ref"] = observation.artifact_ref.context_ref()
+        unresolved = None
+        delegate_result = payload.get("delegate_result")
+        if isinstance(delegate_result, dict):
+            summary = delegate_result.get("summary")
+            if isinstance(summary, dict):
+                unresolved = summary.get("unresolved_questions")
+        if isinstance(unresolved, list) and unresolved:
+            compact["pending_questions"] = unresolved[:3]
+        elif isinstance(unresolved, dict):
+            items = unresolved.get("items")
+            if isinstance(items, list) and items:
+                compact["pending_questions"] = items[:3]
+        return compact
 
     def _build_confirmation_loop(self, turn_state: TurnState) -> dict[str, Any]:
         pending = turn_state.pending_confirmation
@@ -753,7 +793,10 @@ class ContextManager:
         refs: list[dict[str, Any]] = []
         for observation in turn_state.observations[-8:]:
             if observation.artifact_ref is not None:
-                refs.append(observation.artifact_ref.context_ref())
+                ref = observation.artifact_ref.context_ref()
+                if self._is_delegate_observation_source(observation.source):
+                    ref = {key: ref[key] for key in ("artifact_id", "kind", "path") if key in ref}
+                refs.append(ref)
         return refs
 
     def _build_recent_dialogue_memory(self, session_summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -892,12 +935,12 @@ class ContextManager:
             "primary_goal": working_memory.primary_goal,
             "focus": working_memory.focus or working_memory.primary_goal,
             "current_status": working_memory.current_status,
-            "completed_actions": working_memory.completed_actions,
-            "key_facts": working_memory.key_facts,
-            "blockers": working_memory.blockers,
-            "pending_questions": working_memory.pending_questions,
+            "completed_actions": self._summarize_text_list(working_memory.completed_actions),
+            "key_facts": self._summarize_text_list(working_memory.key_facts),
+            "blockers": self._summarize_text_list(working_memory.blockers),
+            "pending_questions": self._summarize_text_list(working_memory.pending_questions),
             "next_best_step": working_memory.next_best_step,
-            "open_loops": working_memory.open_loops,
+            "open_loops": self._summarize_text_list(working_memory.open_loops),
             "companion_state": working_memory.companion_state,
         }
 
@@ -908,6 +951,28 @@ class ContextManager:
         if len(compact) <= max_chars:
             return compact
         return compact[: max_chars - 1] + "…"
+
+    def _is_delegate_observation_source(self, source: Any) -> bool:
+        return isinstance(source, str) and source.startswith("agent.") and source.endswith(".delegate")
+
+    def _delegate_role_from_source(self, source: Any) -> str | None:
+        if not self._is_delegate_observation_source(source):
+            return None
+        parts = str(source).split(".")
+        if len(parts) != 3:
+            return None
+        return parts[1]
+
+    def _summarize_text_list(self, values: Any, *, max_items: int = 4, max_chars: int = 220) -> list[Any]:
+        if not isinstance(values, list):
+            return []
+        summarized: list[Any] = []
+        for item in values[-max_items:]:
+            if isinstance(item, str):
+                summarized.append(self._summary_excerpt(item, max_chars=max_chars) or item)
+            else:
+                summarized.append(item)
+        return summarized
 
     def _slot(
         self,

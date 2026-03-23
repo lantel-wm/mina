@@ -193,6 +193,7 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
 - 每个 turn 的 `response.progress.jsonl`
 - 每个 turn 的 `response.final.json`
 - 每个 turn 的 `scenario.capture.json`
+- 每个 turn 的 `prompts/step_*.provider_input.json`
 
 默认清理：
 
@@ -200,7 +201,6 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
 - `server/logs/debug.log`
 - `agent_data/mina_agent.db`
 - `agent_data/sessions/**`
-- `prompts/step_*.provider_input.json`
 
 如果你要做更深层的 runtime/provider/debug 分析，再显式使用 `--keep-full-artifacts`。
 

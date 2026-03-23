@@ -312,6 +312,11 @@ class FileDebugRecorder(DebugRecorder):
             step["bridge_result"] = payload
             return
 
+        if event_type == "delegate_result" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            step["delegate_result"] = payload
+            return
+
         if event_type == "turn_completed":
             summary["turn"]["ended_at"] = stamp.isoformat()
             summary["turn"]["status"] = "completed"
@@ -600,7 +605,51 @@ class FileDebugRecorder(DebugRecorder):
                 if isinstance(capability_id, str) and capability_id and capability_id not in seen:
                     seen.add(capability_id)
                     ordered.append(capability_id)
+            delegate_payload = step.get("delegate_result")
+            delegate_capability_id = self._delegate_capability_id(delegate_payload)
+            if delegate_capability_id is None:
+                delegate_capability_id = self._delegate_capability_id_from_decision(step.get("decision"))
+            if delegate_capability_id is not None and delegate_capability_id not in seen:
+                seen.add(delegate_capability_id)
+                ordered.append(delegate_capability_id)
         return ordered
+
+    def _delegate_capability_id(self, payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        observation = payload.get("observation")
+        if isinstance(observation, dict):
+            source = observation.get("source")
+            if isinstance(source, str) and source.startswith("agent.") and source.endswith(".delegate"):
+                return source
+        delegate = payload.get("delegate")
+        if isinstance(delegate, dict):
+            role = delegate.get("role")
+            if isinstance(role, str) and role in {"explore", "plan"}:
+                return f"agent.{role}.delegate"
+        return None
+
+    def _delegate_capability_id_from_decision(self, payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        intent = payload.get("intent")
+        if intent == "delegate_explore":
+            return "agent.explore.delegate"
+        if intent == "delegate_plan":
+            return "agent.plan.delegate"
+        delegate_role = payload.get("delegate_role")
+        if delegate_role == "explore":
+            return "agent.explore.delegate"
+        if delegate_role == "plan":
+            return "agent.plan.delegate"
+        delegate_request = payload.get("delegate_request")
+        if isinstance(delegate_request, dict):
+            role = delegate_request.get("role")
+            if role == "explore":
+                return "agent.explore.delegate"
+            if role == "plan":
+                return "agent.plan.delegate"
+        return None
 
     def _observed_duration_ms(self, turn: dict[str, Any]) -> int | None:
         started_at = turn.get("started_at")

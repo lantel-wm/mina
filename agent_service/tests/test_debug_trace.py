@@ -8,7 +8,8 @@ from typing import Any
 
 from mina_agent.audit.logger import AuditLogger
 from mina_agent.config import Settings
-from mina_agent.debug import build_debug_recorder, load_debug_index, lookup_debug_index, resolve_turn_bundle
+from mina_agent.debug import DebugRecorder, build_debug_recorder, load_debug_index, lookup_debug_index, resolve_turn_bundle
+from mina_agent.debug.recorder import DebugPreviewLimits, FileDebugRecorder
 from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
@@ -113,6 +114,54 @@ class _DebugCompactingProvider:
 
 
 class DebugTraceTests(unittest.TestCase):
+    def test_delegate_results_are_counted_as_selected_capabilities(self) -> None:
+        recorder = FileDebugRecorder(
+            Path(tempfile.mkdtemp()),
+            DebugPreviewLimits(string_preview_chars=120, list_preview_items=4, dict_preview_keys=4, event_payload_chars=600),
+        )
+        summary = {
+            "timeline": [
+                {"capability": {"capability_id": "game.target_block.read"}},
+                {"delegate_result": {"delegate": {"role": "explore"}}},
+                {"delegate_result": {"observation": {"source": "agent.plan.delegate"}}},
+            ]
+        }
+
+        selected = recorder._selected_capability_ids(summary)  # noqa: SLF001
+
+        self.assertEqual(
+            selected,
+            ["game.target_block.read", "agent.explore.delegate", "agent.plan.delegate"],
+        )
+
+    def test_delegate_decision_fallback_is_counted_when_delegate_payload_is_truncated(self) -> None:
+        recorder = FileDebugRecorder(
+            Path(tempfile.mkdtemp()),
+            DebugPreviewLimits(string_preview_chars=120, list_preview_items=4, dict_preview_keys=4, event_payload_chars=600),
+        )
+        summary = {
+            "timeline": [
+                {
+                    "decision": {"intent": "delegate_explore", "delegate_role": "explore"},
+                    "delegate_result": {
+                        "preview": '{"delegate":{"role":"explore","objective":"..."}}',
+                        "truncated": True,
+                    },
+                },
+                {
+                    "decision": {"intent": "delegate_plan", "delegate_role": "plan"},
+                    "delegate_result": {
+                        "preview": '{"delegate":{"role":"plan","objective":"..."}}',
+                        "truncated": True,
+                    },
+                },
+            ]
+        }
+
+        selected = recorder._selected_capability_ids(summary)  # noqa: SLF001
+
+        self.assertEqual(selected, ["agent.explore.delegate", "agent.plan.delegate"])
+
     def test_debug_disabled_does_not_create_trace_files(self) -> None:
         loop, settings, _ = self._build_loop(
             debug_enabled=False,
