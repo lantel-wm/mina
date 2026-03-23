@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from typing import Any
+
 import json
 
-from mina_agent.providers.openai_compatible import OpenAICompatibleProvider, ProviderDecisionResult, ProviderStructuredResult
+from mina_agent.providers.openai_compatible import (
+    OpenAICompatibleProvider,
+    ProviderDecisionResult,
+    ProviderStructuredResult,
+    ProviderValueResult,
+)
 from mina_agent.schemas import (
     CapabilityRequest,
     ConfirmationRequest,
-    ContextCompactionResult,
     DelegateRequest,
     DelegateSummary,
     ModelDecision,
@@ -55,11 +61,16 @@ class DeliberationEngine:
             raise AttributeError("Provider does not support structured delegate summaries.")
         return complete_json(messages, DelegateSummary)
 
-    def compact_context(self, messages: list[dict[str, str]]) -> ProviderStructuredResult[ContextCompactionResult]:
-        complete_json = getattr(self._provider, "complete_json", None)
-        if complete_json is None:
-            raise AttributeError("Provider does not support structured context compaction.")
-        return complete_json(messages, ContextCompactionResult)
+    def compact_target(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        expected_root_types: tuple[type[Any], ...] | None = None,
+    ) -> ProviderValueResult:
+        complete_json_value = getattr(self._provider, "complete_json_value", None)
+        if complete_json_value is None:
+            raise AttributeError("Provider does not support target-scoped context compaction.")
+        return complete_json_value(messages, expected_root_types=expected_root_types)
 
     def normalize(self, decision: ModelDecision) -> ModelDecision:
         if decision.intent is None:

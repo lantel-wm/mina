@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
-from mina_agent.providers.openai_compatible import OpenAICompatibleProvider, ProviderDecisionResult
+from mina_agent.providers.openai_compatible import (
+    OpenAICompatibleProvider,
+    ProviderDecisionResult,
+    ProviderValueResult,
+)
 from mina_agent.runtime.prompt_token_estimator import PromptTokenEstimator
 
 
@@ -32,6 +37,17 @@ class DecisionEngine:
         if callable(completer):
             return completer(messages, response_model)
         raise AttributeError("Provider does not support structured JSON completions.")
+
+    def complete_json_value(
+        self,
+        messages,
+        *,
+        expected_root_types: tuple[type[Any], ...] | None = None,
+    ) -> ProviderValueResult:
+        completer = getattr(self._provider, "complete_json_value", None)
+        if callable(completer):
+            return completer(messages, expected_root_types=expected_root_types)
+        raise AttributeError("Provider does not support value-shaped JSON completions.")
 
     def estimate_prompt_tokens(self, messages: list[dict[str, str]]) -> dict[str, int | str]:
         estimator = getattr(self._provider, "estimate_prompt_tokens", None)

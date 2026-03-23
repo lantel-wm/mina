@@ -15,7 +15,8 @@ from mina_agent.runtime.prompt_token_estimator import PromptTokenEstimator
 from mina_agent.schemas import ModelDecision
 
 
-JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+JSON_ROOT_START_CHARS = frozenset('{["-0123456789tfn')
 TEMPERATURE = 0.2
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -34,6 +35,17 @@ class ProviderDecisionResult:
 @dataclass(slots=True)
 class ProviderStructuredResult(Generic[ModelT]):
     payload: ModelT
+    latency_ms: int
+    raw_response_preview: str
+    parse_status: str
+    model: str
+    temperature: float
+    message_count: int
+
+
+@dataclass(slots=True)
+class ProviderValueResult:
+    value: Any
     latency_ms: int
     raw_response_preview: str
     parse_status: str
@@ -100,32 +112,135 @@ class OpenAICompatibleProvider:
 
     def complete_json(self, messages: list[dict[str, str]], response_model: type[ModelT]) -> ProviderStructuredResult[ModelT]:
         content, latency_ms = self._request_content(messages)
-        match = JSON_BLOCK_RE.search(content)
-        if not match:
+        candidates = self._json_candidates(content, exhaustive=True)
+        if not candidates:
             raise ProviderError(
                 "Model returned a response without a JSON decision block.",
                 parse_status="missing_decision_json",
                 raw_response_preview=content,
                 latency_ms=latency_ms,
             )
-        try:
-            payload = response_model.model_validate_json(match.group(0))
-        except ValidationError as exc:
-            raise ProviderError(
-                f"Model returned a JSON block that does not match the {response_model.__name__} schema.",
-                parse_status="invalid_decision_json",
-                raw_response_preview=match.group(0),
+        last_candidate_text = content
+        for candidate_text, candidate_value in candidates:
+            last_candidate_text = candidate_text
+            try:
+                payload = response_model.model_validate(candidate_value)
+            except ValidationError:
+                continue
+            return ProviderStructuredResult(
+                payload=payload,
                 latency_ms=latency_ms,
-            ) from exc
-        return ProviderStructuredResult(
-            payload=payload,
+                raw_response_preview=content,
+                parse_status="ok",
+                model=self._settings.model or "",
+                temperature=TEMPERATURE,
+                message_count=len(messages),
+            )
+        raise ProviderError(
+            f"Model returned a JSON block that does not match the {response_model.__name__} schema.",
+            parse_status="invalid_decision_json",
+            raw_response_preview=last_candidate_text,
             latency_ms=latency_ms,
-            raw_response_preview=content,
-            parse_status="ok",
-            model=self._settings.model or "",
-            temperature=TEMPERATURE,
-            message_count=len(messages),
         )
+
+    def complete_json_value(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        expected_root_types: tuple[type[Any], ...] | None = None,
+    ) -> ProviderValueResult:
+        content, latency_ms = self._request_content(messages)
+        candidates = self._json_candidates(content, exhaustive=False)
+        if not candidates:
+            candidates = self._json_candidates(content, exhaustive=True)
+        if not candidates:
+            raise ProviderError(
+                "Model returned a response without a JSON value.",
+                parse_status="missing_json_value",
+                raw_response_preview=content,
+                latency_ms=latency_ms,
+            )
+
+        last_candidate_text = content
+        for candidate_text, candidate_value in candidates:
+            last_candidate_text = candidate_text
+            if self._looks_like_compaction_request_wrapper(candidate_value):
+                continue
+            if expected_root_types is not None and not isinstance(candidate_value, expected_root_types):
+                continue
+            return ProviderValueResult(
+                value=candidate_value,
+                latency_ms=latency_ms,
+                raw_response_preview=content,
+                parse_status="ok",
+                model=self._settings.model or "",
+                temperature=TEMPERATURE,
+                message_count=len(messages),
+            )
+
+        raise ProviderError(
+            "Model returned JSON, but it did not match the expected compacted value shape.",
+            parse_status="invalid_json_value",
+            raw_response_preview=last_candidate_text,
+            latency_ms=latency_ms,
+        )
+
+    def _json_candidates(self, content: str, *, exhaustive: bool) -> list[tuple[str, Any]]:
+        decoder = json.JSONDecoder()
+        candidates: list[tuple[int, int, str, Any]] = []
+        seen: set[tuple[int, int]] = set()
+
+        for match in CODE_BLOCK_RE.finditer(content):
+            block = match.group(1).strip()
+            if not block:
+                continue
+            try:
+                value, end = decoder.raw_decode(block)
+            except json.JSONDecodeError:
+                continue
+            if block[end:].strip():
+                continue
+            key = (match.start(1), match.start(1) + end)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((match.start(1), match.start(1) + end, block[:end], value))
+
+        for start in self._candidate_starts(content, exhaustive=exhaustive):
+            snippet = content[start:]
+            try:
+                value, end = decoder.raw_decode(snippet)
+            except json.JSONDecodeError:
+                continue
+            key = (start, start + end)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((start, start + end, snippet[:end], value))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return [(text, value) for _, _, text, value in candidates]
+
+    def _candidate_starts(self, content: str, *, exhaustive: bool) -> list[int]:
+        if exhaustive:
+            return [index for index, char in enumerate(content) if char in JSON_ROOT_START_CHARS]
+
+        starts: list[int] = []
+        offset = 0
+        for line in content.splitlines(keepends=True):
+            stripped = line.lstrip(" \t\r")
+            if stripped and stripped[0] in JSON_ROOT_START_CHARS:
+                candidate_start = offset + (len(line) - len(stripped))
+                starts.append(candidate_start)
+            offset += len(line)
+        if content and content[0] in JSON_ROOT_START_CHARS and 0 not in starts:
+            starts.append(0)
+        return starts
+
+    def _looks_like_compaction_request_wrapper(self, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        return {"pass_index", "current_tokens", "target_tokens", "target_path", "content"}.issubset(value)
 
     def _request_content(self, messages: list[dict[str, str]]) -> tuple[str, int]:
         if not self.available():

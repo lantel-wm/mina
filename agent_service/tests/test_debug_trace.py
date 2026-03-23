@@ -25,7 +25,6 @@ from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.runtime.models import TaskState, TurnState, WorkingMemory
 from mina_agent.schemas import (
     ActionResultPayload,
-    ContextCompactionResult,
     LimitsPayload,
     ModelDecision,
     PlayerPayload,
@@ -64,27 +63,21 @@ class _DebugCompactingProvider:
             message_count=len(messages),
         )
 
-    def complete_json(self, messages, response_model):
+    def complete_json_value(self, messages, *, expected_root_types=None):
         self._compact_calls += 1
-        payload = ContextCompactionResult(
-            slot_replacements={
-                "recoverable_history": {
-                    "session_summary": {"summary": "compacted"},
-                    "memories": [],
-                    "history": {"older_turn_count": 0, "recovery_available": True},
-                    "recovery_refs": [],
-                }
-            },
-            rationale="Compact older history for debug test.",
-            target_tokens=1024,
-        )
+        payload = {
+            "session_summary": {"summary": "compacted"},
+            "memories": [],
+            "history": {"older_turn_count": 0, "recovery_available": True},
+            "recovery_refs": [],
+        }
         return type(
-            "StructuredResult",
+            "ValueResult",
             (),
             {
-                "payload": payload,
+                "value": payload,
                 "latency_ms": 9,
-                "raw_response_preview": payload.model_dump_json(),
+                "raw_response_preview": json.dumps(payload, ensure_ascii=False),
                 "parse_status": "ok",
                 "model": "test-model",
                 "temperature": 0.2,
@@ -261,7 +254,8 @@ class DebugTraceTests(unittest.TestCase):
         artifact = compaction["request"]["provider_input_artifact"]
         self.assertEqual(artifact["relative_path"], "prompts/step_001.context_compaction_pass_1.provider_input.json")
         self.assertEqual(compaction["response"]["pass_index"], 1)
-        self.assertIn("slot_replacements", compaction["response"]["result"])
+        self.assertEqual(compaction["response"]["target_path"], "recoverable_history")
+        self.assertIn("session_summary", compaction["response"]["result"])
         self.assertEqual(summary["context_builds"][0]["budget_report"]["compaction_passes"], 1)
 
     def test_debug_turn_directory_uses_time_prefixed_human_readable_name(self) -> None:

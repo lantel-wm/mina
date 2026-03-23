@@ -27,6 +27,22 @@ class ContextBuildResult:
     protected_slots: list[str]
 
 
+@dataclass(slots=True)
+class CompactionTarget:
+    path: str
+    slot_name: str
+    content: Any
+    estimated_tokens: int
+    local_rules: tuple[str, ...]
+    expected_root_types: tuple[type[Any], ...]
+
+
+@dataclass(slots=True)
+class CompactionPrompt:
+    target: CompactionTarget
+    messages: list[dict[str, str]]
+
+
 class ContextOverflowError(RuntimeError):
     def __init__(self, *, budget_tokens: int, used_tokens: int, protected_slots: list[str]) -> None:
         super().__init__("Context overflow: required context exceeds hard budget.")
@@ -48,6 +64,16 @@ class ContextManager:
         "runtime_policy",
         "scene_slice",
         "task_focus",
+    )
+    _COMPACTION_TARGET_PRIORITY = (
+        "recoverable_history",
+        "task_focus",
+        "scene_slice.recent_events",
+        "scene_slice.social",
+        "scene_slice.technical",
+        "scene_slice.interactables",
+        "scene_slice.server_rules_refs",
+        "runtime_policy",
     )
     _TRIM_POLICY = TrimPolicy(
         priority_order=(
@@ -185,6 +211,53 @@ class ContextManager:
         )
         return self._render_context_pack(pack, recovery_refs=recovery_refs, compaction_passes=0)
 
+    def build_compaction_request(
+        self,
+        context_result: ContextBuildResult,
+        *,
+        current_tokens: int,
+        target_tokens: int,
+        pass_index: int,
+    ) -> CompactionPrompt | None:
+        target = self._select_compaction_target(
+            context_result,
+            current_tokens=current_tokens,
+            target_tokens=target_tokens,
+        )
+        if target is None:
+            return None
+
+        system_lines = [
+            "You are Mina's context compactor.",
+            "Reduce token usage while preserving factual meaning for one target only.",
+            f"Compact only `{target.path}`.",
+            "Never invent new facts, capabilities, coordinates, identities, or live observations.",
+            "Never return the slot name, rationale, markdown, or any wrapper object.",
+            f"Return only a JSON {self._json_shape_name(target.content)} for `{target.path}`.",
+        ]
+        user_payload: dict[str, Any] = {
+            "pass_index": pass_index,
+            "current_tokens": current_tokens,
+            "target_tokens": target_tokens,
+            "target_path": target.path,
+            "content": target.content,
+        }
+        if target.local_rules:
+            user_payload["local_rules"] = list(target.local_rules)
+        messages = [
+            {"role": "system", "content": "\n".join(system_lines)},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    user_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            },
+        ]
+        return CompactionPrompt(target=target, messages=messages)
+
     def build_compaction_messages(
         self,
         context_result: ContextBuildResult,
@@ -193,83 +266,66 @@ class ContextManager:
         target_tokens: int,
         pass_index: int,
     ) -> list[dict[str, str]]:
-        compactable_slots = self._select_compactable_slots(
+        request = self.build_compaction_request(
             context_result,
             current_tokens=current_tokens,
             target_tokens=target_tokens,
+            pass_index=pass_index,
         )
+        return request.messages if request is not None else []
 
-        system_content = (
-            "You are Mina's context compactor.\n"
-            "Your only job is to reduce token usage in non-core context while preserving factual meaning.\n"
-            "You may only modify or drop slots listed in compactable_slots.\n"
-            "Never modify or drop protected slots.\n"
-            "Never invent new facts, capabilities, coordinates, identities, or live observations.\n"
-            "Preserve exact capability ids and any live target-identification facts.\n"
-            "Prefer shrinking recoverable_history first, then runtime_policy, then non-core scene branches, then non-critical task_focus lists.\n"
-            "Return JSON only matching ContextCompactionResult."
-        )
-        user_content = json.dumps(
-            {
-                "pass_index": pass_index,
-                "budget_tokens": self._settings.context_token_budget,
-                "current_tokens": current_tokens,
-                "target_tokens": target_tokens,
-                "protected_slots": list(context_result.protected_slots),
-                "compactable_slots": compactable_slots,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
-
-    def _select_compactable_slots(
+    def _select_compaction_target(
         self,
         context_result: ContextBuildResult,
         *,
         current_tokens: int,
         target_tokens: int,
-    ) -> dict[str, Any]:
-        candidates: list[tuple[str, Any, int]] = []
-        for slot in context_result.pack.active_slots():
-            payload = self._compaction_payload_for_slot(slot)
-            if payload is None:
-                continue
-            serialized = self._serialize_compaction_payload(payload)
-            estimated_tokens = self._estimate_text_tokens(serialized)
-            candidates.append((slot.name, payload, estimated_tokens))
-
+    ) -> CompactionTarget | None:
+        del current_tokens, target_tokens
+        priority_order = {path: index for index, path in enumerate(self._COMPACTION_TARGET_PRIORITY)}
+        candidates = self._compaction_targets(context_result)
         if not candidates:
-            return {}
-
-        estimated_overflow_tokens = max(current_tokens - target_tokens, 0)
-        selected_payloads: dict[str, Any] = {}
-        selected_tokens = 0
-        target_compactable_tokens = max(2048, int(estimated_overflow_tokens * 1.5))
-
-        for slot_name, payload, estimated_tokens in candidates:
-            selected_payloads[slot_name] = payload
-            selected_tokens += max(estimated_tokens, 1)
-            if selected_tokens >= target_compactable_tokens:
-                break
-
-        return selected_payloads
-
-    def _compaction_payload_for_slot(self, slot: ContextSlot) -> Any | None:
-        if slot.name == "scene_slice" and isinstance(slot.content, dict):
-            payload = {
-                key: slot.content.get(key)
-                for key in ("scene", "technical", "social", "interactables", "recent_events", "server_rules_refs")
-                if key in slot.content
-            }
-            return payload or None
-        if slot.name not in self._COMPACTION_CANDIDATE_SLOT_NAMES:
             return None
-        return slot.content
+        candidates.sort(key=lambda item: (priority_order.get(item.path, len(priority_order)), -item.estimated_tokens))
+        return candidates[0]
+
+    def _compaction_targets(self, context_result: ContextBuildResult) -> list[CompactionTarget]:
+        slot_by_name = {slot.name: slot for slot in context_result.pack.active_slots()}
+        candidates: list[CompactionTarget] = []
+        for path in self._COMPACTION_TARGET_PRIORITY:
+            slot_name, _, branch_name = path.partition(".")
+            slot = slot_by_name.get(slot_name)
+            if slot is None or not slot.included:
+                continue
+            if branch_name:
+                if slot_name != "scene_slice" or not isinstance(slot.content, dict):
+                    continue
+                content = slot.content.get(branch_name)
+            else:
+                if slot.name not in self._COMPACTION_CANDIDATE_SLOT_NAMES:
+                    continue
+                content = slot.content
+            if not self._has_compactable_content(content):
+                continue
+            serialized = self._serialize_compaction_payload(content)
+            candidates.append(
+                CompactionTarget(
+                    path=path,
+                    slot_name=slot_name,
+                    content=content,
+                    estimated_tokens=self._estimate_text_tokens(serialized),
+                    local_rules=self._local_rules_for_target(path),
+                    expected_root_types=self._expected_root_types(content),
+                )
+            )
+        return candidates
+
+    def _has_compactable_content(self, content: Any) -> bool:
+        if content is None:
+            return False
+        if isinstance(content, (list, dict, str)):
+            return bool(content)
+        return True
 
     def _serialize_compaction_payload(self, payload: Any) -> str:
         if isinstance(payload, str):
@@ -279,6 +335,103 @@ class ContextManager:
     def _estimate_text_tokens(self, text: str) -> int:
         estimate = self._token_estimator.estimate_messages([{"role": "user", "content": text}])
         return estimate.total_tokens
+
+    def _expected_root_types(self, content: Any) -> tuple[type[Any], ...]:
+        if isinstance(content, dict):
+            return (dict,)
+        if isinstance(content, list):
+            return (list,)
+        if isinstance(content, str):
+            return (str,)
+        if isinstance(content, bool):
+            return (bool,)
+        if content is None:
+            return (type(None),)
+        if isinstance(content, int):
+            return (int,)
+        if isinstance(content, float):
+            return (float, int)
+        return (type(content),)
+
+    def _json_shape_name(self, content: Any) -> str:
+        if isinstance(content, dict):
+            return "object"
+        if isinstance(content, list):
+            return "array"
+        if isinstance(content, str):
+            return "string"
+        if isinstance(content, bool):
+            return "boolean"
+        if content is None:
+            return "null"
+        if isinstance(content, (int, float)):
+            return "number"
+        return "value"
+
+    def _local_rules_for_target(self, target_path: str) -> tuple[str, ...]:
+        if target_path == "recoverable_history":
+            return (
+                "Prefer short summaries, counts, and recovery refs over long prose.",
+                "Keep path and transcript refs if present.",
+                "Drop or shrink memories before changing recovery availability facts.",
+            )
+        if target_path == "task_focus":
+            return (
+                "Keep the current task header and current trigger intact.",
+                "Keep only high-signal working-memory facts needed for the next reply or action.",
+                "Drop duplicated artifact, observation, and recovery reference lists first.",
+            )
+        if target_path == "scene_slice.recent_events":
+            return (
+                "Prefer the newest and highest-importance events.",
+                "Preserve exact timestamps, ids, and retained event payload facts.",
+            )
+        if target_path.startswith("scene_slice."):
+            return (
+                "Keep only facts that materially help immediate scene reasoning.",
+                "Drop empty lists, redundant summaries, and repeated low-signal details first.",
+            )
+        if target_path == "runtime_policy":
+            return (
+                "Keep language, player role, limits, task header, and essential persona guidance.",
+                "Drop repeated task artifacts, long notes, and non-essential reminders first.",
+            )
+        return ()
+
+    def apply_compaction_target(
+        self,
+        context_result: ContextBuildResult,
+        *,
+        target_path: str,
+        replacement: Any,
+        compaction_passes: int,
+    ) -> ContextBuildResult:
+        pack = copy.deepcopy(context_result.pack)
+        slot_by_name = {slot.name: slot for slot in pack.slots}
+        slot_name, _, branch_name = target_path.partition(".")
+        slot = slot_by_name.get(slot_name)
+        if slot is None or not slot.included:
+            return self._render_context_pack(
+                pack,
+                recovery_refs=context_result.recovery_refs,
+                compaction_passes=compaction_passes,
+            )
+
+        if branch_name:
+            if isinstance(slot.content, dict):
+                updated = dict(slot.content)
+                updated[branch_name] = replacement
+                slot.content = updated
+        else:
+            slot.content = replacement
+        slot.truncated = True
+        slot.strategy = f"{slot.strategy}+llm_compacted"
+
+        return self._render_context_pack(
+            pack,
+            recovery_refs=context_result.recovery_refs,
+            compaction_passes=compaction_passes,
+        )
 
     def apply_compaction_result(
         self,
@@ -419,9 +572,11 @@ class ContextManager:
             "server_env": request.server_env.model_dump(),
             "player_role": request.player.role,
             "limits": request.limits.model_dump(),
-            "task": turn_state.task.context_entry(),
+            "task": self._task_header_view(turn_state.task),
             "active_task_candidate": (
-                turn_state.active_task_candidate.context_entry() if turn_state.active_task_candidate is not None else None
+                self._task_header_view(turn_state.active_task_candidate)
+                if turn_state.active_task_candidate is not None
+                else None
             ),
             "persona": {
                 "style": "gentle, attentive, concise, situationally playful",
@@ -463,7 +618,7 @@ class ContextManager:
             "social": normalized_snapshot.get("social"),
             "technical": normalized_snapshot.get("technical"),
             "target_block": normalized_snapshot.get("target_block"),
-            "recent_events": normalized_snapshot.get("recent_events"),
+            "recent_events": list(normalized_snapshot.get("recent_events") or [])[-12:],
             "server_rules_refs": normalized_snapshot.get("server_rules_refs"),
             "risk_state": normalized_snapshot.get("risk_state"),
         }
@@ -475,11 +630,13 @@ class ContextManager:
         turn_state.working_memory.observation_refs = observation_refs
         turn_state.working_memory.recovery_refs = self._collect_observation_recovery_refs(turn_state)
         return {
-            "task": turn_state.task.context_entry(),
+            "task": self._task_header_view(turn_state.task),
             "active_task_candidate": (
-                turn_state.active_task_candidate.context_entry() if turn_state.active_task_candidate is not None else None
+                self._task_header_view(turn_state.active_task_candidate)
+                if turn_state.active_task_candidate is not None
+                else None
             ),
-            "working_memory": turn_state.working_memory.context_entry(),
+            "working_memory": self._task_focus_working_memory_view(turn_state),
             "current_trigger": {
                 "user_message": TurnStartRequest.model_validate(turn_state.request).user_message,
                 "pending_confirmation": turn_state.pending_confirmation,
@@ -559,7 +716,7 @@ class ContextManager:
             "current_trigger": {"turn_id": turn_state.turn_id},
             "older_turn_count": len(older_turns),
             "session_compact_summary": {
-                "text": compact_summary,
+                "summary_excerpt": self._summary_excerpt(compact_summary),
                 "path": summary_record["path"],
                 "transcript_path": summary_record["transcript_path"],
             },
@@ -673,7 +830,7 @@ class ContextManager:
     def _compact_session_summary(self, session_summary: Any) -> Any:
         if not isinstance(session_summary, dict):
             return session_summary
-        compacted = {"summary": session_summary.get("summary")}
+        compacted = {"summary": self._summary_excerpt(session_summary.get("summary"))}
         if session_summary.get("transcript_path"):
             compacted["transcript_path"] = session_summary.get("transcript_path")
         metadata = session_summary.get("metadata")
@@ -697,8 +854,60 @@ class ContextManager:
             if not slot.included:
                 continue
             lines.append(f"[{slot.name}]")
-            lines.append(json.dumps(slot.content, ensure_ascii=False, indent=2, default=str))
+            lines.append(json.dumps(slot.content, ensure_ascii=False, separators=(",", ":"), default=str))
         return "\n\n".join(lines)
+
+    def _task_summary_view(self, summary: Any) -> dict[str, Any]:
+        if not isinstance(summary, dict):
+            return {}
+        allowed_keys = (
+            "player_intent",
+            "mina_stance",
+            "next_best_companion_move",
+            "delegate",
+            "objective",
+            "finding_count",
+        )
+        return {key: summary[key] for key in allowed_keys if key in summary}
+
+    def _task_header_view(self, task: Any) -> dict[str, Any] | None:
+        if task is None:
+            return None
+        payload = {
+            "task_id": getattr(task, "task_id", None),
+            "task_type": getattr(task, "task_type", None),
+            "goal": getattr(task, "goal", None),
+            "status": getattr(task, "status", None),
+            "priority": getattr(task, "priority", None),
+            "risk_class": getattr(task, "risk_class", None),
+            "requires_confirmation": getattr(task, "requires_confirmation", None),
+            "continuity_score": getattr(task, "continuity_score", None),
+            "summary": self._task_summary_view(getattr(task, "summary", None)),
+        }
+        return {key: value for key, value in payload.items() if value not in (None, {}, [])}
+
+    def _task_focus_working_memory_view(self, turn_state: TurnState) -> dict[str, Any]:
+        working_memory = turn_state.working_memory
+        return {
+            "primary_goal": working_memory.primary_goal,
+            "focus": working_memory.focus or working_memory.primary_goal,
+            "current_status": working_memory.current_status,
+            "completed_actions": working_memory.completed_actions,
+            "key_facts": working_memory.key_facts,
+            "blockers": working_memory.blockers,
+            "pending_questions": working_memory.pending_questions,
+            "next_best_step": working_memory.next_best_step,
+            "open_loops": working_memory.open_loops,
+            "companion_state": working_memory.companion_state,
+        }
+
+    def _summary_excerpt(self, text: Any, *, max_chars: int = 320) -> str | None:
+        if not isinstance(text, str):
+            return None
+        compact = " ".join(text.split())
+        if len(compact) <= max_chars:
+            return compact
+        return compact[: max_chars - 1] + "…"
 
     def _slot(
         self,

@@ -13,7 +13,7 @@ from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
-from mina_agent.providers.openai_compatible import ProviderDecisionResult
+from mina_agent.providers.openai_compatible import ProviderDecisionResult, ProviderError
 from mina_agent.retrieval.index import LocalKnowledgeIndex
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeState
@@ -1692,18 +1692,64 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.assertEqual(seen["timeout"], 77)
         self.assertEqual(result.decision.final_reply, "ok")
 
+    def test_openai_provider_complete_json_value_accepts_code_fenced_array(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        provider = OpenAICompatibleProvider(settings)
+
+        with mock.patch.object(
+            provider,
+            "_request_content",
+            return_value=("```json\n[{\"kind\":\"entity_loaded\"}]\n```", 12),
+        ):
+            result = provider.complete_json_value(
+                [
+                    {"role": "system", "content": "compact"},
+                    {"role": "user", "content": "target"},
+                ],
+                expected_root_types=(list,),
+            )
+
+        self.assertEqual(result.value, [{"kind": "entity_loaded"}])
+
+    def test_openai_provider_complete_json_value_skips_compaction_wrapper_and_prefers_last_candidate(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        provider = OpenAICompatibleProvider(settings)
+        content = (
+            '{"pass_index":1,"current_tokens":60000,"target_tokens":50000,"target_path":"recoverable_history","content":{"summary":"too long"}}\n'
+            '{"summary":"short"}'
+        )
+
+        with mock.patch.object(provider, "_request_content", return_value=(content, 12)):
+            result = provider.complete_json_value(
+                [
+                    {"role": "system", "content": "compact"},
+                    {"role": "user", "content": "target"},
+                ],
+                expected_root_types=(dict,),
+            )
+
+        self.assertEqual(result.value, {"summary": "short"})
+
+    def test_openai_provider_complete_json_value_raises_for_invalid_expected_shape(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        provider = OpenAICompatibleProvider(settings)
+
+        with mock.patch.object(provider, "_request_content", return_value=('{"summary":"short"}', 12)):
+            with self.assertRaises(ProviderError) as exc_info:
+                provider.complete_json_value(
+                    [
+                        {"role": "system", "content": "compact"},
+                        {"role": "user", "content": "target"},
+                    ],
+                    expected_root_types=(list,),
+                )
+
+        self.assertEqual(exc_info.exception.parse_status, "invalid_json_value")
+
     def test_compaction_messages_use_compact_json_and_targeted_slots(self) -> None:
         settings, store, _, _, context_engine, _, _, _ = self._build_runtime(context_token_budget=50000)
         pack = ContextPack(
             slots=[
-                ContextSlot(
-                    name="recoverable_history",
-                    role="user",
-                    source="test",
-                    strategy="recoverable_recall",
-                    content={"summary": "x" * 24000},
-                    priority=55,
-                ),
                 ContextSlot(
                     name="runtime_policy",
                     role="system",
@@ -1735,6 +1781,14 @@ class RuntimeRefactorTests(unittest.TestCase):
                     content={"active_observations": ["o" * 8000]},
                     priority=80,
                 ),
+                ContextSlot(
+                    name="recoverable_history",
+                    role="user",
+                    source="test",
+                    strategy="recoverable_recall",
+                    content={"summary": "x" * 24000},
+                    priority=55,
+                ),
             ],
             trim_policy=TrimPolicy(priority_order=("recoverable_history", "runtime_policy", "scene_slice", "task_focus")),
         )
@@ -1750,17 +1804,114 @@ class RuntimeRefactorTests(unittest.TestCase):
             protected_slots=context_engine._protected_slot_refs(),
         )
 
-        compact_messages = context_engine.build_compaction_messages(
+        compaction_request = context_engine.build_compaction_request(
             context_result,
             current_tokens=52000,
             target_tokens=50000,
             pass_index=1,
         )
-        user_content = compact_messages[1]["content"]
+        self.assertIsNotNone(compaction_request)
+        assert compaction_request is not None
+        user_content = compaction_request.messages[1]["content"]
         payload = json.loads(user_content)
 
         self.assertNotIn("\n", user_content)
-        self.assertEqual(list(payload["compactable_slots"].keys()), ["recoverable_history"])
+        self.assertEqual(compaction_request.target.path, "recoverable_history")
+        self.assertEqual(payload["target_path"], "recoverable_history")
+        self.assertIn("content", payload)
+        self.assertIn("local_rules", payload)
+        self.assertNotIn("compactable_slots", payload)
+        self.assertNotIn("protected_slots", payload)
+
+    def test_apply_compaction_target_replaces_only_scene_slice_branch(self) -> None:
+        _, _, _, _, context_engine, _, _, _ = self._build_runtime()
+        pack = ContextPack(
+            slots=[
+                ContextSlot(
+                    name="scene_slice",
+                    role="user",
+                    source="test",
+                    strategy="structured_slice",
+                    content={
+                        "player": {"name": "Tester"},
+                        "world": {"dimension": "minecraft:overworld"},
+                        "target_block": {"block_name": "Dark Oak Leaves"},
+                        "risk_state": {"level": "low"},
+                        "recent_events": [{"kind": "old"}],
+                        "social": {"is_alone": True},
+                    },
+                    priority=85,
+                )
+            ],
+            trim_policy=TrimPolicy(priority_order=("scene_slice",)),
+        )
+        context_result = ContextBuildResult(
+            messages=[],
+            sections=[],
+            message_stats={},
+            composition={},
+            recovery_refs=[],
+            budget_report={},
+            active_context_slots=[],
+            pack=pack,
+            protected_slots=context_engine._protected_slot_refs(),
+        )
+
+        compacted = context_engine.apply_compaction_target(
+            context_result,
+            target_path="scene_slice.recent_events",
+            replacement=[{"kind": "new"}],
+            compaction_passes=1,
+        )
+
+        scene_section = next(section for section in compacted.sections if section["name"] == "scene_slice")
+        self.assertEqual(scene_section["preview"]["recent_events"], [{"kind": "new"}])
+        self.assertEqual(scene_section["preview"]["player"]["name"], "Tester")
+        self.assertEqual(scene_section["preview"]["risk_state"]["level"], "low")
+        self.assertEqual(scene_section["preview"]["social"]["is_alone"], True)
+
+    def test_context_engine_deterministically_slims_runtime_policy_and_task_focus(self) -> None:
+        _, _, _, _, context_engine, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-compact-shape")
+        request.scoped_snapshot = {
+            "player": {"name": "Tester"},
+            "world": {"dimension": "minecraft:overworld"},
+            "recent_events": [{"kind": f"event-{index}"} for index in range(20)],
+        }
+        turn_state = self._turn_state(request)
+        turn_state.task.artifacts = []
+        turn_state.task.steps = []
+        turn_state.task.summary = {
+            "player_intent": "hello",
+            "next_best_companion_move": "reply briefly",
+            "delegate": "explore",
+            "finding_count": 2,
+            "ignored": "x",
+        }
+        turn_state.working_memory.artifact_refs = []
+        turn_state.working_memory.active_observations = []
+        turn_state.working_memory.observation_refs = [{"foo": "bar"}]
+        turn_state.working_memory.recovery_refs = [{"kind": "artifact"}]
+        turn_state.working_memory.key_facts = ["safe"]
+
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=turn_state,
+            capability_descriptors=[],
+        )
+
+        runtime_policy = next(section for section in result.sections if section["name"] == "runtime_policy")["preview"]
+        task_focus = next(section for section in result.sections if section["name"] == "task_focus")["preview"]
+        scene_slice = next(section for section in result.sections if section["name"] == "scene_slice")["preview"]
+
+        self.assertNotIn("artifacts", runtime_policy["task"])
+        self.assertNotIn("steps", runtime_policy["task"])
+        self.assertEqual(runtime_policy["task"]["summary"]["player_intent"], "hello")
+        self.assertNotIn("ignored", runtime_policy["task"]["summary"])
+        self.assertNotIn("artifact_refs", task_focus["working_memory"])
+        self.assertNotIn("observation_refs", task_focus["working_memory"])
+        self.assertNotIn("recovery_refs", task_focus["working_memory"])
+        self.assertEqual(len(scene_slice["recent_events"]), 12)
 
     def test_compaction_runs_before_main_decision_and_preserves_dialogue_context(self) -> None:
         settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = (
@@ -2289,28 +2440,21 @@ class _OverflowAfterCompactionProvider:
         self.decide_calls += 1
         raise AssertionError("Main model decide() should not run after context overflow.")
 
-    def complete_json(self, messages, response_model):
+    def complete_json_value(self, messages, *, expected_root_types=None):
         self.compact_calls += 1
-        payload = ContextCompactionResult(
-            slot_replacements={
-                "recoverable_history": {
-                    "session_summary": {"summary": "compacted"},
-                    "memories": [],
-                    "history": {"older_turn_count": 1, "recovery_available": True},
-                    "recovery_refs": [],
-                }
-            },
-            dropped_slots=[],
-            rationale="Reduce older recoverable history only.",
-            target_tokens=1024,
-        )
+        payload = {
+            "session_summary": {"summary": "compacted"},
+            "memories": [],
+            "history": {"older_turn_count": 1, "recovery_available": True},
+            "recovery_refs": [],
+        }
         return type(
-            "StructuredResult",
+            "ValueResult",
             (),
             {
-                "payload": payload,
+                "value": payload,
                 "latency_ms": 9,
-                "raw_response_preview": payload.model_dump_json(),
+                "raw_response_preview": json.dumps(payload, ensure_ascii=False),
                 "parse_status": "ok",
                 "model": "compact-test-model",
                 "temperature": 0.2,
@@ -2364,33 +2508,21 @@ class _OnePassContinuityCompactionProvider:
             message_count=len(messages),
         )
 
-    def complete_json(self, messages, response_model):
+    def complete_json_value(self, messages, *, expected_root_types=None):
         self.compact_calls += 1
-        payload = ContextCompactionResult(
-            slot_replacements={
-                "recoverable_history": {
-                    "session_summary": {"summary": "compacted"},
-                    "memories": [],
-                    "history": {"older_turn_count": 12, "recovery_available": True},
-                    "recovery_refs": [],
-                },
-                "runtime_policy": {
-                    "language": "Simplified Chinese by default",
-                    "player_role": "read_only",
-                    "limits": {"max_agent_steps": 4},
-                    "runtime_notes": [],
-                },
-            },
-            rationale="Compact older recoverable context and non-essential policy detail.",
-            target_tokens=1800,
-        )
+        payload = {
+            "session_summary": {"summary": "compacted"},
+            "memories": [],
+            "history": {"older_turn_count": 12, "recovery_available": True},
+            "recovery_refs": [],
+        }
         return type(
-            "StructuredResult",
+            "ValueResult",
             (),
             {
-                "payload": payload,
+                "value": payload,
                 "latency_ms": 9,
-                "raw_response_preview": payload.model_dump_json(),
+                "raw_response_preview": json.dumps(payload, ensure_ascii=False),
                 "parse_status": "ok",
                 "model": "compact-test-model",
                 "temperature": 0.2,

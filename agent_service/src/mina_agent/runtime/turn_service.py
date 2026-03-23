@@ -211,12 +211,19 @@ class TurnPipeline:
 
             current_tokens = int(current_result.budget_report.get("used_tokens", 0))
             target_tokens = max(1024, int(self._services.settings.context_token_budget * 0.85))
-            compact_messages = self._context_manager.build_compaction_messages(
+            compaction_request = self._context_manager.build_compaction_request(
                 current_result,
                 current_tokens=current_tokens,
                 target_tokens=target_tokens,
                 pass_index=pass_index + 1,
             )
+            if compaction_request is None:
+                raise ContextOverflowError(
+                    budget_tokens=self._services.settings.context_token_budget,
+                    used_tokens=current_tokens,
+                    protected_slots=list(current_result.protected_slots),
+                )
+            compact_messages = compaction_request.messages
             compact_request_stats = self._deliberation_engine.estimate_prompt_tokens(compact_messages)
             self._services.debug.record_event(
                 request.turn_id,
@@ -225,6 +232,7 @@ class TurnPipeline:
                     "pass_index": pass_index + 1,
                     "current_tokens": current_tokens,
                     "target_tokens": target_tokens,
+                    "target_path": compaction_request.target.path,
                     "message_count": len(compact_messages),
                     "message_stats": self._message_stats_from_token_estimate(compact_messages, compact_request_stats),
                     "messages": compact_messages,
@@ -232,7 +240,10 @@ class TurnPipeline:
                 },
                 step_index=current_step,
             )
-            compact_result = self._deliberation_engine.compact_context(compact_messages)
+            compact_result = self._deliberation_engine.compact_target(
+                compact_messages,
+                expected_root_types=compaction_request.target.expected_root_types,
+            )
             self._services.debug.record_event(
                 request.turn_id,
                 "context_compaction_finished",
@@ -240,18 +251,17 @@ class TurnPipeline:
                     "pass_index": pass_index + 1,
                     "current_tokens": current_tokens,
                     "target_tokens": target_tokens,
+                    "target_path": compaction_request.target.path,
                     "parse_status": compact_result.parse_status,
                     "raw_response_preview": compact_result.raw_response_preview,
-                    "slot_replacements": list(compact_result.payload.slot_replacements.keys()),
-                    "dropped_slots": compact_result.payload.dropped_slots,
-                    "rationale": compact_result.payload.rationale,
-                    "result": compact_result.payload.model_dump(),
+                    "result": compact_result.value,
                 },
                 step_index=current_step,
             )
-            current_result = self._context_manager.apply_compaction_result(
+            current_result = self._context_manager.apply_compaction_target(
                 current_result,
-                compact_result.payload,
+                target_path=compaction_request.target.path,
+                replacement=compact_result.value,
                 compaction_passes=pass_index + 1,
             )
         return current_result
