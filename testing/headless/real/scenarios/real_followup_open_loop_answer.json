@@ -5,16 +5,37 @@
   "status": "runnable_now",
   "expectation": "target_state",
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，我有点不知道接下来该干嘛。"},
-    {"actor_id": "player", "message": "我想先别太忙，你觉得呢？"}
+    {
+      "actor_id": "player",
+      "message": "Mina，我有点不知道接下来该干嘛。"
+    },
+    {
+      "actor_id": "player",
+      "message": "我想先别太忙，你觉得呢？"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
+    "forbidden_statuses": [
+      "failed"
+    ],
     "confirmation_expected": false,
     "max_duration_ms": 180000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "tp Steve -96 118 -48 facing -96 118 -44"
+  ]
 }

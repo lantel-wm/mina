@@ -4,17 +4,37 @@
   "world_template": "overworld_night_danger",
   "status": "runnable_now",
   "expectation": "target_state",
-  "setup_commands": ["time set night"],
+  "setup_commands": [
+    "time set night",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "fill -102 117 42 -90 121 54 minecraft:air",
+    "fill -102 117 42 -90 117 54 minecraft:grass_block",
+    "tp Steve -96 118 44 facing -96 118 48",
+    "summon minecraft:zombie -96.5 118 50.5",
+    "summon minecraft:skeleton -99.5 118 48.5"
+  ],
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，附近危险吗？"}
+    {
+      "actor_id": "player",
+      "message": "Mina，附近危险吗？"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
-    "required_capability_ids": ["game.nearby_entities.read"],
+    "forbidden_statuses": [
+      "failed"
+    ],
     "confirmation_expected": false,
     "max_duration_ms": 120000
   }

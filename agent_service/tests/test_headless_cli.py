@@ -11,7 +11,7 @@ from unittest import mock
 
 from mina_agent.dev import cli
 from mina_agent.dev.cli import ScenarioExecutionRecord
-from mina_agent.dev.scenarios import ScenarioLoadResult
+from mina_agent.dev.scenarios import HeadlessScenario, ScenarioLoadResult
 
 
 class HeadlessCliTests(unittest.TestCase):
@@ -136,6 +136,30 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertEqual(promoted["assertions"]["max_duration_ms"], 1234)
         self.assertIn("promoted_case.json", stdout.getvalue())
 
+    def test_defer_quality_review_never_runs_llm_judgement_during_run(self) -> None:
+        scenario = HeadlessScenario.model_validate(
+            {
+                "suite": "real",
+                "scenario_id": "real_codex_case",
+                "world_template": "overworld_day_spawn",
+                "quality_review": {
+                    "enabled": True,
+                    "judge": "codex",
+                    "rubric_id": "companion_quality_golden",
+                },
+                "actors": [{"actor_id": "player", "name": "Steve", "role": "read_only"}],
+                "turns": [{"actor_id": "player", "message": "hello"}],
+            }
+        )
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = cli.defer_quality_review(scenario)
+
+        self.assertEqual(result.status, "deferred_user_review")
+        self.assertIn("deferred", result.rationale or "")
+        self.assertIn("quality review deferred", stdout.getvalue())
+
     def test_wait_for_dev_log_entry_preserves_following_lines_for_next_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             turns_log = Path(tmpdir) / "turns.jsonl"
@@ -255,6 +279,7 @@ class HeadlessCliTests(unittest.TestCase):
             strict_real=False,
             include_known_issues=False,
             max_infra_failures=1,
+            keep_full_artifacts=False,
         )
         base_load = ScenarioLoadResult([], [], [])
         cases = [
@@ -342,8 +367,142 @@ class HeadlessCliTests(unittest.TestCase):
                 with (
                     mock.patch("mina_agent.dev.cli.execute_suite", return_value=(records, Path("/tmp/run"), base_load)),
                     mock.patch("mina_agent.dev.cli.write_real_reports"),
+                    mock.patch("mina_agent.dev.cli.prune_real_review_artifacts"),
                 ):
                     self.assertEqual(cli.run_real(args), expected)
+
+    def test_run_real_prunes_artifacts_by_default(self) -> None:
+        args = argparse.Namespace(
+            scenario_dir="unused",
+            world_template_dir="unused",
+            output_root="unused",
+            scenario_id=[],
+            agent_port=0,
+            server_ready_timeout=1.0,
+            agent_ready_timeout=1.0,
+            turn_timeout=1.0,
+            strict_real=False,
+            include_known_issues=False,
+            max_infra_failures=1,
+            keep_full_artifacts=False,
+        )
+
+        with (
+            mock.patch("mina_agent.dev.cli.execute_suite", return_value=([], Path("/tmp/run"), ScenarioLoadResult([], [], []))),
+            mock.patch("mina_agent.dev.cli.write_real_reports"),
+            mock.patch("mina_agent.dev.cli.prune_real_review_artifacts") as prune_mock,
+        ):
+            self.assertEqual(cli.run_real(args), 0)
+
+        prune_mock.assert_called_once_with(Path("/tmp/run"))
+
+    def test_run_real_can_keep_full_artifacts(self) -> None:
+        args = argparse.Namespace(
+            scenario_dir="unused",
+            world_template_dir="unused",
+            output_root="unused",
+            scenario_id=[],
+            agent_port=0,
+            server_ready_timeout=1.0,
+            agent_ready_timeout=1.0,
+            turn_timeout=1.0,
+            strict_real=False,
+            include_known_issues=False,
+            max_infra_failures=1,
+            keep_full_artifacts=True,
+        )
+
+        with (
+            mock.patch("mina_agent.dev.cli.execute_suite", return_value=([], Path("/tmp/run"), ScenarioLoadResult([], [], []))),
+            mock.patch("mina_agent.dev.cli.write_real_reports"),
+            mock.patch("mina_agent.dev.cli.prune_real_review_artifacts") as prune_mock,
+        ):
+            self.assertEqual(cli.run_real(args), 0)
+
+        prune_mock.assert_not_called()
+
+    def test_prune_real_review_artifacts_keeps_only_review_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_root = Path(tmpdir)
+            server_dir = run_root / "01_group" / "server"
+            (server_dir / "mina-dev").mkdir(parents=True, exist_ok=True)
+            (server_dir / "logs").mkdir(parents=True, exist_ok=True)
+            (server_dir / "world" / "region").mkdir(parents=True, exist_ok=True)
+            (server_dir / "mina-dev" / "turns.jsonl").write_text("turn\n", encoding="utf-8")
+            (server_dir / "logs" / "latest.log").write_text("latest\n", encoding="utf-8")
+            (server_dir / "logs" / "debug.log").write_text("debug\n", encoding="utf-8")
+            (server_dir / "world" / "region" / "r.0.0.mca").write_bytes(b"world")
+            (server_dir / "server.properties").write_text("motd=x\n", encoding="utf-8")
+
+            bundle_dir = (
+                run_root
+                / "01_group"
+                / "scenario_a"
+                / "agent_data"
+                / "debug"
+                / "turns"
+                / "2026-03-23"
+                / "120000__turn"
+            )
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (run_root / "01_group" / "scenario_a" / "agent_data" / "debug" / "index.jsonl").write_text(
+                '{"turn_id":"turn"}\n',
+                encoding="utf-8",
+            )
+            for filename in (
+                "summary.json",
+                "events.jsonl",
+                "request.start.json",
+                "response.progress.jsonl",
+                "response.final.json",
+                "scenario.capture.json",
+            ):
+                (bundle_dir / filename).write_text(filename + "\n", encoding="utf-8")
+            (bundle_dir / "prompts").mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "prompts" / "step_001.provider_input.json").write_text("prompt\n", encoding="utf-8")
+            (run_root / "01_group" / "scenario_a" / "agent_data" / "mina_agent.db").write_text("db\n", encoding="utf-8")
+            (run_root / "01_group" / "scenario_a" / "agent_data" / "sessions" / "abc").mkdir(parents=True, exist_ok=True)
+            (run_root / "01_group" / "scenario_a" / "agent_data" / "sessions" / "abc" / "events.jsonl").write_text(
+                "session\n",
+                encoding="utf-8",
+            )
+
+            cli.prune_real_review_artifacts(run_root)
+
+            self.assertTrue((server_dir / "mina-dev" / "turns.jsonl").exists())
+            self.assertTrue((server_dir / "logs" / "latest.log").exists())
+            self.assertFalse((server_dir / "logs" / "debug.log").exists())
+            self.assertFalse((server_dir / "world").exists())
+            self.assertFalse((server_dir / "server.properties").exists())
+
+            pruned_agent_data = run_root / "01_group" / "scenario_a" / "agent_data"
+            self.assertTrue((pruned_agent_data / "debug" / "index.jsonl").exists())
+            self.assertTrue((bundle_dir / "summary.json").exists())
+            self.assertTrue((bundle_dir / "response.final.json").exists())
+            self.assertTrue((bundle_dir / "scenario.capture.json").exists())
+            self.assertFalse((bundle_dir / "prompts").exists())
+            self.assertFalse((pruned_agent_data / "mina_agent.db").exists())
+            self.assertFalse((pruned_agent_data / "sessions").exists())
+
+    def test_resolve_template_asset_dir_can_inherit_world_from_source_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "base" / "world").mkdir(parents=True, exist_ok=True)
+            (root / "base" / "template.json").write_text("{}", encoding="utf-8")
+            (root / "derived").mkdir(parents=True, exist_ok=True)
+            (root / "derived" / "template.json").write_text(
+                json.dumps({"world_source_template": "base"}),
+                encoding="utf-8",
+            )
+
+            resolved = cli.resolve_template_asset_dir(
+                root,
+                "derived",
+                json.loads((root / "derived" / "template.json").read_text(encoding="utf-8")),
+                asset_name="world",
+            )
+
+        self.assertEqual(resolved, root / "base" / "world")
 
     def test_write_real_reports_generates_gap_files_and_scorecard(self) -> None:
         records = [

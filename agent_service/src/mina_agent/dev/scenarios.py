@@ -28,6 +28,7 @@ class ScenarioAssertions(BaseModel):
     expected_final_status: str | None = None
     forbidden_statuses: list[str] = Field(default_factory=list)
     required_capability_ids: list[str] = Field(default_factory=list)
+    required_capability_groups: list[list[str]] = Field(default_factory=list)
     forbidden_capability_ids: list[str] = Field(default_factory=list)
     confirmation_expected: bool | None = None
     required_reply_substrings: list[str] = Field(default_factory=list)
@@ -134,7 +135,7 @@ class HeadlessScenario(BaseModel):
 class QualityReviewResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["passed", "failed", "skipped_unavailable", "skipped_disabled", "review_error"]
+    status: Literal["passed", "failed", "skipped_unavailable", "skipped_disabled", "review_error", "deferred_user_review"]
     judge: QualityJudge = "codex"
     pass_: bool | None = Field(default=None, alias="pass")
     grounded: bool | None = None
@@ -207,6 +208,10 @@ def evaluate_assertions(assertions: ScenarioAssertions, observed: ObservedScenar
     missing_required = [capability_id for capability_id in assertions.required_capability_ids if capability_id not in observed_capabilities]
     if missing_required:
         return "missing_required_capability", f"missing required capability ids: {', '.join(missing_required)}"
+
+    for group in assertions.required_capability_groups:
+        if not any(capability_id in observed_capabilities for capability_id in group):
+            return "missing_required_capability", f"missing required capability group: {' | '.join(group)}"
 
     used_forbidden = [capability_id for capability_id in assertions.forbidden_capability_ids if capability_id in observed_capabilities]
     if used_forbidden:

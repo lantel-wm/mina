@@ -5,15 +5,39 @@
   "status": "runnable_now",
   "expectation": "target_state",
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，我身边有哪些能用的设施？"}
+    {
+      "actor_id": "player",
+      "message": "Mina，我身边有哪些能用的设施？"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
+    "forbidden_statuses": [
+      "failed"
+    ],
     "confirmation_expected": false,
     "max_duration_ms": 120000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-32,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "fill -38 117 -54 -26 121 -42 minecraft:air",
+    "fill -38 117 -54 -26 117 -42 minecraft:oak_planks",
+    "setblock -32 118 -48 minecraft:chest",
+    "setblock -31 118 -48 minecraft:crafting_table",
+    "setblock -30 118 -48 minecraft:furnace",
+    "setblock -29 118 -48 minecraft:campfire",
+    "tp Steve -32 118 -44 facing -32 118 -48"
+  ]
 }

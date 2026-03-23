@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import queue
-import shlex
 import shutil
 import signal
 import socket
@@ -47,8 +46,18 @@ DEFAULT_AGENT_PORT = 0
 DEFAULT_SERVER_READY_TIMEOUT = 180.0
 DEFAULT_AGENT_READY_TIMEOUT = 30.0
 DEFAULT_TURN_TIMEOUT = 180.0
-DEFAULT_CODEX_REVIEW_TIMEOUT = 60.0
 DEFAULT_PROGRESS_HEARTBEAT = 5.0
+REVIEW_SERVER_FILES = (Path("mina-dev/turns.jsonl"), Path("logs/latest.log"))
+REVIEW_BUNDLE_FILENAMES = frozenset(
+    {
+        "summary.json",
+        "events.jsonl",
+        "request.start.json",
+        "response.progress.jsonl",
+        "response.final.json",
+        "scenario.capture.json",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -246,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     real_parser.add_argument("--strict-real", action="store_true")
     real_parser.add_argument("--include-known-issues", action="store_true")
     real_parser.add_argument("--max-infra-failures", type=int, default=1)
+    real_parser.add_argument("--keep-full-artifacts", action="store_true")
 
     recent_parser = subparsers.add_parser("recent-turns", help="List recent debug-traced turns.")
     recent_parser.add_argument("--debug-dir", default="agent_service/data/debug")
@@ -311,6 +321,12 @@ def run_real(args: argparse.Namespace) -> int:
         max_infra_failures=max(args.max_infra_failures, 1),
     )
     write_real_reports(run_root, records, load_result)
+    if args.keep_full_artifacts:
+        log_status("Keeping full run-real artifacts because --keep-full-artifacts was set")
+    else:
+        log_status("Pruning run-real output to review-only artifacts")
+        prune_real_review_artifacts(run_root)
+        log_status("run-real output pruned to review-only artifacts")
     print_suite_summary("real", records, run_root=run_root)
 
     infra_failures = [record for record in records if record.outcome == "infra_failure"]
@@ -475,7 +491,7 @@ def execute_suite(
                         debug_dir=agent_data_dir / "debug",
                         timeout=turn_timeout,
                     )
-                    quality_review = maybe_run_quality_review(repo_root, scenario, result)
+                    quality_review = defer_quality_review(scenario)
                     observed = build_observed_result(result, quality_review)
                     failure_category, failure_detail = classify_structural_failure(result)
                     if failure_category is None:
@@ -691,50 +707,17 @@ def build_observed_result(results: list[TurnRunResult], quality_review: QualityR
     )
 
 
-def maybe_run_quality_review(repo_root: Path, scenario: HeadlessScenario, results: list[TurnRunResult]) -> QualityReviewResult:
+def defer_quality_review(scenario: HeadlessScenario) -> QualityReviewResult:
     if not scenario.quality_review.enabled:
         return QualityReviewResult(status="skipped_disabled")
-    log_status(f"Scenario {scenario.scenario_id}: running quality review ({scenario.quality_review.judge})")
-    review_cmd = os.getenv("MINA_CODEX_REVIEW_CMD", "").strip()
-    if not review_cmd:
-        log_status(f"Scenario {scenario.scenario_id}: quality review skipped because MINA_CODEX_REVIEW_CMD is not configured")
-        return QualityReviewResult(status="skipped_unavailable", rationale="MINA_CODEX_REVIEW_CMD is not configured.")
-
-    payload = {
-        "scenario": scenario.model_dump(),
-        "turns": [
-            {
-                "turn_id": result.turn_id,
-                "actor_id": result.actor_id,
-                "message": result.message,
-                "final_reply": result.final_reply,
-                "selected_capability_ids": result.selected_capability_ids,
-                "bundle_dir": str(result.bundle_dir),
-            }
-            for result in results
-        ],
-        "final_reply": results[-1].final_reply,
-    }
-    try:
-        command = shlex.split(review_cmd)
-        completed = subprocess.run(
-            command,
-            cwd=repo_root,
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=float(os.getenv("MINA_CODEX_REVIEW_TIMEOUT_SECONDS", DEFAULT_CODEX_REVIEW_TIMEOUT)),
-        )
-        if completed.returncode != 0:
-            return QualityReviewResult(status="review_error", error=completed.stderr.strip() or completed.stdout.strip())
-        raw = json.loads(completed.stdout)
-        if isinstance(raw, dict) and "status" not in raw:
-            raw["status"] = "passed" if raw.get("pass") else "failed"
-        result = QualityReviewResult.model_validate(raw)
-        log_status(f"Scenario {scenario.scenario_id}: quality review result -> {result.status}")
-        return result
-    except Exception as exc:  # noqa: BLE001
-        return QualityReviewResult(status="review_error", error=str(exc))
+    log_status(
+        f"Scenario {scenario.scenario_id}: quality review deferred. "
+        "run-real never performs Codex/LLM judgement during execution; review it manually after the suite finishes."
+    )
+    return QualityReviewResult(
+        status="deferred_user_review",
+        rationale="Manual Codex review is intentionally deferred until after run-real completes.",
+    )
 
 
 def classify_structural_failure(results: list[TurnRunResult]) -> tuple[str | None, str | None]:
@@ -965,8 +948,10 @@ def materialize_run_directory(world_template_root: Path, template_id: str, run_d
     if not metadata_path.exists():
         raise RuntimeError(f"startup_failure: missing world template metadata: {metadata_path}")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    for name in ("world", "config"):
-        source = template_dir / name
+    for name, source in (
+        ("world", resolve_template_asset_dir(world_template_root, template_id, metadata, asset_name="world")),
+        ("config", template_dir / "config"),
+    ):
         if source.exists():
             shutil.copytree(source, run_dir / name)
     for name, fallback in (
@@ -985,6 +970,36 @@ def materialize_run_directory(world_template_root: Path, template_id: str, run_d
     base_server_properties = load_properties_file(seed_run_dir / "server.properties")
     base_server_properties.update({str(key): str(value) for key, value in (metadata.get("server_properties") or {}).items()})
     write_server_properties(run_dir / "server.properties", base_server_properties)
+
+
+def resolve_template_asset_dir(
+    world_template_root: Path,
+    template_id: str,
+    metadata: dict[str, Any],
+    *,
+    asset_name: str,
+    seen: set[str] | None = None,
+) -> Path:
+    template_dir = world_template_root / template_id
+    direct = template_dir / asset_name
+    if direct.exists():
+        return direct
+
+    source_template = str(metadata.get(f"{asset_name}_source_template") or metadata.get("world_source_template") or "").strip()
+    if not source_template:
+        return direct
+    if seen is None:
+        seen = set()
+    if template_id in seen:
+        raise RuntimeError(f"startup_failure: cyclic template source detected for {template_id}")
+    seen.add(template_id)
+
+    source_template_dir = world_template_root / source_template
+    source_metadata_path = source_template_dir / "template.json"
+    if not source_metadata_path.exists():
+        raise RuntimeError(f"startup_failure: missing source template metadata: {source_metadata_path}")
+    source_metadata = json.loads(source_metadata_path.read_text(encoding='utf-8'))
+    return resolve_template_asset_dir(world_template_root, source_template, source_metadata, asset_name=asset_name, seen=seen)
 
 
 def write_mina_properties(run_dir: Path, scenarios: list[HeadlessScenario]) -> None:
@@ -1274,6 +1289,63 @@ def print_suite_summary(suite: str, records: list[ScenarioExecutionRecord], *, r
     if run_root is not None and suite == "real":
         print(f"real reports: {run_root / 'scorecard.md'}", flush=True)
         print(f"real target-state gaps: {run_root / 'target_state_gaps.json'}", flush=True)
+
+
+def prune_real_review_artifacts(run_root: Path) -> None:
+    for entry in sorted(run_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        prune_real_group_dir(entry)
+
+
+def prune_real_group_dir(group_dir: Path) -> None:
+    server_dir = group_dir / "server"
+    if server_dir.exists():
+        rebuild_tree(server_dir, collect_selected_files(server_dir, REVIEW_SERVER_FILES))
+    for scenario_dir in sorted(group_dir.iterdir()):
+        if not scenario_dir.is_dir() or scenario_dir.name == "server":
+            continue
+        agent_data_dir = scenario_dir / "agent_data"
+        if agent_data_dir.exists():
+            rebuild_tree(agent_data_dir, collect_review_agent_files(agent_data_dir))
+
+
+def collect_selected_files(root: Path, relative_paths: tuple[Path, ...]) -> dict[Path, bytes]:
+    preserved: dict[Path, bytes] = {}
+    for rel_path in relative_paths:
+        source = root / rel_path
+        if source.exists() and source.is_file():
+            preserved[rel_path] = source.read_bytes()
+    return preserved
+
+
+def collect_review_agent_files(agent_data_dir: Path) -> dict[Path, bytes]:
+    preserved: dict[Path, bytes] = {}
+    index_path = agent_data_dir / "debug" / "index.jsonl"
+    if index_path.exists():
+        preserved[Path("debug/index.jsonl")] = index_path.read_bytes()
+
+    turns_root = agent_data_dir / "debug" / "turns"
+    if turns_root.exists():
+        for turn_dir in sorted(turns_root.glob("*/*")):
+            if not turn_dir.is_dir():
+                continue
+            rel_turn_dir = turn_dir.relative_to(agent_data_dir)
+            for filename in REVIEW_BUNDLE_FILENAMES:
+                source = turn_dir / filename
+                if source.exists() and source.is_file():
+                    preserved[rel_turn_dir / filename] = source.read_bytes()
+    return preserved
+
+
+def rebuild_tree(root: Path, preserved: dict[Path, bytes]) -> None:
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    for rel_path, content in preserved.items():
+        target = root / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
 
 
 def find_repo_root(start: Path) -> Path:

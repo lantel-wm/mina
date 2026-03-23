@@ -10,14 +10,32 @@
     "rubric_id": "companion_quality_golden"
   },
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，陪我说一句话，让我感觉你是真的在场。"}
+    {
+      "actor_id": "player",
+      "message": "Mina，陪我说一句话，让我感觉你是真的在场。"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
+    "forbidden_statuses": [
+      "failed"
+    ],
     "max_duration_ms": 120000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "tp Steve -96 118 -48 facing -96 118 -44"
+  ]
 }

@@ -121,6 +121,36 @@ class OpenAICompatibleProvider:
                 latency_ms=latency_ms,
             )
         last_candidate_text = content
+        if response_model is ModelDecision:
+            scored_candidates: list[tuple[int, int, str, ModelT]] = []
+            for index, (candidate_text, candidate_value) in enumerate(candidates):
+                last_candidate_text = candidate_text
+                try:
+                    payload = response_model.model_validate(candidate_value)
+                except ValidationError:
+                    continue
+                score = self._model_decision_candidate_score(payload)
+                if score <= 0:
+                    continue
+                scored_candidates.append((score, index, candidate_text, payload))
+
+            if scored_candidates:
+                _, _, _, payload = max(scored_candidates, key=lambda item: (item[0], item[1]))
+                return ProviderStructuredResult(
+                    payload=payload,
+                    latency_ms=latency_ms,
+                    raw_response_preview=content,
+                    parse_status="ok",
+                    model=self._settings.model or "",
+                    temperature=TEMPERATURE,
+                    message_count=len(messages),
+                )
+            raise ProviderError(
+                f"Model returned a JSON block that does not match the {response_model.__name__} schema.",
+                parse_status="invalid_decision_json",
+                raw_response_preview=last_candidate_text,
+                latency_ms=latency_ms,
+            )
         for candidate_text, candidate_value in candidates:
             last_candidate_text = candidate_text
             try:
@@ -142,6 +172,30 @@ class OpenAICompatibleProvider:
             raw_response_preview=last_candidate_text,
             latency_ms=latency_ms,
         )
+
+    def _model_decision_candidate_score(self, decision: ModelDecision) -> int:
+        score = 0
+        if decision.intent is not None:
+            score += 6
+        if decision.mode is not None:
+            score += 4
+        if decision.final_reply:
+            score += 6
+        if decision.capability_request is not None and decision.capability_request.capability_id:
+            score += 6
+        if decision.delegate_request is not None and decision.delegate_request.objective:
+            score += 6
+        if decision.confirmation_request is not None and decision.confirmation_request.effect_summary:
+            score += 3
+        if decision.capability_id:
+            score += 2
+        if decision.delegate_role is not None:
+            score += 2
+        if decision.task_selection is not None:
+            score += 1
+        if decision.task_update:
+            score += 1
+        return score
 
     def complete_json_value(
         self,

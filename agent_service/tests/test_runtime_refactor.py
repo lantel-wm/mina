@@ -1746,6 +1746,67 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         self.assertEqual(exc_info.exception.parse_status, "invalid_json_value")
 
+    def test_openai_provider_decide_prefers_outer_model_decision_over_nested_json(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        provider = OpenAICompatibleProvider(settings)
+        content = json.dumps(
+            {
+                "intent": "execute",
+                "capability_request": {
+                    "capability_id": "game.target_block.read",
+                    "arguments": {},
+                    "effect_summary": "读取玩家当前视线所指的方块或实体",
+                    "requires_confirmation": False,
+                },
+            },
+            ensure_ascii=False,
+        )
+
+        with mock.patch.object(provider, "_request_content", return_value=(content, 12)):
+            result = provider.decide(
+                [
+                    {"role": "system", "content": "hello"},
+                    {"role": "user", "content": "world"},
+                ]
+            )
+
+        self.assertEqual(result.decision.intent, "execute")
+        self.assertIsNotNone(result.decision.capability_request)
+        self.assertEqual(result.decision.capability_request.capability_id, "game.target_block.read")
+
+    def test_openai_provider_rejects_semantically_empty_model_decision_candidates(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        provider = OpenAICompatibleProvider(settings)
+
+        with mock.patch.object(provider, "_request_content", return_value=('{"arguments":{}}', 12)):
+            with self.assertRaises(ProviderError) as exc_info:
+                provider.decide(
+                    [
+                        {"role": "system", "content": "hello"},
+                        {"role": "user", "content": "world"},
+                    ]
+                )
+
+        self.assertEqual(exc_info.exception.parse_status, "invalid_decision_json")
+
+    def test_deliberation_engine_normalize_infers_execute_from_capability_request(self) -> None:
+        settings = self._settings_for_provider_test(model="gpt-5-mini", encoding_override="o200k_base")
+        provider = OpenAICompatibleProvider(settings)
+        engine = DeliberationEngine(provider)
+
+        decision = engine.normalize(
+            ModelDecision(
+                capability_request=CapabilityRequest(
+                    capability_id="server.rules.read",
+                    arguments={},
+                    effect_summary="读取服务器规则",
+                )
+            )
+        )
+
+        self.assertEqual(decision.intent, "execute")
+        self.assertEqual(decision.capability_id, "server.rules.read")
+
     def test_compaction_messages_use_compact_json_and_targeted_slots(self) -> None:
         settings, store, _, _, context_engine, _, _, _ = self._build_runtime(context_token_budget=50000)
         pack = ContextPack(

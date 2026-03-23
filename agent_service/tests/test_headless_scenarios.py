@@ -94,6 +94,36 @@ class HeadlessScenarioAssertionsTest(unittest.TestCase):
         self.assertEqual(category, "missing_required_capability")
         self.assertIn("game.player_snapshot.read", detail or "")
 
+    def test_required_capability_group_accepts_any_member(self) -> None:
+        assertions = ScenarioAssertions(required_capability_groups=[["observe.poi", "world.poi.read"]])
+        observed = ObservedScenarioResult(
+            final_status="completed",
+            selected_capability_ids=["world.poi.read"],
+            confirmation_expected=False,
+            final_reply="Ready.",
+            duration_ms=200,
+        )
+
+        category, detail = evaluate_assertions(assertions, observed)
+
+        self.assertIsNone(category)
+        self.assertIsNone(detail)
+
+    def test_missing_required_capability_group_is_reported_explicitly(self) -> None:
+        assertions = ScenarioAssertions(required_capability_groups=[["observe.technical", "carpet.observability.read"]])
+        observed = ObservedScenarioResult(
+            final_status="completed",
+            selected_capability_ids=[],
+            confirmation_expected=False,
+            final_reply="Ready.",
+            duration_ms=200,
+        )
+
+        category, detail = evaluate_assertions(assertions, observed)
+
+        self.assertEqual(category, "missing_required_capability")
+        self.assertIn("observe.technical | carpet.observability.read", detail or "")
+
     def test_reply_assertion_failure_is_reported_explicitly(self) -> None:
         assertions = ScenarioAssertions(required_reply_substrings=["hello"], forbidden_reply_substrings=["forbidden"])
         observed = ObservedScenarioResult(

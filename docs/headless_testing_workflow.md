@@ -158,6 +158,7 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
 - `--include-known-issues`
 - `--strict-real`
 - `--max-infra-failures`
+- `--keep-full-artifacts`：保留完整 world / DB / prompt artifact；默认会在 run 结束后裁剪成 review-only 输出
 
 退出码语义：
 
@@ -174,6 +175,34 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
 - `failing_cases.json`
 - `target_state_gaps.json`
 - `scorecard.md`
+
+默认情况下，`run-real` 结束后还会对每个 scenario/group 输出做一次 review-only 裁剪。
+
+默认保留：
+
+- `summary.json`
+- `failing_cases.json`
+- `target_state_gaps.json`
+- `scorecard.md`
+- `server/mina-dev/turns.jsonl`
+- `server/logs/latest.log`
+- `agent_data/debug/index.jsonl`
+- 每个 turn 的 `summary.json`
+- 每个 turn 的 `events.jsonl`
+- 每个 turn 的 `request.start.json`
+- 每个 turn 的 `response.progress.jsonl`
+- 每个 turn 的 `response.final.json`
+- 每个 turn 的 `scenario.capture.json`
+
+默认清理：
+
+- `server/world/**`
+- `server/logs/debug.log`
+- `agent_data/mina_agent.db`
+- `agent_data/sessions/**`
+- `prompts/step_*.provider_input.json`
+
+如果你要做更深层的 runtime/provider/debug 分析，再显式使用 `--keep-full-artifacts`。
 
 其中：
 
@@ -318,7 +347,7 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-tr
 - `feature_flags`：控制实验能力面
 - `actors`：多人场景/权限场景配置
 - `turns`：场景内的多 turn 对话
-- `quality_review`：是否启用外部 Codex 评审
+- `quality_review`：是否把该场景标记为“建议在 run 结束后做人审”
 - `setup_commands`：场景级预设命令
 - `assertions`：结构、能力、弱文本、时长约束
 
@@ -327,6 +356,7 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-tr
 - `expected_final_status`：通常为 `completed`
 - `forbidden_statuses`：禁止的最终状态
 - `required_capability_ids`：必须出现的 capability id
+- `required_capability_groups`：每组里至少命中一个 capability id 即算满足
 - `forbidden_capability_ids`：不允许出现的 capability id
 - `confirmation_expected`：是否应该进入确认态
 - `required_reply_substrings`：最终回复必须包含的片段
@@ -335,9 +365,14 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-tr
 
 `real` 套件故意不做整段回复快照对比，而是采用结构断言、能力断言和弱文本断言。
 
+对于 `real` 场景，当前断言策略分两类：
+
+- 如果答案所需事实已经在 scoped context 中，允许 Mina 直接给 grounded reply
+- 如果问题本身要求读取新事实、做技术读取、检索或委托，则仍要求 capability / capability group
+
 ## 质量评审
 
-部分 `real` 场景可以启用 Codex 质量评审：
+部分 `real` 场景可以启用 Codex 质量评审标记：
 
 ```json
 "quality_review": {
@@ -347,7 +382,15 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-tr
 }
 ```
 
-当前 runner 通过环境变量 `MINA_CODEX_REVIEW_CMD` 调用外部评审命令。未配置时，这类场景会记录为 `skipped_unavailable`，不会导致整套 `real` 失败。
+`run-real` 执行期间不会调用任何 Codex/LLM judgement。
+
+如果场景启用了 `quality_review.enabled=true`，runner 只会把它记录为 `deferred_user_review`，提醒你在整套 run 完成后再人工发起 Codex 检查。
+
+也就是说：
+
+- `run-real` 只负责跑真实模型场景本身
+- 质量评审必须是后处理步骤
+- 是否让 Codex 参与质量评审，由用户在 run 完成后主动决定
 
 ## 世界模板
 
@@ -363,6 +406,20 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-tr
 - `experimental_sandbox_lab`
 
 每个模板目录下至少需要 `template.json`。如果模板目录还包含 `world/`、`config/`，runner 会一起物化到临时 run dir。
+
+模板还支持共享一个 checked-in base world：
+
+```json
+{
+  "world_source_template": "overworld_day_spawn",
+  "server_properties": {
+    "gamemode": "survival"
+  }
+}
+```
+
+如果当前模板目录没有自己的 `world/`，runner 会递归解析 `world_source_template`，从源模板复制世界。
+当前 `cave_underground`、`home_base_storage`、`technical_carpet_lab`、`village_social`、`overworld_night_danger` 都共享 `overworld_day_spawn/world`，再靠 scenario setup commands 搭建各自稳定场景。
 
 ## Runner 的实际执行方式
 
@@ -393,7 +450,6 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli promote-tr
 - `unknown_capability_rejection`
 - `missing_required_capability`
 - `reply_assertion_failure`
-- `quality_review_failure`
 
 其中前四类默认视为基础设施失败。
 

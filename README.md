@@ -103,6 +103,12 @@ Run the full real-model target-state suite:
 ./.venv/bin/python -m mina_agent.dev.cli run-real
 ```
 
+By default, `run-real` prunes its output down to review-essential artifacts only. Use `--keep-full-artifacts` if you explicitly want the full server world, prompt buffers, SQLite DBs, and other deep-debug outputs.
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli run-real --keep-full-artifacts
+```
+
 Run the real suite in strict mode so any behavior gap returns non-zero:
 
 ```bash
@@ -123,6 +129,7 @@ Headless outputs are stored under `tmp/headless/functional/<timestamp>/` or `tmp
 - Python-side debug bundles under `<scenario-run-dir>/agent_data/debug/turns/...`
 
 Real-suite runs also emit `summary.json`, `failing_cases.json`, `target_state_gaps.json`, and `scorecard.md` at the run root.
+By default they are pruned to review-only artifacts after the run finishes.
 
 Useful developer commands:
 

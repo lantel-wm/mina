@@ -10,14 +10,35 @@
     "rubric_id": "companion_pressure_empathy"
   },
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，我在洞里有点压抑，你先陪我稳一下。"}
+    {
+      "actor_id": "player",
+      "message": "Mina，我在洞里有点压抑，你先陪我稳一下。"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
+    "forbidden_statuses": [
+      "failed"
+    ],
     "max_duration_ms": 120000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-32,y=26,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "fill -38 24 -54 -26 36 -42 minecraft:stone",
+    "fill -37 25 -53 -27 33 -43 minecraft:air",
+    "setblock -32 25 -48 minecraft:torch",
+    "tp Steve -32 26 -48 facing -32 26 -44"
+  ]
 }

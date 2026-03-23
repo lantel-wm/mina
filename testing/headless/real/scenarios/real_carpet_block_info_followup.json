@@ -5,17 +5,45 @@
   "status": "runnable_now",
   "expectation": "target_state",
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，我看着的是什么方块？"},
-    {"actor_id": "player", "message": "那它再详细一点呢？"}
+    {
+      "actor_id": "player",
+      "message": "Mina，我看着的是什么方块？"
+    },
+    {
+      "actor_id": "player",
+      "message": "那它再详细一点呢？"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
-    "required_capability_ids": ["carpet.block_info.read"],
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_capability_ids": [
+      "carpet.block_info.read"
+    ],
     "confirmation_expected": false,
     "max_duration_ms": 180000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-160,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode creative Steve",
+    "effect clear Steve",
+    "fill -166 117 -54 -154 122 -42 minecraft:air",
+    "fill -166 117 -54 -154 117 -42 minecraft:smooth_stone",
+    "setblock -160 118 -44 minecraft:observer[facing=south]",
+    "setblock -159 118 -44 minecraft:note_block",
+    "setblock -158 118 -44 minecraft:stonecutter",
+    "tp Steve -160 118 -48 facing -160 118 -44"
+  ]
 }

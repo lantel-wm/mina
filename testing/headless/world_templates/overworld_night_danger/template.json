@@ -1,4 +1,5 @@
 {
+  "world_source_template": "overworld_day_spawn",
   "server_properties": {
     "difficulty": "hard",
     "gamemode": "survival",

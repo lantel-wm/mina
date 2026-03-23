@@ -5,16 +5,49 @@
   "status": "runnable_now",
   "expectation": "target_state",
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，附近有什么值得去的地方吗？"}
+    {
+      "actor_id": "player",
+      "message": "Mina，附近有什么值得去的地方吗？"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
-    "required_capability_ids": ["world.poi.read"],
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_capability_groups": [
+      [
+        "observe.poi",
+        "world.poi.read"
+      ]
+    ],
     "confirmation_expected": false,
     "max_duration_ms": 120000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-32,y=118,z=48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "fill -38 117 42 -26 121 54 minecraft:air",
+    "fill -38 117 42 -26 117 54 minecraft:grass_block",
+    "setblock -32 118 48 minecraft:bell[attachment=floor]",
+    "setblock -29 118 48 minecraft:campfire",
+    "setblock -35 118 48 minecraft:white_bed[part=foot,facing=east]",
+    "setblock -34 118 48 minecraft:white_bed[part=head,facing=east]",
+    "setblock -35 118 50 minecraft:white_bed[part=foot,facing=east]",
+    "setblock -34 118 50 minecraft:white_bed[part=head,facing=east]",
+    "summon minecraft:villager -31.5 118 47.5 {NoAI:1b}",
+    "summon minecraft:villager -33.5 118 49.5 {NoAI:1b}",
+    "tp Steve -32 118 44 facing -32 118 48"
+  ]
 }

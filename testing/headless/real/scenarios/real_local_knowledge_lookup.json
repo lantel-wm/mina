@@ -5,15 +5,35 @@
   "status": "runnable_now",
   "expectation": "target_state",
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，用你本地知识库告诉我一个和当前生存有关的提示。"}
+    {
+      "actor_id": "player",
+      "message": "Mina，别用临时观察，直接用你本地知识库给我一个关于樱花树林开局的提示。"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
-    "required_capability_ids": ["retrieval.local_knowledge.search"],
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_capability_ids": [
+      "retrieval.local_knowledge.search"
+    ],
     "max_duration_ms": 120000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "tp Steve -96 118 -48 facing -96 118 -44"
+  ]
 }

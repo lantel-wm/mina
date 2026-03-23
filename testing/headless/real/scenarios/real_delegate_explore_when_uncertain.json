@@ -5,15 +5,38 @@
   "status": "runnable_now",
   "expectation": "target_state",
   "actors": [
-    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
   ],
   "turns": [
-    {"actor_id": "player", "message": "Mina，我现在这附近到底有什么线索？你先自己理一下。"}
+    {
+      "actor_id": "player",
+      "message": "Mina，先自己探索一下我周围32格，再告诉我这里到底有什么线索。"
+    }
   ],
   "assertions": {
     "expected_final_status": "completed",
-    "forbidden_statuses": ["failed"],
-    "required_capability_ids": ["agent.explore.delegate"],
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_capability_ids": [
+      "agent.explore.delegate"
+    ],
     "max_duration_ms": 120000
-  }
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-32,y=26,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "fill -38 24 -54 -26 36 -42 minecraft:stone",
+    "fill -37 25 -53 -27 33 -43 minecraft:air",
+    "setblock -32 25 -48 minecraft:torch",
+    "tp Steve -32 26 -48 facing -32 26 -44"
+  ]
 }

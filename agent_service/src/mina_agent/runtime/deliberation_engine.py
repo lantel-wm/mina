@@ -73,11 +73,23 @@ class DeliberationEngine:
         return complete_json_value(messages, expected_root_types=expected_root_types)
 
     def normalize(self, decision: ModelDecision) -> ModelDecision:
-        if decision.intent is None:
-            if decision.mode == "final_reply":
-                decision.intent = "reply"
-            elif decision.mode == "call_capability":
-                decision.intent = "execute"
+        if (
+            decision.capability_request is not None
+            and not str(decision.capability_request.capability_id or "").strip()
+            and decision.capability_id
+        ):
+            decision.capability_request = CapabilityRequest(
+                capability_id=decision.capability_id,
+                arguments=dict(decision.capability_request.arguments or decision.arguments),
+                effect_summary=decision.capability_request.effect_summary or decision.effect_summary,
+                requires_confirmation=(
+                    decision.capability_request.requires_confirmation or decision.requires_confirmation
+                ),
+            )
+        if decision.capability_request is not None and decision.capability_id is None:
+            capability_id = str(decision.capability_request.capability_id or "").strip()
+            if capability_id:
+                decision.capability_id = capability_id
         if decision.capability_request is None and decision.capability_id:
             decision.capability_request = CapabilityRequest(
                 capability_id=decision.capability_id,
@@ -85,6 +97,19 @@ class DeliberationEngine:
                 effect_summary=decision.effect_summary,
                 requires_confirmation=decision.requires_confirmation,
             )
+        if decision.intent is None:
+            if decision.mode == "final_reply":
+                decision.intent = "reply"
+            elif (
+                decision.mode == "call_capability"
+                or (decision.capability_request is not None and bool(decision.capability_request.capability_id))
+                or bool(decision.capability_id)
+            ):
+                decision.intent = "execute"
+            elif decision.delegate_request is not None:
+                decision.intent = "delegate_plan" if decision.delegate_request.role == "plan" else "delegate_explore"
+            elif decision.delegate_role is not None:
+                decision.intent = "delegate_plan" if decision.delegate_role == "plan" else "delegate_explore"
         if decision.intent == "delegate_explore" and decision.delegate_request is None:
             decision.delegate_request = DelegateRequest(
                 role="explore",
