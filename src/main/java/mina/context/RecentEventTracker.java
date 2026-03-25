@@ -1,5 +1,6 @@
 package mina.context;
 
+import mina.util.ObservationTextResolver;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ItemEntity;
@@ -32,14 +33,21 @@ public final class RecentEventTracker {
     private final int capacity;
     private final int entityScanIntervalTicks;
     private final int longDangerThresholdTicks;
+    private final ObservationTextResolver textResolver;
     private final Map<UUID, PlayerPulseState> playerStates = new java.util.HashMap<>();
     private final Deque<TrackedEvent> events = new ArrayDeque<>();
     private long currentTick = 0L;
 
-    public RecentEventTracker(int capacity, int entityScanIntervalTicks, int longDangerThresholdTicks) {
+    public RecentEventTracker(
+            int capacity,
+            int entityScanIntervalTicks,
+            int longDangerThresholdTicks,
+            ObservationTextResolver textResolver
+    ) {
         this.capacity = Math.max(1, capacity);
         this.entityScanIntervalTicks = Math.max(1, entityScanIntervalTicks);
         this.longDangerThresholdTicks = Math.max(20, longDangerThresholdTicks);
+        this.textResolver = textResolver;
     }
 
     public synchronized void recordPlayerEvent(String kind, ServerPlayerEntity player, Map<String, Object> payload) {
@@ -108,7 +116,7 @@ public final class RecentEventTracker {
     public synchronized void onPlayerKilledEntity(ServerPlayerEntity player, LivingEntity killedEntity, DamageSource source) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("entity_id", Registries.ENTITY_TYPE.getId(killedEntity.getType()).toString());
-        payload.put("entity_name", killedEntity.getName().getString());
+        payload.put("entity_name", textResolver.entityName(killedEntity));
         payload.put("damage_source", source.getName());
         record(
                 "player_killed_important_enemy",
@@ -128,8 +136,8 @@ public final class RecentEventTracker {
         state.lastEquipmentChangeTick = currentTick;
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("slot", slot.asString());
-        payload.put("previous", GameContextCollector.stackMap(previousStack));
-        payload.put("current", GameContextCollector.stackMap(currentStack));
+        payload.put("previous", GameContextCollector.stackMap(previousStack, textResolver));
+        payload.put("current", GameContextCollector.stackMap(currentStack, textResolver));
         record("player_equipment_changed", player, payload, "low");
     }
 
@@ -140,7 +148,7 @@ public final class RecentEventTracker {
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("entity_id", Registries.ENTITY_TYPE.getId(entity.getType()).toString());
-        payload.put("entity_name", entity.getName().getString());
+        payload.put("entity_name", textResolver.entityName(entity));
         payload.put("dimension", world.getRegistryKey().getValue().toString());
         payload.put("position", GameContextCollector.vectorMap(new Vec3d(entity.getX(), entity.getY(), entity.getZ())));
         recordGlobal("entity_loaded", payload, entity instanceof TntEntity ? "medium" : "low");
@@ -153,7 +161,7 @@ public final class RecentEventTracker {
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("entity_id", Registries.ENTITY_TYPE.getId(entity.getType()).toString());
-        payload.put("entity_name", entity.getName().getString());
+        payload.put("entity_name", textResolver.entityName(entity));
         payload.put("dimension", world.getRegistryKey().getValue().toString());
         recordGlobal("entity_unloaded", payload, "low");
     }

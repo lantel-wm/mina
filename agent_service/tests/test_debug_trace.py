@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.providers.openai_compatible import ProviderDecisionResult, ProviderError
-from mina_agent.retrieval.index import LocalKnowledgeIndex
+from mina_agent.retrieval.wiki_store import WikiKnowledgeStore
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
 from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
@@ -299,6 +300,8 @@ class DebugTraceTests(unittest.TestCase):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
+        wiki_db_path = root / "data" / "wiki.db"
+        _seed_wiki_db(wiki_db_path)
         settings = Settings(
             host="127.0.0.1",
             port=8787,
@@ -308,7 +311,7 @@ class DebugTraceTests(unittest.TestCase):
             config_file=root / "config.local.json",
             data_dir=root / "data",
             db_path=root / "data" / "mina_agent.db",
-            knowledge_dir=root / "data" / "knowledge",
+            wiki_db_path=wiki_db_path,
             audit_dir=root / "data" / "audit",
             debug_enabled=False,
             debug_dir=root / "data" / "debug",
@@ -320,6 +323,10 @@ class DebugTraceTests(unittest.TestCase):
             enable_dynamic_scripting=False,
             max_agent_steps=8,
             max_retrieval_results=4,
+            wiki_default_limit=8,
+            wiki_max_limit=20,
+            wiki_section_excerpt_chars=600,
+            wiki_plain_text_excerpt_chars=800,
             yield_after_internal_steps=True,
             context_token_budget=120000,
             context_recent_full_turns=32,
@@ -1060,6 +1067,8 @@ class DebugTraceTests(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
         data_dir = root / "data"
+        wiki_db_path = data_dir / "wiki.db"
+        _seed_wiki_db(wiki_db_path)
         settings = Settings(
             host="127.0.0.1",
             port=8787,
@@ -1069,7 +1078,7 @@ class DebugTraceTests(unittest.TestCase):
             config_file=root / "config.local.json",
             data_dir=data_dir,
             db_path=data_dir / "mina_agent.db",
-            knowledge_dir=data_dir / "knowledge",
+            wiki_db_path=wiki_db_path,
             audit_dir=data_dir / "audit",
             debug_enabled=debug_enabled,
             debug_dir=data_dir / "debug",
@@ -1081,6 +1090,10 @@ class DebugTraceTests(unittest.TestCase):
             enable_dynamic_scripting=False,
             max_agent_steps=8,
             max_retrieval_results=4,
+            wiki_default_limit=8,
+            wiki_max_limit=20,
+            wiki_section_excerpt_chars=600,
+            wiki_plain_text_excerpt_chars=800,
             yield_after_internal_steps=True,
             context_token_budget=120000,
             context_recent_full_turns=32,
@@ -1095,13 +1108,18 @@ class DebugTraceTests(unittest.TestCase):
         audit = AuditLogger(settings.audit_dir)
         debug = build_debug_recorder(settings)
         policy_engine = PolicyEngine()
-        retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
-        retrieval_index.refresh()
+        wiki_store = WikiKnowledgeStore(
+            settings.wiki_db_path,
+            default_limit=settings.wiki_default_limit,
+            max_limit=settings.wiki_max_limit,
+            section_excerpt_chars=settings.wiki_section_excerpt_chars,
+            plain_text_excerpt_chars=settings.wiki_plain_text_excerpt_chars,
+        )
         capability_registry = CapabilityRegistry(
             settings=settings,
             store=store,
             policy_engine=policy_engine,
-            retrieval_index=retrieval_index,
+            wiki_store=wiki_store,
             script_runner=ScriptRunner(settings),
         )
         memory_policy = MemoryPolicy()
@@ -1281,6 +1299,94 @@ class DebugTraceTests(unittest.TestCase):
 
     def _load_jsonl(self, target: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+def _seed_wiki_db(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE pages (
+                page_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL UNIQUE,
+                normalized_title TEXT NOT NULL,
+                ns INTEGER NOT NULL,
+                rev_id INTEGER NOT NULL,
+                is_redirect INTEGER NOT NULL,
+                redirect_target TEXT,
+                plain_text TEXT NOT NULL,
+                raw_path TEXT NOT NULL,
+                processed_path TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_id INTEGER NOT NULL,
+                ord INTEGER NOT NULL,
+                level INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                text TEXT NOT NULL
+            );
+            CREATE TABLE categories (
+                page_id INTEGER NOT NULL,
+                category TEXT NOT NULL
+            );
+            CREATE TABLE wikilinks (
+                page_id INTEGER NOT NULL,
+                target_title TEXT NOT NULL,
+                display_text TEXT NOT NULL
+            );
+            CREATE TABLE templates (
+                page_id INTEGER NOT NULL,
+                template_name TEXT NOT NULL
+            );
+            CREATE TABLE template_params (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_id INTEGER NOT NULL,
+                template_name TEXT NOT NULL,
+                param_name TEXT NOT NULL,
+                param_value TEXT NOT NULL
+            );
+            CREATE TABLE infobox_kv (
+                page_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL
+            );
+            CREATE INDEX idx_pages_title ON pages(title);
+            CREATE INDEX idx_pages_normalized_title ON pages(normalized_title);
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO pages(
+                page_id, title, normalized_title, ns, rev_id, is_redirect, redirect_target,
+                plain_text, raw_path, processed_path, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "镐", "镐", 0, 1001, 0, None, "镐是工具。", "raw/1.json", "processed/1.json", "2026-03-23T00:00:00Z"),
+                (2, "钻石镐", "钻石镐", 0, 1002, 1, "镐", "钻石镐重定向。", "raw/2.json", "processed/2.json", "2026-03-23T00:00:00Z"),
+                (3, "树叶", "树叶", 0, 1003, 0, None, "树叶是方块。", "raw/3.json", "processed/3.json", "2026-03-23T00:00:00Z"),
+                (4, "Dark Oak Leaves", "Dark Oak Leaves", 0, 1004, 1, "树叶", "Dark Oak Leaves redirects to 树叶。", "raw/4.json", "processed/4.json", "2026-03-23T00:00:00Z"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO sections(page_id, ord, level, title, text) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, 1, 1, "用途", "镐可用于挖掘矿石。"),
+                (3, 1, 1, "用途", "树叶可用于装饰。"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO categories(page_id, category) VALUES (?, ?)",
+            [
+                (1, "工具"),
+                (3, "方块"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

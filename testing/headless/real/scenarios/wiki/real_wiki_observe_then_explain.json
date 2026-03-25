@@ -1,0 +1,46 @@
+{
+  "suite": "real",
+  "scenario_id": "real_wiki_observe_then_explain",
+  "scenario_category": "wiki",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "message": "Mina，我现在看着什么？"
+    },
+    {
+      "actor_id": "player",
+      "message": "那它有什么用？直接查 wiki 再告诉我。"
+    }
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_capability_ids": [
+      "game.target_block.read",
+      "wiki.page.get"
+    ],
+    "max_duration_ms": 180000
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "fill -97 117 -45 -95 119 -45 minecraft:gold_block",
+    "tp Steve -96 118 -49 facing -96 118 -45"
+  ]
+}

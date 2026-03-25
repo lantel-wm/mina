@@ -1,6 +1,7 @@
 package mina.capability;
 
 import com.mojang.datafixers.util.Pair;
+import mina.util.ObservationTextResolver;
 import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.registry.RegistryKeys;
@@ -26,6 +27,12 @@ import java.util.Locale;
 import java.util.Map;
 
 public final class ServerVanillaCommandBackend implements VanillaCommandBackend {
+    private final ObservationTextResolver textResolver;
+
+    public ServerVanillaCommandBackend(ObservationTextResolver textResolver) {
+        this.textResolver = textResolver;
+    }
+
     @Override
     public List<Entity> selector(ServerPlayerEntity player, Map<String, Object> selectorSpec) {
         var world = player.getEntityWorld();
@@ -79,7 +86,7 @@ public final class ServerVanillaCommandBackend implements VanillaCommandBackend 
     public Map<String, Object> readEntityData(ServerPlayerEntity player, Entity entity) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("entity_id", net.minecraft.registry.Registries.ENTITY_TYPE.getId(entity.getType()).toString());
-        payload.put("name", entity.getName().getString());
+        payload.put("name", textResolver.entityName(entity));
         payload.put("tags", new ArrayList<>(entity.getCommandTags()));
         payload.put("position", mina.context.GameContextCollector.vectorMap(new net.minecraft.util.math.Vec3d(entity.getX(), entity.getY(), entity.getZ())));
         payload.put("supported", true);

@@ -16,7 +16,7 @@ class Settings:
     config_file: Path
     data_dir: Path
     db_path: Path
-    knowledge_dir: Path
+    wiki_db_path: Path
     audit_dir: Path
     debug_enabled: bool
     debug_dir: Path
@@ -28,6 +28,10 @@ class Settings:
     enable_dynamic_scripting: bool
     max_agent_steps: int
     max_retrieval_results: int
+    wiki_default_limit: int
+    wiki_max_limit: int
+    wiki_section_excerpt_chars: int
+    wiki_plain_text_excerpt_chars: int
     yield_after_internal_steps: bool
     context_token_budget: int
     context_recent_full_turns: int
@@ -47,7 +51,7 @@ class Settings:
 
         data_dir = Path(_read("MINA_AGENT_DATA_DIR", config_data, "data_dir", "agent_service/data"))
         db_path = Path(_read("MINA_AGENT_DB_PATH", config_data, "db_path", str(data_dir / "mina_agent.db")))
-        knowledge_dir = Path(_read("MINA_AGENT_KNOWLEDGE_DIR", config_data, "knowledge_dir", str(data_dir / "knowledge")))
+        wiki_db_path = Path(_read("MINA_AGENT_WIKI_DB_PATH", config_data, "wiki_db_path", "mc_wiki/data/processed/sqlite/wiki.db"))
         audit_dir = Path(_read("MINA_AGENT_AUDIT_DIR", config_data, "audit_dir", str(data_dir / "audit")))
         debug_dir = Path(_read("MINA_AGENT_DEBUG_DIR", config_data, "debug_dir", str(data_dir / "debug")))
 
@@ -60,7 +64,7 @@ class Settings:
             config_file=config_file,
             data_dir=data_dir,
             db_path=db_path,
-            knowledge_dir=knowledge_dir,
+            wiki_db_path=wiki_db_path,
             audit_dir=audit_dir,
             debug_enabled=_read_bool("MINA_AGENT_DEBUG_ENABLED", config_data, "debug_enabled", False),
             debug_dir=debug_dir,
@@ -72,6 +76,24 @@ class Settings:
             enable_dynamic_scripting=_read_bool("MINA_AGENT_ENABLE_DYNAMIC_SCRIPTING", config_data, "enable_dynamic_scripting", False),
             max_agent_steps=int(_read("MINA_AGENT_MAX_STEPS", config_data, "max_agent_steps", 8)),
             max_retrieval_results=int(_read("MINA_AGENT_MAX_RETRIEVAL_RESULTS", config_data, "max_retrieval_results", 4)),
+            wiki_default_limit=int(_read("MINA_AGENT_WIKI_DEFAULT_LIMIT", config_data, "wiki_default_limit", 8)),
+            wiki_max_limit=int(_read("MINA_AGENT_WIKI_MAX_LIMIT", config_data, "wiki_max_limit", 20)),
+            wiki_section_excerpt_chars=int(
+                _read(
+                    "MINA_AGENT_WIKI_SECTION_EXCERPT_CHARS",
+                    config_data,
+                    "wiki_section_excerpt_chars",
+                    600,
+                )
+            ),
+            wiki_plain_text_excerpt_chars=int(
+                _read(
+                    "MINA_AGENT_WIKI_PLAIN_TEXT_EXCERPT_CHARS",
+                    config_data,
+                    "wiki_plain_text_excerpt_chars",
+                    800,
+                )
+            ),
             yield_after_internal_steps=_read_bool(
                 "MINA_AGENT_YIELD_AFTER_INTERNAL_STEPS",
                 config_data,

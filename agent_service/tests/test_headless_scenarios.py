@@ -79,6 +79,44 @@ class HeadlessScenarioAssertionsTest(unittest.TestCase):
             self.assertEqual([scenario.scenario_id for scenario in result.planned], ["planned_case"])
             self.assertEqual([scenario.scenario_id for scenario in result.known_issues], ["known_issue_case"])
 
+    def test_load_scenarios_infers_category_from_subdirectory_and_filters_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "wiki").mkdir(parents=True, exist_ok=True)
+            (root / "wiki" / "wiki_case.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "real",
+                        "scenario_id": "wiki_case",
+                        "world_template": "overworld_day_spawn",
+                        "status": "runnable_now",
+                        "expectation": "target_state",
+                        "actors": [{"actor_id": "player", "name": "Steve", "role": "read_only"}],
+                        "turns": [{"actor_id": "player", "message": "hello"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "general_case.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "real",
+                        "scenario_id": "general_case",
+                        "world_template": "overworld_day_spawn",
+                        "status": "runnable_now",
+                        "expectation": "target_state",
+                        "actors": [{"actor_id": "player", "name": "Steve", "role": "read_only"}],
+                        "turns": [{"actor_id": "player", "message": "hello"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = load_scenarios(root, suite="real", scenario_categories=["wiki"], include_known_issues=False)
+
+            self.assertEqual([scenario.scenario_id for scenario in result.runnable], ["wiki_case"])
+            self.assertEqual(result.runnable[0].scenario_category, "wiki")
+
     def test_missing_required_capability_is_reported_explicitly(self) -> None:
         assertions = ScenarioAssertions(expected_final_status="completed", required_capability_ids=["game.player_snapshot.read"])
         observed = ObservedScenarioResult(

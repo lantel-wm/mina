@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -14,7 +15,7 @@ from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.providers.openai_compatible import ProviderDecisionResult, ProviderError
-from mina_agent.retrieval.index import LocalKnowledgeIndex
+from mina_agent.retrieval.wiki_store import WikiKnowledgeStore
 from mina_agent.runtime.agent_loop import AgentLoop, AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry, RuntimeState
 from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
@@ -2158,6 +2159,92 @@ class RuntimeRefactorTests(unittest.TestCase):
 
         self.assertIn(artifact["artifact_id"], [item["artifact_id"] for item in result["results"]])
 
+    def test_wiki_page_get_resolves_redirects_for_chinese_and_english_titles(self) -> None:
+        _, _, _, capability_registry, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-wiki-page")
+        runtime_state = RuntimeState(
+            request=request,
+            turn_state=self._turn_state(request),
+            pending_confirmation=None,
+        )
+        capability = capability_registry.get(capability_registry.resolve(request), "wiki.page.get")
+
+        chinese = capability_registry.execute_internal(capability, {"title": "钻石镐"}, runtime_state)  # type: ignore[arg-type]
+        english = capability_registry.execute_internal(capability, {"title": "Dark Oak Leaves"}, runtime_state)  # type: ignore[arg-type]
+
+        self.assertTrue(chinese["found"])
+        self.assertEqual(chinese["page"]["title"], "镐")
+        self.assertEqual(chinese["page"]["resolved_from"], "钻石镐")
+        self.assertTrue(english["found"])
+        self.assertEqual(english["page"]["title"], "树叶")
+        self.assertEqual(english["page"]["resolved_from"], "Dark Oak Leaves")
+        self.assertLessEqual(len(english["sections"]), 4)
+        self.assertNotIn("plain_text", english["page"])
+
+    def test_wiki_category_limit_is_clamped_and_cards_are_compact(self) -> None:
+        settings, _, _, capability_registry, _, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-wiki-category")
+        runtime_state = RuntimeState(
+            request=request,
+            turn_state=self._turn_state(request),
+            pending_confirmation=None,
+        )
+        capability = capability_registry.get(capability_registry.resolve(request), "wiki.category.find")
+
+        result = capability_registry.execute_internal(capability, {"category": "工具", "limit": 999}, runtime_state)  # type: ignore[arg-type]
+
+        self.assertEqual(result["query_type"], "category")
+        self.assertEqual(result["result_count"], 1)
+        self.assertLessEqual(result["result_count"], settings.wiki_max_limit)
+        self.assertEqual(result["results"][0]["title"], "镐")
+        self.assertNotIn("plain_text", result["results"][0])
+
+    def test_context_prompt_replaces_local_knowledge_with_wiki_capabilities(self) -> None:
+        _, _, _, capability_registry, context_engine, _, _, _ = self._build_runtime()
+        request = self._turn_request(turn_id="turn-wiki-prompt")
+        result = context_engine.build_messages(
+            request=request,
+            turn_state=self._turn_state(request),
+            capability_descriptors=[capability.descriptor for capability in capability_registry.resolve(request)],
+        )
+
+        joined = "\n".join(message["content"] for message in result.messages)
+
+        self.assertIn("wiki.page.get", joined)
+        self.assertIn("wiki.category.find", joined)
+        self.assertNotIn("retrieval.local_knowledge.search", joined)
+
+    def test_zero_result_wiki_observation_is_not_treated_as_ambiguous(self) -> None:
+        settings, store, policy_engine, capability_registry, context_engine, orchestrator, memory_policy, resolver = self._build_runtime()
+        pipeline = TurnService(
+            AgentServices(
+                settings=settings,
+                store=store,
+                audit=AuditLogger(settings.audit_dir),
+                debug=build_debug_recorder(settings),
+                policy_engine=policy_engine,
+                capability_registry=capability_registry,
+                context_engine=context_engine,
+                decision_engine=DecisionEngine(_UnexpectedProvider()),
+                execution_orchestrator=orchestrator,
+                memory_policy=memory_policy,
+                confirmation_resolver=resolver,
+            )
+        )._pipeline
+
+        self.assertFalse(
+            pipeline._capability_observation_is_ambiguous(  # noqa: SLF001
+                "wiki.template_param.find",
+                {"query_type": "template_param", "result_count": 0, "results": []},
+            )
+        )
+        self.assertFalse(
+            pipeline._capability_observation_is_ambiguous(  # noqa: SLF001
+                "wiki.page.get",
+                {"found": False, "title": "Missing Page"},
+            )
+        )
+
     def test_prepare_task_uses_neutral_default_type_without_keyword_routing(self) -> None:
         _, store, _, _, _, _, _, _ = self._build_runtime()
         manager = TaskManager(store)
@@ -2296,6 +2383,8 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
         data_dir = root / "data"
+        wiki_db_path = data_dir / "wiki.db"
+        _seed_wiki_db(wiki_db_path)
         settings = Settings(
             host="127.0.0.1",
             port=8787,
@@ -2305,7 +2394,7 @@ class RuntimeRefactorTests(unittest.TestCase):
             config_file=root / "config.local.json",
             data_dir=data_dir,
             db_path=data_dir / "mina_agent.db",
-            knowledge_dir=data_dir / "knowledge",
+            wiki_db_path=wiki_db_path,
             audit_dir=data_dir / "audit",
             debug_enabled=False,
             debug_dir=data_dir / "debug",
@@ -2317,6 +2406,10 @@ class RuntimeRefactorTests(unittest.TestCase):
             enable_dynamic_scripting=enable_dynamic_scripting,
             max_agent_steps=8,
             max_retrieval_results=4,
+            wiki_default_limit=8,
+            wiki_max_limit=20,
+            wiki_section_excerpt_chars=600,
+            wiki_plain_text_excerpt_chars=800,
             yield_after_internal_steps=True,
             context_token_budget=context_token_budget,
             context_recent_full_turns=context_recent_full_turns,
@@ -2330,13 +2423,18 @@ class RuntimeRefactorTests(unittest.TestCase):
         audit = AuditLogger(settings.audit_dir)
         debug = build_debug_recorder(settings)
         policy_engine = PolicyEngine()
-        retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
-        retrieval_index.refresh()
+        wiki_store = WikiKnowledgeStore(
+            settings.wiki_db_path,
+            default_limit=settings.wiki_default_limit,
+            max_limit=settings.wiki_max_limit,
+            section_excerpt_chars=settings.wiki_section_excerpt_chars,
+            plain_text_excerpt_chars=settings.wiki_plain_text_excerpt_chars,
+        )
         capability_registry = CapabilityRegistry(
             settings=settings,
             store=store,
             policy_engine=policy_engine,
-            retrieval_index=retrieval_index,
+            wiki_store=wiki_store,
             script_runner=ScriptRunner(settings),
         )
         memory_policy = MemoryPolicy()
@@ -2350,6 +2448,8 @@ class RuntimeRefactorTests(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
         data_dir = root / "data"
+        wiki_db_path = data_dir / "wiki.db"
+        _seed_wiki_db(wiki_db_path)
         return Settings(
             host="127.0.0.1",
             port=8787,
@@ -2359,7 +2459,7 @@ class RuntimeRefactorTests(unittest.TestCase):
             config_file=root / "config.local.json",
             data_dir=data_dir,
             db_path=data_dir / "mina_agent.db",
-            knowledge_dir=data_dir / "knowledge",
+            wiki_db_path=wiki_db_path,
             audit_dir=data_dir / "audit",
             debug_enabled=False,
             debug_dir=data_dir / "debug",
@@ -2371,6 +2471,10 @@ class RuntimeRefactorTests(unittest.TestCase):
             enable_dynamic_scripting=False,
             max_agent_steps=8,
             max_retrieval_results=4,
+            wiki_default_limit=8,
+            wiki_max_limit=20,
+            wiki_section_excerpt_chars=600,
+            wiki_plain_text_excerpt_chars=800,
             yield_after_internal_steps=True,
             context_token_budget=120000,
             context_recent_full_turns=32,
@@ -2701,3 +2805,132 @@ class _UnexpectedStructuredProvider:
 
     def complete_json(self, messages, response_model):
         raise AssertionError("Delegate runtime should have used local fallback instead of submodel summarization.")
+
+
+def _seed_wiki_db(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE pages (
+                page_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL UNIQUE,
+                normalized_title TEXT NOT NULL,
+                ns INTEGER NOT NULL,
+                rev_id INTEGER NOT NULL,
+                is_redirect INTEGER NOT NULL,
+                redirect_target TEXT,
+                plain_text TEXT NOT NULL,
+                raw_path TEXT NOT NULL,
+                processed_path TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_id INTEGER NOT NULL,
+                ord INTEGER NOT NULL,
+                level INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                text TEXT NOT NULL
+            );
+            CREATE TABLE categories (
+                page_id INTEGER NOT NULL,
+                category TEXT NOT NULL
+            );
+            CREATE TABLE wikilinks (
+                page_id INTEGER NOT NULL,
+                target_title TEXT NOT NULL,
+                display_text TEXT NOT NULL
+            );
+            CREATE TABLE templates (
+                page_id INTEGER NOT NULL,
+                template_name TEXT NOT NULL
+            );
+            CREATE TABLE template_params (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_id INTEGER NOT NULL,
+                template_name TEXT NOT NULL,
+                param_name TEXT NOT NULL,
+                param_value TEXT NOT NULL
+            );
+            CREATE TABLE infobox_kv (
+                page_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL
+            );
+            CREATE INDEX idx_pages_title ON pages(title);
+            CREATE INDEX idx_pages_normalized_title ON pages(normalized_title);
+            CREATE INDEX idx_pages_redirect_target ON pages(redirect_target);
+            CREATE INDEX idx_sections_title ON sections(title);
+            CREATE INDEX idx_categories_category ON categories(category);
+            CREATE INDEX idx_wikilinks_target_title ON wikilinks(target_title);
+            CREATE INDEX idx_templates_template_name ON templates(template_name);
+            CREATE INDEX idx_template_params_lookup ON template_params(template_name, param_name);
+            CREATE INDEX idx_infobox_kv_lookup ON infobox_kv(key, value);
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO pages(
+                page_id, title, normalized_title, ns, rev_id, is_redirect, redirect_target,
+                plain_text, raw_path, processed_path, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "镐", "镐", 0, 1001, 0, None, "镐是用于挖掘方块的工具。", "raw/1.json", "processed/1.json", "2026-03-23T00:00:00Z"),
+                (2, "钻石镐", "钻石镐", 0, 1002, 1, "镐", "钻石镐重定向到镐。", "raw/2.json", "processed/2.json", "2026-03-23T00:00:00Z"),
+                (3, "树叶", "树叶", 0, 1003, 0, None, "树叶是树木的一部分。", "raw/3.json", "processed/3.json", "2026-03-23T00:00:00Z"),
+                (4, "Dark Oak Leaves", "Dark Oak Leaves", 0, 1004, 1, "树叶", "Dark Oak Leaves redirects to 树叶。", "raw/4.json", "processed/4.json", "2026-03-23T00:00:00Z"),
+                (5, "蘑菇方块", "蘑菇方块", 0, 1005, 0, None, "蘑菇方块会自然生成于巨型蘑菇。", "raw/5.json", "processed/5.json", "2026-03-23T00:00:00Z"),
+                (6, "Red Mushroom Block", "Red Mushroom Block", 0, 1006, 1, "蘑菇方块", "Red Mushroom Block redirects to 蘑菇方块。", "raw/6.json", "processed/6.json", "2026-03-23T00:00:00Z"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO sections(page_id, ord, level, title, text) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, 1, 1, "用途", "镐可用于更快地开采石头、矿石和许多功能性方块。"),
+                (1, 2, 1, "获取", "玩家可以通过合成获得镐，不同材质决定速度和耐久。"),
+                (3, 1, 1, "用途", "树叶可以用于装饰，也能掉落树苗和苹果。"),
+                (5, 1, 1, "生成", "蘑菇方块通常生成于巨型红蘑菇和棕蘑菇上。"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO categories(page_id, category) VALUES (?, ?)",
+            [
+                (1, "工具"),
+                (3, "方块"),
+                (5, "方块"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO wikilinks(page_id, target_title, display_text) VALUES (?, ?, ?)",
+            [
+                (1, "树叶", "树叶"),
+                (3, "镐", "镐"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO templates(page_id, template_name) VALUES (?, ?)",
+            [
+                (1, "信息框/工具"),
+                (3, "信息框/方块"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO template_params(page_id, template_name, param_name, param_value) VALUES (?, ?, ?, ?)",
+            [
+                (1, "信息框/工具", "durability", "1561"),
+                (3, "信息框/方块", "transparent", "是"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO infobox_kv(page_id, key, value) VALUES (?, ?, ?)",
+            [
+                (1, "durability", "1561"),
+                (3, "flammable", "是"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()

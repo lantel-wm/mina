@@ -1,0 +1,40 @@
+{
+  "suite": "real",
+  "scenario_id": "real_wiki_section_lookup",
+  "scenario_category": "wiki",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {
+      "actor_id": "player",
+      "name": "Steve",
+      "role": "read_only"
+    }
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "message": "Mina，直接用 wiki 找有“获取”段落的页面。"
+    }
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": [
+      "failed"
+    ],
+    "required_capability_ids": [
+      "wiki.section.find"
+    ],
+    "max_duration_ms": 120000
+  },
+  "setup_commands": [
+    "time set day",
+    "weather clear",
+    "kill @e[type=!minecraft:player,x=-96,y=118,z=-48,distance=..24]",
+    "clear Steve",
+    "gamemode survival Steve",
+    "effect clear Steve",
+    "tp Steve -96 118 -48 facing -96 118 -44"
+  ]
+}

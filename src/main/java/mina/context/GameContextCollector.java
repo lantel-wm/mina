@@ -7,6 +7,7 @@ import mina.capability.CapabilityExecutorRegistry;
 import mina.policy.PermissionResolver;
 import mina.policy.PlayerRole;
 import mina.util.JsonHelper;
+import mina.util.ObservationTextResolver;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -149,7 +150,7 @@ public final class GameContextCollector {
         return payload;
     }
 
-    public static Map<String, Object> stackMap(ItemStack stack) {
+    public static Map<String, Object> stackMap(ItemStack stack, ObservationTextResolver textResolver) {
         if (stack == null || stack.isEmpty()) {
             return null;
         }
@@ -157,7 +158,7 @@ public final class GameContextCollector {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("item_id", Registries.ITEM.getId(stack.getItem()).toString());
         payload.put("count", stack.getCount());
-        payload.put("name", stack.getName().getString());
+        payload.put("name", textResolver.itemName(stack));
         return payload;
     }
 }

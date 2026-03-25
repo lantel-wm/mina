@@ -87,6 +87,7 @@ class ScenarioExecutionRecord:
     turn_ids: list[str]
     bundle_dirs: list[str]
     quality_review: dict[str, Any] | None
+    scenario_category: str | None = None
 
 
 class LineProcess:
@@ -237,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     functional_parser.add_argument("--world-template-dir", default=str(DEFAULT_WORLD_TEMPLATE_DIR))
     functional_parser.add_argument("--output-root", default=str(DEFAULT_FUNCTIONAL_OUTPUT_ROOT))
     functional_parser.add_argument("--scenario-id", action="append", default=[])
+    functional_parser.add_argument("--scenario-category", action="append", default=[])
     functional_parser.add_argument("--agent-mode", choices=["stub", "real"], default="stub")
     functional_parser.add_argument("--agent-port", type=int, default=DEFAULT_AGENT_PORT)
     functional_parser.add_argument("--server-ready-timeout", type=float, default=DEFAULT_SERVER_READY_TIMEOUT)
@@ -248,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     real_parser.add_argument("--world-template-dir", default=str(DEFAULT_WORLD_TEMPLATE_DIR))
     real_parser.add_argument("--output-root", default=str(DEFAULT_REAL_OUTPUT_ROOT))
     real_parser.add_argument("--scenario-id", action="append", default=[])
+    real_parser.add_argument("--scenario-category", action="append", default=[])
     real_parser.add_argument("--agent-port", type=int, default=DEFAULT_AGENT_PORT)
     real_parser.add_argument("--server-ready-timeout", type=float, default=DEFAULT_SERVER_READY_TIMEOUT)
     real_parser.add_argument("--agent-ready-timeout", type=float, default=DEFAULT_AGENT_READY_TIMEOUT)
@@ -292,6 +295,7 @@ def run_functional(args: argparse.Namespace) -> int:
         world_template_dir=Path(args.world_template_dir),
         output_root=Path(args.output_root),
         scenario_ids=args.scenario_id,
+        scenario_categories=getattr(args, "scenario_category", []),
         agent_mode=args.agent_mode,
         agent_port=args.agent_port,
         server_ready_timeout=args.server_ready_timeout,
@@ -312,6 +316,7 @@ def run_real(args: argparse.Namespace) -> int:
         world_template_dir=Path(args.world_template_dir),
         output_root=Path(args.output_root),
         scenario_ids=args.scenario_id,
+        scenario_categories=getattr(args, "scenario_category", []),
         agent_mode="real",
         agent_port=args.agent_port,
         server_ready_timeout=args.server_ready_timeout,
@@ -353,6 +358,7 @@ def execute_suite(
     world_template_dir: Path,
     output_root: Path,
     scenario_ids: list[str],
+    scenario_categories: list[str],
     agent_mode: str,
     agent_port: int,
     server_ready_timeout: float,
@@ -374,6 +380,7 @@ def execute_suite(
         scenario_dir,
         suite=suite,
         scenario_ids=scenario_ids or None,
+        scenario_categories=scenario_categories or None,
         include_known_issues=include_known_issues,
     )
     if not load_result.runnable and not load_result.planned and not load_result.known_issues:
@@ -403,6 +410,7 @@ def execute_suite(
                 turn_ids=[],
                 bundle_dirs=[],
                 quality_review=None,
+                scenario_category=planned.scenario_category,
             )
         )
     for known_issue in load_result.known_issues:
@@ -419,6 +427,7 @@ def execute_suite(
                 turn_ids=[],
                 bundle_dirs=[],
                 quality_review=None,
+                scenario_category=known_issue.scenario_category,
             )
         )
 
@@ -511,6 +520,7 @@ def execute_suite(
                                 turn_ids=[item.turn_id for item in result],
                                 bundle_dirs=[str(item.bundle_dir) for item in result],
                                 quality_review=quality_review.model_dump(by_alias=True) if quality_review is not None else None,
+                                scenario_category=scenario.scenario_category,
                             )
                         )
                     else:
@@ -540,6 +550,7 @@ def execute_suite(
                                 turn_ids=[item.turn_id for item in result],
                                 bundle_dirs=[str(item.bundle_dir) for item in result],
                                 quality_review=quality_review.model_dump(by_alias=True) if quality_review is not None else None,
+                                scenario_category=scenario.scenario_category,
                             )
                         )
                         if infra and infra_failures >= max_infra_failures:
@@ -564,6 +575,7 @@ def execute_suite(
                             turn_ids=[],
                             bundle_dirs=[],
                             quality_review=None,
+                            scenario_category=scenario.scenario_category,
                         )
                     )
                     if infra and infra_failures >= max_infra_failures:
@@ -1131,6 +1143,7 @@ def write_real_reports(run_root: Path, records: list[ScenarioExecutionRecord], l
         "runnable_count": runnable_count,
         "planned_count": planned_count,
         "known_issue_count": known_issue_count,
+        "scenario_categories": scenario_category_counts(records),
         "records": [asdict(record) for record in records],
     }
     (run_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1277,6 +1290,14 @@ def suite_counts(records: list[ScenarioExecutionRecord]) -> dict[str, int]:
     }
 
 
+def scenario_category_counts(records: list[ScenarioExecutionRecord]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        key = record.scenario_category or "uncategorized"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def print_suite_summary(suite: str, records: list[ScenarioExecutionRecord], *, run_root: Path | None = None) -> None:
     counts = suite_counts(records)
     print(
@@ -1293,6 +1314,10 @@ def print_suite_summary(suite: str, records: list[ScenarioExecutionRecord], *, r
     if run_root is not None and suite == "real":
         print(f"real reports: {run_root / 'scorecard.md'}", flush=True)
         print(f"real target-state gaps: {run_root / 'target_state_gaps.json'}", flush=True)
+        rendered_categories = " ".join(
+            f"{name}={count}" for name, count in sorted(scenario_category_counts(records).items())
+        )
+        print(f"real scenario categories: {rendered_categories}", flush=True)
 
 
 def prune_real_review_artifacts(run_root: Path) -> None:

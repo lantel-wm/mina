@@ -1478,6 +1478,12 @@ class TurnPipeline:
     def _capability_observation_is_ambiguous(self, capability_id: str, observations: dict[str, Any] | None) -> bool:
         if not isinstance(observations, dict) or not observations:
             return True
+        if capability_id.startswith("wiki."):
+            if isinstance(observations.get("found"), bool):
+                return False
+            result_count = observations.get("result_count")
+            if isinstance(result_count, int):
+                return result_count > 0 and observations.get("results") in (None, [])
         if capability_id in {"observe.technical", "carpet.observability.read"}:
             if any(
                 key in observations
@@ -2059,7 +2065,13 @@ class TurnPipeline:
             "task.inspect": "查看任务状态",
             "agent.explore.delegate": "委托探索",
             "agent.plan.delegate": "委托规划",
-            "retrieval.local_knowledge.search": "检索本地知识",
+            "wiki.page.get": "查询 Wiki 页面",
+            "wiki.category.find": "按分类查 Wiki",
+            "wiki.template.find": "按模板查 Wiki",
+            "wiki.template_param.find": "按模板参数查 Wiki",
+            "wiki.infobox.find": "按信息框查 Wiki",
+            "wiki.backlinks.find": "查 Wiki 关联页",
+            "wiki.section.find": "查 Wiki 段落",
             "skill.mina_capability_guide": "整理可见能力",
             "script.python_sandbox.execute": "准备脚本执行",
         }.get(capability_id, capability_id)
@@ -2086,8 +2098,23 @@ class TurnPipeline:
             return f"我先把探索部分单独理一下：{arguments.get('objective', '')}"
         if capability_id == "agent.plan.delegate":
             return f"我先把规划单独理一下：{arguments.get('objective', '')}"
-        if capability_id == "retrieval.local_knowledge.search":
-            return "正在检索本地知识库。"
+        if capability_id == "wiki.page.get":
+            return f"我先去 Wiki 里查一下这个条目：{arguments.get('title', '')}"
+        if capability_id == "wiki.category.find":
+            return f"我先按分类查一下 Wiki：{arguments.get('category', '')}"
+        if capability_id == "wiki.template.find":
+            return f"我先按模板筛一下 Wiki：{arguments.get('template_name', '')}"
+        if capability_id == "wiki.template_param.find":
+            return (
+                "我先按模板参数筛一下 Wiki："
+                f"{arguments.get('template_name', '')} / {arguments.get('param_name', '')}"
+            )
+        if capability_id == "wiki.infobox.find":
+            return f"我先按信息框字段查一下 Wiki：{arguments.get('key', '')}"
+        if capability_id == "wiki.backlinks.find":
+            return f"我先找找哪些 Wiki 页面提到了它：{arguments.get('title', '')}"
+        if capability_id == "wiki.section.find":
+            return f"我先找带这个段落标题的 Wiki 页面：{arguments.get('section_title', '')}"
         if capability_id == "skill.mina_capability_guide":
             return "我先把现在能用的内容理一下。"
         if capability_id == "script.python_sandbox.execute":

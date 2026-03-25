@@ -558,7 +558,14 @@ class ContextManager:
             "Do not call the same capability again with the same resolved arguments after you already have a fresh result. Answer from that observation or change strategy.\n"
             "When a direct target inspection capability is visible and the player is asking what they are currently looking at, prefer that live read before delegate_explore.\n"
             "If observation_brief already identifies the current target block or entity, answer directly instead of rereading the same target.\n"
-            "When the player explicitly asks you to use local knowledge or says not to rely on live observation, prefer retrieval.local_knowledge.search if it is visible.\n"
+            "When the player explicitly asks you to use wiki or local Minecraft knowledge, prefer wiki.page.get for a specific concept if it is visible.\n"
+            "When the player asks for category/property/list-style Minecraft knowledge, prefer wiki.category.find, wiki.template.find, wiki.template_param.find, wiki.infobox.find, wiki.backlinks.find, or wiki.section.find when one matches the request.\n"
+            "When observation_brief already identifies a current block or entity and the player then asks what it is used for, how to get it, or how it behaves, prefer wiki.page.get with that observed English name if it is visible.\n"
+            'wiki.page.get uses {"title":"..."} and can resolve redirects, including English page names and names derived from ids without the minecraft: prefix.\n'
+            'wiki.category.find uses {"category":"...","limit":8}; wiki.template_param.find uses {"template_name":"...","param_name":"...","param_value":"...","limit":8}; wiki.section.find uses {"section_title":"...","limit":8}.\n'
+            "If a wiki result reports that the requested title resolved to a different canonical page, explicitly mention that redirect resolution in the reply before summarizing the result.\n"
+            "If a structured wiki retrieval returns zero results, do not keep retrying minor synonym or parameter-name variants more than once. Explain the limitation, narrow the query, or ask for a concrete page instead.\n"
+            "For broad wiki list results, prefer a few representative gameplay-relevant pages over mechanically echoing the first titles in alphabetical order.\n"
             "When the player explicitly asks you to first explore on your own before answering, prefer agent.explore.delegate if it is visible.\n"
             "When the player explicitly asks for a plan but says not to take over, prefer agent.plan.delegate if it is visible.\n"
             "When the player asks for technical state, diagnostics, or observability and observe.technical or carpet.observability.read is visible, prefer one of those capabilities over replying from scene hints alone.\n"

@@ -27,6 +27,7 @@ import mina.policy.PermissionResolver;
 import mina.context.RiskStateProvider;
 import mina.context.WorldSnapshotProvider;
 import mina.context.SocialStateProvider;
+import mina.util.ObservationTextResolver;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.entity.EquipmentSlot;
@@ -81,17 +82,20 @@ public final class MinaRuntime {
         this.pendingTurns = new PendingTurnRegistry();
         this.pendingConfirmations = new PendingConfirmationRegistry();
         this.permissionResolver = new PermissionResolver(config);
+        ObservationTextResolver observationTextResolver = new ObservationTextResolver(config.observationLanguage());
         this.recentEventTracker = new RecentEventTracker(
                 48,
                 config.entityScanIntervalTicks(),
-                config.longDangerThresholdTicks()
+                config.longDangerThresholdTicks(),
+                observationTextResolver
         );
-        PlayerStateProvider playerStateProvider = new PlayerStateProvider(config.inventorySummaryLimit());
+        PlayerStateProvider playerStateProvider = new PlayerStateProvider(config.inventorySummaryLimit(), observationTextResolver);
         WorldStateProvider worldStateProvider = new WorldStateProvider();
         WorldSnapshotProvider ruleSnapshotProvider = new WorldSnapshotProvider(config.serverRuleSummaryLimit());
         ThreatAssessmentProvider threatAssessmentProvider = new ThreatAssessmentProvider(
                 config.entityScanRadius(),
-                config.entityScanLimit()
+                config.entityScanLimit(),
+                observationTextResolver
         );
         InteractableScanProvider interactableScanProvider = new InteractableScanProvider(
                 config.interactableScanRadius(),
@@ -100,7 +104,7 @@ public final class MinaRuntime {
         SocialStateProvider socialStateProvider = new SocialStateProvider(config.entityScanRadius());
         EnvironmentAssessmentProvider environmentAssessmentProvider = new EnvironmentAssessmentProvider(config.interactableScanRadius());
         RiskStateProvider riskStateProvider = new RiskStateProvider();
-        VanillaCommandBackend vanillaCommandBackend = new ServerVanillaCommandBackend();
+        VanillaCommandBackend vanillaCommandBackend = new ServerVanillaCommandBackend(observationTextResolver);
         CarpetObservationBackend carpetObservationBackend = new DefaultCarpetObservationBackend(
                 FabricLoader.getInstance().isModLoaded("carpet")
         );
@@ -114,13 +118,15 @@ public final class MinaRuntime {
                 riskStateProvider,
                 recentEventTracker,
                 vanillaCommandBackend,
-                carpetObservationBackend
+                carpetObservationBackend,
+                observationTextResolver
         );
         this.capabilityRegistry = new CapabilityExecutorRegistry(
                 config,
                 directWorldReader,
                 vanillaCommandBackend,
-                carpetObservationBackend
+                carpetObservationBackend,
+                observationTextResolver
         );
         this.contextCollector = new GameContextCollector(
                 permissionResolver,
@@ -129,7 +135,7 @@ public final class MinaRuntime {
                 worldStateProvider,
                 ruleSnapshotProvider,
                 directWorldReader,
-                new TargetBlockSnapshotProvider(config.targetReachBlocks()),
+                new TargetBlockSnapshotProvider(config.targetReachBlocks(), observationTextResolver),
                 recentEventTracker,
                 config.enableExperimentalCapabilities(),
                 config.enableDynamicScripting()

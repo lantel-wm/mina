@@ -1,5 +1,6 @@
 package mina.context;
 
+import mina.util.ObservationTextResolver;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ItemEntity;
@@ -25,10 +26,12 @@ import java.util.Map;
 public final class ThreatAssessmentProvider {
     private final int radius;
     private final int limit;
+    private final ObservationTextResolver textResolver;
 
-    public ThreatAssessmentProvider(int radius, int limit) {
+    public ThreatAssessmentProvider(int radius, int limit, ObservationTextResolver textResolver) {
         this.radius = Math.max(4, radius);
         this.limit = Math.max(4, limit);
+        this.textResolver = textResolver;
     }
 
     public Map<String, Object> collect(ServerPlayerEntity player) {
@@ -203,7 +206,7 @@ public final class ThreatAssessmentProvider {
     private Map<String, Object> entityPayload(ServerPlayerEntity player, Entity entity, String category, int threatLevel) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("entity_id", Registries.ENTITY_TYPE.getId(entity.getType()).toString());
-        payload.put("name", entity.getName().getString());
+        payload.put("name", textResolver.entityName(entity));
         payload.put("category", category);
         payload.put("distance", Math.sqrt(entity.squaredDistanceTo(player)));
         payload.put("direction", directionFromDelta(entity.getX() - player.getX(), entity.getZ() - player.getZ()));

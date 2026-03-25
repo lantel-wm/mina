@@ -132,6 +132,13 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
   --scenario-id real_companion_greeting_day
 ```
 
+只跑某一个真实场景分类，例如 wiki：
+
+```bash
+PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
+  --scenario-category wiki
+```
+
 已知问题场景默认不会执行；如果要一起跑：
 
 ```bash
@@ -151,6 +158,8 @@ PYTHONPATH=agent_service/src ./.venv/bin/python -m mina_agent.dev.cli run-real \
 - `--scenario-dir`：默认 `testing/headless/real/scenarios`
 - `--world-template-dir`：默认 `testing/headless/world_templates`
 - `--output-root`：默认 `tmp/headless/real`
+- `--scenario-id`：只跑指定 scenario，可重复传
+- `--scenario-category`：只跑指定专题分类，可重复传；例如 `wiki`
 - `--agent-port`：默认自动选择空闲端口
 - `--server-ready-timeout`
 - `--agent-ready-timeout`

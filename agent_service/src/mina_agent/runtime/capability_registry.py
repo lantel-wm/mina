@@ -8,7 +8,7 @@ from mina_agent.config import Settings
 from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyContext, PolicyEngine
-from mina_agent.retrieval.index import LocalKnowledgeIndex
+from mina_agent.retrieval.wiki_store import WikiKnowledgeStore
 from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.models import TaskStepState, TurnState
 from mina_agent.runtime.semantic_tools import SEMANTIC_BRIDGE_PROXY_SPECS, SemanticBridgeProxySpec
@@ -50,14 +50,14 @@ class CapabilityRegistry:
         settings: Settings,
         store: Store,
         policy_engine: PolicyEngine,
-        retrieval_index: LocalKnowledgeIndex,
+        wiki_store: WikiKnowledgeStore,
         script_runner: ScriptRunner,
         delegate_runtime: DelegateRuntime | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._policy_engine = policy_engine
-        self._retrieval_index = retrieval_index
+        self._wiki_store = wiki_store
         self._script_runner = script_runner
         self._delegate_runtime = delegate_runtime or DelegateRuntime(store)
         self._local_capabilities = self._build_local_capabilities()
@@ -311,22 +311,119 @@ class CapabilityRegistry:
                 handler_kind="internal",
                 executor=self._capability_guide,
             ),
-            "retrieval.local_knowledge.search": RuntimeCapability(
+            "wiki.page.get": RuntimeCapability(
                 descriptor=CapabilityDescriptor(
-                    id="retrieval.local_knowledge.search",
+                    id="wiki.page.get",
                     kind="retrieval",
                     visibility_predicate="read_only_plus",
                     risk_class="read_only",
                     execution_mode="internal",
                     requires_confirmation=False,
                     budget_cost=1,
-                    args_schema={"query": "string"},
-                    result_schema={"results": "array"},
-                    description="Search Mina's local knowledge directory and return the most relevant chunks.",
+                    args_schema={"title": "string"},
+                    result_schema={"page": "object", "sections": "array", "section_titles": "array"},
+                    description="Resolve a Minecraft Wiki page by title or redirect and return a compact structured bundle.",
                     preferred=True,
                 ),
                 handler_kind="internal",
-                executor=self._knowledge_search,
+                executor=self._wiki_page_get,
+            ),
+            "wiki.category.find": RuntimeCapability(
+                descriptor=CapabilityDescriptor(
+                    id="wiki.category.find",
+                    kind="retrieval",
+                    visibility_predicate="read_only_plus",
+                    risk_class="read_only",
+                    execution_mode="internal",
+                    requires_confirmation=False,
+                    budget_cost=1,
+                    args_schema={"category": "string", "limit": "integer"},
+                    result_schema={"results": "array"},
+                    description="Find Minecraft Wiki pages by category and return compact page cards.",
+                    preferred=True,
+                ),
+                handler_kind="internal",
+                executor=self._wiki_category_find,
+            ),
+            "wiki.template.find": RuntimeCapability(
+                descriptor=CapabilityDescriptor(
+                    id="wiki.template.find",
+                    kind="retrieval",
+                    visibility_predicate="read_only_plus",
+                    risk_class="read_only",
+                    execution_mode="internal",
+                    requires_confirmation=False,
+                    budget_cost=1,
+                    args_schema={"template_name": "string", "limit": "integer"},
+                    result_schema={"results": "array"},
+                    description="Find Minecraft Wiki pages by template and return compact page cards.",
+                ),
+                handler_kind="internal",
+                executor=self._wiki_template_find,
+            ),
+            "wiki.template_param.find": RuntimeCapability(
+                descriptor=CapabilityDescriptor(
+                    id="wiki.template_param.find",
+                    kind="retrieval",
+                    visibility_predicate="read_only_plus",
+                    risk_class="read_only",
+                    execution_mode="internal",
+                    requires_confirmation=False,
+                    budget_cost=1,
+                    args_schema={"template_name": "string", "param_name": "string", "param_value": "string", "limit": "integer"},
+                    result_schema={"results": "array"},
+                    description="Find Minecraft Wiki pages by template parameter and return compact page cards.",
+                ),
+                handler_kind="internal",
+                executor=self._wiki_template_param_find,
+            ),
+            "wiki.infobox.find": RuntimeCapability(
+                descriptor=CapabilityDescriptor(
+                    id="wiki.infobox.find",
+                    kind="retrieval",
+                    visibility_predicate="read_only_plus",
+                    risk_class="read_only",
+                    execution_mode="internal",
+                    requires_confirmation=False,
+                    budget_cost=1,
+                    args_schema={"key": "string", "value": "string", "limit": "integer"},
+                    result_schema={"results": "array"},
+                    description="Find Minecraft Wiki pages by infobox key or key/value and return compact page cards.",
+                ),
+                handler_kind="internal",
+                executor=self._wiki_infobox_find,
+            ),
+            "wiki.backlinks.find": RuntimeCapability(
+                descriptor=CapabilityDescriptor(
+                    id="wiki.backlinks.find",
+                    kind="retrieval",
+                    visibility_predicate="read_only_plus",
+                    risk_class="read_only",
+                    execution_mode="internal",
+                    requires_confirmation=False,
+                    budget_cost=1,
+                    args_schema={"title": "string", "limit": "integer"},
+                    result_schema={"results": "array"},
+                    description="Find Minecraft Wiki pages that link to a target page and return compact page cards.",
+                ),
+                handler_kind="internal",
+                executor=self._wiki_backlinks_find,
+            ),
+            "wiki.section.find": RuntimeCapability(
+                descriptor=CapabilityDescriptor(
+                    id="wiki.section.find",
+                    kind="retrieval",
+                    visibility_predicate="read_only_plus",
+                    risk_class="read_only",
+                    execution_mode="internal",
+                    requires_confirmation=False,
+                    budget_cost=1,
+                    args_schema={"section_title": "string", "limit": "integer"},
+                    result_schema={"results": "array"},
+                    description="Find Minecraft Wiki pages with a matching section title and return compact section matches.",
+                ),
+                handler_kind="internal",
+                executor=self._wiki_section_find,
             ),
             "script.python_sandbox.execute": RuntimeCapability(
                 descriptor=CapabilityDescriptor(
@@ -445,10 +542,64 @@ class CapabilityRegistry:
             ]
         }
 
-    def _knowledge_search(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
-        query = str(arguments.get("query", "")).strip()
-        results = self._retrieval_index.search(query, limit=self._settings.max_retrieval_results)
-        return {"results": results, "result_count": len(results)}
+    def _wiki_page_get(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        return self._wiki_store.get_page(str(arguments.get("title", "")).strip())
+
+    def _wiki_category_find(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        return self._wiki_store.find_by_category(
+            str(arguments.get("category", "")).strip(),
+            self._wiki_limit(arguments),
+        )
+
+    def _wiki_template_find(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        return self._wiki_store.find_by_template(
+            str(arguments.get("template_name", "")).strip(),
+            self._wiki_limit(arguments),
+        )
+
+    def _wiki_template_param_find(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        raw_param_value = arguments.get("param_value")
+        param_value = str(raw_param_value).strip() if raw_param_value not in (None, "") else None
+        return self._wiki_store.find_by_template_param(
+            str(arguments.get("template_name", "")).strip(),
+            str(arguments.get("param_name", "")).strip(),
+            param_value,
+            self._wiki_limit(arguments),
+        )
+
+    def _wiki_infobox_find(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        raw_value = arguments.get("value")
+        value = str(raw_value).strip() if raw_value not in (None, "") else None
+        return self._wiki_store.find_by_infobox(
+            str(arguments.get("key", "")).strip(),
+            value,
+            self._wiki_limit(arguments),
+        )
+
+    def _wiki_backlinks_find(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        return self._wiki_store.find_backlinks(
+            str(arguments.get("title", "")).strip(),
+            self._wiki_limit(arguments),
+        )
+
+    def _wiki_section_find(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
+        return self._wiki_store.find_sections(
+            str(arguments.get("section_title", "")).strip(),
+            self._wiki_limit(arguments),
+        )
+
+    def _wiki_limit(self, arguments: dict[str, Any]) -> int | None:
+        value = arguments.get("limit")
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        return None
 
     def _run_script(self, arguments: dict[str, Any], _: RuntimeState) -> dict[str, Any]:
         script = str(arguments.get("script", ""))

@@ -254,6 +254,7 @@ class HeadlessCliTests(unittest.TestCase):
                 turn_ids=[],
                 bundle_dirs=[],
                 quality_review=None,
+                scenario_category="wiki",
             )
         ]
 
@@ -265,6 +266,7 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertIn("real summary: passed=0 infra_failures=0 behavior_gaps=1", rendered)
         self.assertIn("/tmp/mina-real/scorecard.md", rendered)
         self.assertIn("/tmp/mina-real/target_state_gaps.json", rendered)
+        self.assertIn("real scenario categories: wiki=1", rendered)
 
     def test_run_real_exit_code_matches_failure_policy(self) -> None:
         args = argparse.Namespace(

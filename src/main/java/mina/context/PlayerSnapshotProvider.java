@@ -1,6 +1,7 @@
 package mina.context;
 
 import mina.policy.PlayerRole;
+import mina.util.ObservationTextResolver;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.Registries;
@@ -13,9 +14,11 @@ import java.util.Map;
 
 public final class PlayerSnapshotProvider {
     private final int inventorySummaryLimit;
+    private final ObservationTextResolver textResolver;
 
-    public PlayerSnapshotProvider(int inventorySummaryLimit) {
+    public PlayerSnapshotProvider(int inventorySummaryLimit, ObservationTextResolver textResolver) {
         this.inventorySummaryLimit = inventorySummaryLimit;
+        this.textResolver = textResolver;
     }
 
     public Map<String, Object> collect(ServerPlayerEntity player, PlayerRole role) {
@@ -29,8 +32,8 @@ public final class PlayerSnapshotProvider {
         snapshot.put("selected_slot", player.getInventory().getSelectedSlot());
         snapshot.put("position", GameContextCollector.positionMap(player));
         snapshot.put("look_vector", GameContextCollector.vectorMap(player.getRotationVector()));
-        snapshot.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack()));
-        snapshot.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack()));
+        snapshot.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack(), textResolver));
+        snapshot.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack(), textResolver));
         snapshot.put("inventory_summary", summarizeInventory(player.getInventory()));
         return snapshot;
     }
@@ -44,7 +47,7 @@ public final class PlayerSnapshotProvider {
             if (stack == null || stack.isEmpty()) {
                 continue;
             }
-            summary.add(GameContextCollector.stackMap(stack));
+            summary.add(GameContextCollector.stackMap(stack, textResolver));
         }
         return summary;
     }

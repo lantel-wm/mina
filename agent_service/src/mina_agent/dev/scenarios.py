@@ -76,6 +76,7 @@ class HeadlessScenario(BaseModel):
 
     suite: SuiteName
     scenario_id: str
+    scenario_category: str | None = None
     world_template: str
     status: ScenarioStatus = "runnable_now"
     expectation: ScenarioExpectation = "required"
@@ -104,6 +105,7 @@ class HeadlessScenario(BaseModel):
         return {
             "suite": value.get("suite") or "real",
             "scenario_id": value["scenario_id"],
+            "scenario_category": value.get("scenario_category") or value.get("category"),
             "world_template": value["world_template"],
             "status": value.get("status") or "runnable_now",
             "expectation": value.get("expectation") or ("target_state" if value.get("suite") == "real" else "required"),
@@ -164,7 +166,10 @@ class ScenarioLoadResult:
 
 
 def load_scenario(path: Path) -> HeadlessScenario:
-    return HeadlessScenario.model_validate_json(path.read_text(encoding="utf-8"))
+    payload = HeadlessScenario.model_validate_json(path.read_text(encoding="utf-8")).model_dump()
+    if payload.get("scenario_category") in (None, "") and path.parent.name != "scenarios":
+        payload["scenario_category"] = path.parent.name
+    return HeadlessScenario.model_validate(payload)
 
 
 def load_scenarios(
@@ -172,9 +177,11 @@ def load_scenarios(
     *,
     suite: SuiteName | None = None,
     scenario_ids: list[str] | None = None,
+    scenario_categories: list[str] | None = None,
     include_known_issues: bool = False,
 ) -> ScenarioLoadResult:
     selected = set(scenario_ids or [])
+    selected_categories = {value for value in (scenario_categories or []) if value}
     runnable: list[HeadlessScenario] = []
     planned: list[HeadlessScenario] = []
     known_issues: list[HeadlessScenario] = []
@@ -183,6 +190,8 @@ def load_scenarios(
         if suite is not None and scenario.suite != suite:
             continue
         if selected and scenario.scenario_id not in selected:
+            continue
+        if selected_categories and scenario.scenario_category not in selected_categories:
             continue
         if scenario.status == "planned":
             planned.append(scenario)

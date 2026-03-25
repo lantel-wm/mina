@@ -7,6 +7,7 @@ import mina.context.GameContextCollector;
 import mina.integration.carpet.CarpetCapabilitySupport;
 import mina.policy.PlayerRole;
 import mina.policy.RiskClass;
+import mina.util.ObservationTextResolver;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
@@ -37,6 +38,7 @@ public final class CapabilityExecutorRegistry {
     private final DirectWorldReader directWorldReader;
     private final VanillaCommandBackend vanillaCommandBackend;
     private final CarpetObservationBackend carpetObservationBackend;
+    private final ObservationTextResolver textResolver;
     private final Map<String, CapabilityDefinition> capabilities;
     private final boolean carpetAvailable;
 
@@ -44,12 +46,14 @@ public final class CapabilityExecutorRegistry {
             MinaConfig config,
             DirectWorldReader directWorldReader,
             VanillaCommandBackend vanillaCommandBackend,
-            CarpetObservationBackend carpetObservationBackend
+            CarpetObservationBackend carpetObservationBackend,
+            ObservationTextResolver textResolver
     ) {
         this.config = config;
         this.directWorldReader = directWorldReader;
         this.vanillaCommandBackend = vanillaCommandBackend;
         this.carpetObservationBackend = carpetObservationBackend;
+        this.textResolver = textResolver;
         this.carpetAvailable = FabricLoader.getInstance().isModLoaded("carpet");
         this.capabilities = buildCapabilities();
     }
@@ -463,7 +467,7 @@ public final class CapabilityExecutorRegistry {
         payload.put("target_found", true);
         payload.put("pos", GameContextCollector.blockPosMap(blockPos));
         payload.put("block_id", Registries.BLOCK.getId(blockState.getBlock()).toString());
-        payload.put("block_name", blockState.getBlock().getName().getString());
+        payload.put("block_name", textResolver.blockName(blockState));
         payload.put("is_air", blockState.isAir());
         payload.put("luminance", blockState.getLuminance());
         payload.put("block_data", vanillaCommandBackend.readBlockData(player, blockPos));
@@ -598,8 +602,8 @@ public final class CapabilityExecutorRegistry {
         payload.put("health", player.getHealth());
         payload.put("hunger", player.getHungerManager().getFoodLevel());
         payload.put("position", GameContextCollector.positionMap(player));
-        payload.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack()));
-        payload.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack()));
+        payload.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack(), textResolver));
+        payload.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack(), textResolver));
         return payload;
     }
 
@@ -622,7 +626,7 @@ public final class CapabilityExecutorRegistry {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("uuid", entity.getUuidAsString());
         payload.put("entity_id", Registries.ENTITY_TYPE.getId(entity.getType()).toString());
-        payload.put("name", entity.getName().getString());
+        payload.put("name", textResolver.entityName(entity));
         payload.put("position", GameContextCollector.vectorMap(new Vec3d(entity.getX(), entity.getY(), entity.getZ())));
         payload.put("block_pos", GameContextCollector.blockPosMap(entity.getBlockPos()));
         payload.put("distance", Math.sqrt(entity.squaredDistanceTo(origin)));

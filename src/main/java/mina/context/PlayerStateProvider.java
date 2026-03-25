@@ -1,6 +1,7 @@
 package mina.context;
 
 import mina.policy.PlayerRole;
+import mina.util.ObservationTextResolver;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.BlockItem;
@@ -16,9 +17,11 @@ import java.util.Map;
 
 public final class PlayerStateProvider {
     private final int inventorySummaryLimit;
+    private final ObservationTextResolver textResolver;
 
-    public PlayerStateProvider(int inventorySummaryLimit) {
+    public PlayerStateProvider(int inventorySummaryLimit, ObservationTextResolver textResolver) {
         this.inventorySummaryLimit = Math.max(1, inventorySummaryLimit);
+        this.textResolver = textResolver;
     }
 
     public Map<String, Object> collect(ServerPlayerEntity player, PlayerRole role, RecentEventTracker recentEventTracker) {
@@ -34,8 +37,8 @@ public final class PlayerStateProvider {
         snapshot.put("hunger", player.getHungerManager().getFoodLevel());
         snapshot.put("experience_level", player.experienceLevel);
         snapshot.put("selected_slot", player.getInventory().getSelectedSlot());
-        snapshot.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack()));
-        snapshot.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack()));
+        snapshot.put("main_hand", GameContextCollector.stackMap(player.getMainHandStack(), textResolver));
+        snapshot.put("off_hand", GameContextCollector.stackMap(player.getOffHandStack(), textResolver));
         snapshot.put("inventory_summary", inventoryBrief.get("hotbar_and_main"));
         snapshot.put("core_status", Map.of(
                 "health", player.getHealth(),
@@ -56,8 +59,8 @@ public final class PlayerStateProvider {
         snapshot.put(
                 "hands",
                 handsSnapshot(
-                        GameContextCollector.stackMap(player.getMainHandStack()),
-                        GameContextCollector.stackMap(player.getOffHandStack()),
+                        GameContextCollector.stackMap(player.getMainHandStack(), textResolver),
+                        GameContextCollector.stackMap(player.getOffHandStack(), textResolver),
                         player.isUsingItem()
                 )
         );
@@ -140,7 +143,7 @@ public final class PlayerStateProvider {
 
     private Map<String, Object> stackBrief(ItemStack stack) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("item", GameContextCollector.stackMap(stack));
+        payload.put("item", GameContextCollector.stackMap(stack, textResolver));
         payload.put("damageable", stack.isDamageable());
         if (stack.isDamageable()) {
             payload.put("durability_left", Math.max(0, stack.getMaxDamage() - stack.getDamage()));

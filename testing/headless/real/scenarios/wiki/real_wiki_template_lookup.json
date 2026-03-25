@@ -1,6 +1,7 @@
 {
   "suite": "real",
-  "scenario_id": "real_local_knowledge_lookup",
+  "scenario_id": "real_wiki_template_lookup",
+  "scenario_category": "wiki",
   "world_template": "overworld_day_spawn",
   "status": "runnable_now",
   "expectation": "target_state",
@@ -14,7 +15,7 @@
   "turns": [
     {
       "actor_id": "player",
-      "message": "Mina，别用临时观察，直接用你本地知识库给我一个关于樱花树林开局的提示。"
+      "message": "Mina，直接用 wiki 找使用“信息框/方块”模板的页面。"
     }
   ],
   "assertions": {
@@ -23,7 +24,7 @@
       "failed"
     ],
     "required_capability_ids": [
-      "retrieval.local_knowledge.search"
+      "wiki.template.find"
     ],
     "max_duration_ms": 120000
   },

@@ -135,7 +135,7 @@ For every failed scenario, and for at least a few representative passed scenario
 - For social questions, confirm prompt contains nearby-player facts or at least `server_env.current_players`.
 - For village / POI questions, confirm the prompt makes the POI capability visible and the village setup facts reachable.
 - For low-health / night-danger questions, confirm prompt contains real health, threat, and position state after setup.
-- For local knowledge questions, confirm prompt clearly exposes `retrieval.local_knowledge.search` and the user’s explicit preference not to rely on live observation.
+- For wiki knowledge questions, confirm prompt clearly exposes the relevant `wiki.*` capability and the user’s explicit preference not to rely on live observation.
 
 5. Truncation and budget pressure
 
@@ -147,7 +147,7 @@ For every failed scenario, and for at least a few representative passed scenario
 
 - Ask whether Mina’s bad choice was actually encouraged by the prompt.
 - If the prompt strongly nudges delegate behavior when a direct capability should be preferred, that is a prompt-policy problem.
-- If the prompt lacks explicit instructions for a user-stated preference such as “别直接接管” or “直接用本地知识库”, treat that as prompt insufficiency.
+- If the prompt lacks explicit instructions for a user-stated preference such as “别直接接管” or “直接用 wiki”, treat that as prompt insufficiency.
 
 ### Practical Commands
 
@@ -364,7 +364,7 @@ But several scenarios still assert older ids such as:
 
 - `game.player_snapshot.read`
 - `carpet.distance.measure`
-- `retrieval.local_knowledge.search`
+- `wiki.page.get`
 
 Some failures therefore look like test-definition drift rather than strictly bad Mina behavior.
 

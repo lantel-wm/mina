@@ -9,7 +9,7 @@ from mina_agent.executors.script_runner import ScriptRunner
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
-from mina_agent.retrieval.index import LocalKnowledgeIndex
+from mina_agent.retrieval.wiki_store import WikiKnowledgeStore
 from mina_agent.runtime.agent_loop import AgentLoop
 from mina_agent.runtime.agent_services import AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
@@ -28,15 +28,19 @@ from mina_agent.schemas import TurnResumeRequest, TurnResponse, TurnStartRequest
 def create_app() -> FastAPI:
     settings = Settings.load()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
     settings.audit_dir.mkdir(parents=True, exist_ok=True)
 
     store = Store(settings.db_path, settings.data_dir)
     audit = AuditLogger(settings.audit_dir)
     debug = build_debug_recorder(settings)
     policy_engine = PolicyEngine()
-    retrieval_index = LocalKnowledgeIndex(store, settings.knowledge_dir)
-    retrieval_index.refresh()
+    wiki_store = WikiKnowledgeStore(
+        settings.wiki_db_path,
+        default_limit=settings.wiki_default_limit,
+        max_limit=settings.wiki_max_limit,
+        section_excerpt_chars=settings.wiki_section_excerpt_chars,
+        plain_text_excerpt_chars=settings.wiki_plain_text_excerpt_chars,
+    )
     provider = OpenAICompatibleProvider(settings)
     memory_policy = MemoryPolicy()
     task_manager = TaskManager(store)
@@ -47,7 +51,7 @@ def create_app() -> FastAPI:
         settings=settings,
         store=store,
         policy_engine=policy_engine,
-        retrieval_index=retrieval_index,
+        wiki_store=wiki_store,
         script_runner=ScriptRunner(settings),
         delegate_runtime=delegate_runtime,
     )
@@ -82,7 +86,8 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "db_path": str(settings.db_path),
-            "knowledge_dir": str(settings.knowledge_dir),
+            "wiki_db_path": str(settings.wiki_db_path),
+            "wiki_db_exists": settings.wiki_db_path.exists(),
             "provider_configured": provider.available(),
         }
 

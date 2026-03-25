@@ -44,7 +44,7 @@ The external runtime lives in `agent_service/` and includes:
 - SQLite-backed sessions, turns, step events, execution records, memories, pending confirmations, and document chunks
 - a unified capability registry covering tool, skill, retrieval, and script kinds
 - a continuation-based agent loop
-- a local knowledge index under `agent_service/data/knowledge/`
+- a structured Minecraft Wiki knowledge layer backed by `mc_wiki/data/processed/sqlite/wiki.db`
 - an OpenAI-compatible provider adapter
 - a disabled-by-default sandboxed script runner scaffold for future experimental use
 
@@ -115,6 +115,12 @@ Run the real suite in strict mode so any behavior gap returns non-zero:
 ./.venv/bin/python -m mina_agent.dev.cli run-real --strict-real
 ```
 
+Run only the dedicated wiki real-scenario category:
+
+```bash
+./.venv/bin/python -m mina_agent.dev.cli run-real --scenario-category wiki
+```
+
 Run the included functional smoke scenario against the local stub agent:
 
 ```bash
@@ -141,6 +147,7 @@ Useful developer commands:
 
 Scenario files live under `testing/headless/functional/scenarios/` and `testing/headless/real/scenarios/`. World template metadata lives under `testing/headless/world_templates/`.
 
-## Local knowledge seed
+## Local wiki knowledge
 
-The repo now seeds a minimal local knowledge base in `agent_service/data/knowledge/` so retrieval can start small instead of waiting for a full Minecraft corpus.
+Mina now treats `mc_wiki/data/processed/sqlite/wiki.db` as the authoritative local knowledge source for Minecraft facts.
+The `mc_wiki` crawler and parser remain the data pipeline; the agent service only reads the processed SQLite contract.

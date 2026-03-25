@@ -104,8 +104,24 @@ class ExecutionOrchestrator:
         }
 
     def _summarize_observation(self, source: str, payload: dict[str, Any]) -> str:
-        if source == "retrieval.local_knowledge.search":
-            return f"Retrieved {len(payload.get('results', []))} local knowledge results."
+        if source == "wiki.page.get":
+            page = payload.get("page", {})
+            title = page.get("title")
+            resolved_from = page.get("resolved_from")
+            if isinstance(title, str) and title.strip():
+                if isinstance(resolved_from, str) and resolved_from.strip():
+                    return f"Retrieved wiki page {title} (resolved from {resolved_from})."
+                return f"Retrieved wiki page {title}."
+            return "Retrieved a wiki page."
+        if source.startswith("wiki.") and source.endswith(".find"):
+            if source == "wiki.backlinks.find" and payload.get("redirect_resolved"):
+                requested = payload.get("requested_title")
+                resolved = payload.get("resolved_title")
+                return (
+                    f"Retrieved {len(payload.get('results', []))} wiki backlinks after resolving "
+                    f"{requested} to {resolved}."
+                )
+            return f"Retrieved {len(payload.get('results', []))} wiki results."
         if source == "memory.search":
             return f"Retrieved {len(payload.get('results', []))} memory results."
         if source == "artifact.search":

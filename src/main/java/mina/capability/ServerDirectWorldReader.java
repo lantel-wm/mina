@@ -9,6 +9,7 @@ import mina.context.SocialStateProvider;
 import mina.context.ThreatAssessmentProvider;
 import mina.context.WorldStateProvider;
 import mina.policy.PlayerRole;
+import mina.util.ObservationTextResolver;
 import net.minecraft.server.network.ServerPlayerEntity;
 
 import java.util.LinkedHashMap;
@@ -25,6 +26,7 @@ public final class ServerDirectWorldReader implements DirectWorldReader {
     private final RecentEventTracker recentEventTracker;
     private final VanillaCommandBackend vanillaCommandBackend;
     private final CarpetObservationBackend carpetObservationBackend;
+    private final ObservationTextResolver textResolver;
 
     public ServerDirectWorldReader(
             PlayerStateProvider playerStateProvider,
@@ -36,7 +38,8 @@ public final class ServerDirectWorldReader implements DirectWorldReader {
             RiskStateProvider riskStateProvider,
             RecentEventTracker recentEventTracker,
             VanillaCommandBackend vanillaCommandBackend,
-            CarpetObservationBackend carpetObservationBackend
+            CarpetObservationBackend carpetObservationBackend,
+            ObservationTextResolver textResolver
     ) {
         this.playerStateProvider = playerStateProvider;
         this.worldStateProvider = worldStateProvider;
@@ -48,6 +51,7 @@ public final class ServerDirectWorldReader implements DirectWorldReader {
         this.recentEventTracker = recentEventTracker;
         this.vanillaCommandBackend = vanillaCommandBackend;
         this.carpetObservationBackend = carpetObservationBackend;
+        this.textResolver = textResolver;
     }
 
     @Override
@@ -98,8 +102,8 @@ public final class ServerDirectWorldReader implements DirectWorldReader {
     @Override
     public Map<String, Object> readInventory(ServerPlayerEntity player) {
         Map<String, Object> payload = new LinkedHashMap<>(playerStateProvider.collectInventory(player));
-        payload.put("main_hand", mina.context.GameContextCollector.stackMap(player.getMainHandStack()));
-        payload.put("off_hand", mina.context.GameContextCollector.stackMap(player.getOffHandStack()));
+        payload.put("main_hand", mina.context.GameContextCollector.stackMap(player.getMainHandStack(), textResolver));
+        payload.put("off_hand", mina.context.GameContextCollector.stackMap(player.getOffHandStack(), textResolver));
         payload.put("summary", "Inventory shortages: %s".formatted(payload.get("shortages")));
         return payload;
     }

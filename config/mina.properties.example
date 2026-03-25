@@ -16,6 +16,7 @@ mina.interactable_scan_radius=12
 mina.interactable_scan_vertical_range=4
 mina.interactable_scan_interval_ticks=40
 mina.long_danger_threshold_ticks=200
+mina.observation.language=en_us
 mina.enable_experimental=false
 mina.enable_dynamic_scripting=false
 
