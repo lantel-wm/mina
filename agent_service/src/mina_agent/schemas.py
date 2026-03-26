@@ -53,6 +53,42 @@ class PendingConfirmationPayload(MinaBaseModel):
     effect_summary: str
 
 
+CompanionSignalKind = Literal[
+    "player_join_greeting",
+    "danger_warning",
+    "death_followup",
+    "advancement_celebration",
+    "milestone_encouragement",
+    "repetition_comfort",
+]
+
+
+class CompanionSignalPayload(MinaBaseModel):
+    signal_id: str
+    kind: CompanionSignalKind
+    importance: Literal["high", "medium", "low"]
+    occurred_at: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompanionDeliveryConstraintsPayload(MinaBaseModel):
+    style: Literal["restrained"] = "restrained"
+    interrupt_policy: Literal["never"] = "never"
+    max_selected_signals: int = 2
+
+
+class CompanionTriggerPayload(MinaBaseModel):
+    mode: Literal["proactive_companion"] = "proactive_companion"
+    primary_signal: CompanionSignalPayload
+    supporting_signals: list[CompanionSignalPayload] = Field(default_factory=list)
+    synthetic: bool = True
+    occurred_at: str
+    importance: Literal["high", "medium", "low"]
+    delivery_constraints: CompanionDeliveryConstraintsPayload = Field(
+        default_factory=CompanionDeliveryConstraintsPayload
+    )
+
+
 class TurnStartRequest(MinaBaseModel):
     thread_id: str
     turn_id: str
@@ -61,6 +97,7 @@ class TurnStartRequest(MinaBaseModel):
     scoped_snapshot: dict[str, Any]
     visible_capabilities: list[VisibleCapabilityPayload]
     limits: LimitsPayload
+    companion_trigger: CompanionTriggerPayload | None = None
     pending_confirmation: PendingConfirmationPayload | None = None
     user_message: str
 
@@ -139,6 +176,14 @@ class ContextCompactionResult(MinaBaseModel):
     dropped_slots: list[str] = Field(default_factory=list)
     rationale: str | None = None
     target_tokens: int | None = None
+
+
+class CompanionEvaluateDecision(MinaBaseModel):
+    action: Literal["start_turn", "defer", "drop"]
+    selected_signal_ids: list[str] = Field(default_factory=list)
+    defer_seconds: int | None = None
+    synthetic_user_message: str | None = None
+    reason: str | None = None
 
 
 class ModelDecision(MinaBaseModel):

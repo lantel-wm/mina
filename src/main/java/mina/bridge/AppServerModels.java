@@ -74,12 +74,51 @@ public final class AppServerModels {
         public int max_continuation_depth;
     }
 
+    public static final class CompanionSignalPayload {
+        public String signal_id;
+        public String kind;
+        public String importance;
+        public String occurred_at;
+        public Map<String, Object> payload = new LinkedHashMap<>();
+    }
+
+    public static final class CompanionDeliveryConstraintsPayload {
+        public String style = "restrained";
+        public String interrupt_policy = "never";
+        public int max_selected_signals = 2;
+    }
+
+    public static final class CompanionTriggerPayload {
+        public String mode = "proactive_companion";
+        public CompanionSignalPayload primary_signal;
+        public List<CompanionSignalPayload> supporting_signals = new ArrayList<>();
+        public boolean synthetic = true;
+        public String occurred_at;
+        public String importance;
+        public CompanionDeliveryConstraintsPayload delivery_constraints = new CompanionDeliveryConstraintsPayload();
+    }
+
     public static final class TurnContextPayload {
         public PlayerPayload player;
         public ServerEnvPayload server_env;
         public Map<String, Object> scoped_snapshot;
         public List<ToolSpecPayload> tool_specs;
         public LimitsPayload limits;
+        public CompanionTriggerPayload companion_trigger;
+    }
+
+    public static final class CompanionEvaluateContextPayload {
+        public PlayerPayload player;
+        public ServerEnvPayload server_env;
+        public Map<String, Object> scoped_snapshot;
+    }
+
+    public static final class CompanionEvaluateParams {
+        public String thread_id;
+        public List<CompanionSignalPayload> signals = new ArrayList<>();
+        public CompanionEvaluateContextPayload context;
+        public Map<String, Object> companion_state = new LinkedHashMap<>();
+        public CompanionDeliveryConstraintsPayload delivery_constraints = new CompanionDeliveryConstraintsPayload();
     }
 
     public static final class ThreadStartParams {
@@ -182,6 +221,14 @@ public final class AppServerModels {
         public String created_at;
         public String updated_at;
         public String final_reply;
+    }
+
+    public static final class CompanionEvaluateResult {
+        public String action;
+        public List<String> selected_signal_ids = new ArrayList<>();
+        public Integer defer_seconds;
+        public String synthetic_user_message;
+        public String reason;
     }
 
     public static final class ToolCallRequestPayload {

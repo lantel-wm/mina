@@ -17,6 +17,7 @@ from mina_agent.providers.openai_compatible import OpenAICompatibleProvider
 from mina_agent.retrieval.wiki_store import WikiKnowledgeStore
 from mina_agent.runtime.agent_services import AgentServices
 from mina_agent.runtime.capability_registry import CapabilityRegistry
+from mina_agent.runtime.companion_evaluator import CompanionEvaluator
 from mina_agent.runtime.delegate_runtime import DelegateRuntime
 from mina_agent.runtime.deliberation_engine import DeliberationEngine
 from mina_agent.runtime.execution_manager import ExecutionManager
@@ -61,6 +62,7 @@ def create_app() -> FastAPI:
     execution_orchestrator = ExecutionOrchestrator(settings, store)
     execution_manager = ExecutionManager(capability_registry, execution_orchestrator)
     memory_manager = MemoryManager(store, memory_policy)
+    companion_evaluator = CompanionEvaluator(settings, store, deliberation_engine)
     thread_manager = ThreadManager(store, generate_memories=settings.memories_generate)
     tool_registry = MinaToolRegistry(capability_registry)
     memory_pipeline = MemoryPipeline(settings, store, memory_manager)
@@ -79,6 +81,7 @@ def create_app() -> FastAPI:
         execution_manager=execution_manager,
         memory_manager=memory_manager,
         delegate_runtime=delegate_runtime,
+        companion_evaluator=companion_evaluator,
     )
     engine = MinaCoreEngine(
         services,

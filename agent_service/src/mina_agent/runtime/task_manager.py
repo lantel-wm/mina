@@ -13,6 +13,26 @@ class TaskManager:
         self._store = store
 
     def prepare_task(self, request: TurnStartRequest, pending_confirmation: dict[str, Any] | None) -> TaskState:
+        if request.companion_trigger is not None and request.companion_trigger.mode == "proactive_companion":
+            task_record = self._store.create_thread_task(
+                request.thread_id,
+                request.player.name,
+                request.user_message,
+                task_type="companion_nudge",
+                status="analyzing",
+                priority="low",
+                risk_class="read_only",
+                origin_turn_id=request.turn_id,
+                last_active_at=request.turn_id,
+                summary={
+                    "created_from": "companion_trigger",
+                    "player_intent": request.user_message,
+                    "mina_stance": "companionship_first",
+                    "next_best_companion_move": "send one brief proactive companion message",
+                    "companion_trigger": request.companion_trigger.model_dump(),
+                },
+            )
+            return self.task_state_from_record(task_record)
         if pending_confirmation is not None and pending_confirmation.get("task_id"):
             existing = self._store.get_task(str(pending_confirmation["task_id"]))
             if existing is not None:
@@ -69,6 +89,8 @@ class TaskManager:
         *,
         current_task_id: str | None = None,
     ) -> TaskState | None:
+        if request.companion_trigger is not None and request.companion_trigger.mode == "proactive_companion":
+            return None
         if pending_confirmation is not None:
             return None
         active_task = self._store.get_active_thread_task(request.thread_id)

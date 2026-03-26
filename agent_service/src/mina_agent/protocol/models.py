@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from mina_agent.schemas import LimitsPayload, MinaBaseModel
+from mina_agent.schemas import CompanionDeliveryConstraintsPayload, CompanionSignalPayload, CompanionTriggerPayload
 
 
 JsonRpcId = int | str
@@ -82,6 +83,7 @@ class TurnContextPayload(MinaBaseModel):
     scoped_snapshot: dict[str, Any]
     tool_specs: list[ExternalToolSpec]
     limits: LimitsPayload
+    companion_trigger: CompanionTriggerPayload | None = None
 
 
 class ThreadStartParams(MinaBaseModel):
@@ -151,6 +153,22 @@ class TurnStartParams(MinaBaseModel):
     turn_id: str
     user_message: str
     context: TurnContextPayload
+
+
+class CompanionEvaluateContextPayload(MinaBaseModel):
+    player: PlayerContext
+    server_env: ServerEnvContext
+    scoped_snapshot: dict[str, Any]
+
+
+class CompanionEvaluateParams(MinaBaseModel):
+    thread_id: str
+    signals: list[CompanionSignalPayload] = Field(default_factory=list)
+    context: CompanionEvaluateContextPayload
+    companion_state: dict[str, Any] = Field(default_factory=dict)
+    delivery_constraints: CompanionDeliveryConstraintsPayload = Field(
+        default_factory=CompanionDeliveryConstraintsPayload
+    )
 
 
 class CommandExecTerminalSize(MinaBaseModel):

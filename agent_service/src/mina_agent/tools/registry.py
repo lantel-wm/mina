@@ -8,6 +8,7 @@ from mina_agent.schemas import (
     LimitsPayload,
     PlayerPayload,
     ServerEnvPayload,
+    CompanionTriggerPayload,
     TurnStartRequest,
     VisibleCapabilityPayload,
 )
@@ -34,6 +35,7 @@ class MinaToolRegistry:
         scoped_snapshot: dict[str, object],
         tool_specs: list[ExternalToolSpec],
         limits: LimitsPayload,
+        companion_trigger: CompanionTriggerPayload | None = None,
     ) -> ResolvedTools:
         legacy_request = TurnStartRequest(
             thread_id=thread_id,
@@ -41,11 +43,20 @@ class MinaToolRegistry:
             player=player,
             server_env=server_env,
             scoped_snapshot=dict(scoped_snapshot),
-            visible_capabilities=[self._to_visible_tool(spec) for spec in tool_specs],
+            visible_capabilities=(
+                []
+                if companion_trigger is not None and companion_trigger.mode == "proactive_companion"
+                else [self._to_visible_tool(spec) for spec in tool_specs]
+            ),
             limits=limits,
+            companion_trigger=companion_trigger,
             user_message=user_message,
         )
-        capabilities = self._capability_registry.resolve(legacy_request)
+        capabilities = (
+            []
+            if companion_trigger is not None and companion_trigger.mode == "proactive_companion"
+            else self._capability_registry.resolve(legacy_request)
+        )
         return ResolvedTools(
             legacy_request=legacy_request,
             capabilities=capabilities,

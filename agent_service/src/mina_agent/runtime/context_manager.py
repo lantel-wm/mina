@@ -56,6 +56,7 @@ class ContextOverflowError(RuntimeError):
 class ContextManager:
     _PROTECTED_SLOT_NAMES = (
         "capability_brief",
+        "companion_trigger",
         "dialogue_history",
         "dialogue_continuity",
         "observation_brief",
@@ -123,6 +124,7 @@ class ContextManager:
         session_summary = self._store.get_thread_summary(request.thread_id)
         recent_dialogue_memory = self._build_recent_dialogue_memory(session_summary)
         player_memory = self._build_player_memory_read_path(request)
+        companion_trigger = self._build_companion_trigger_slot(request)
         recovery_refs = self._collect_recovery_refs(
             turn_state,
             compacted_history,
@@ -148,6 +150,14 @@ class ContextManager:
                     "dynamic_structured_reminder",
                     self._runtime_policy_payload(request, turn_state),
                     priority=95,
+                ),
+                self._slot(
+                    "companion_trigger",
+                    "user",
+                    "request.companion_trigger",
+                    "proactive_companion_trigger",
+                    companion_trigger,
+                    priority=90,
                 ),
                 self._slot(
                     "scene_slice",
@@ -576,6 +586,8 @@ class ContextManager:
             "Default to grounded Simplified Chinese replies when action is unnecessary.\n"
             "Treat every action as a plan with assumptions; re-check live state instead of trusting stale context.\n"
             "Prefer guidance, retrieval, or isolated delegate exploration before execution when uncertainty is high.\n"
+            "If companion_trigger is present, this turn is a proactive companion turn, not a user request turn.\n"
+            "For proactive companion turns: send one short, natural, low-interruption message; at most 2 sentences; no list; no tutorial; no tool use; no open question by default.\n"
             "Delegate roles are strict: companion decides, explore inspects, plan proposes, bridge actions execute only in the main turn.\n"
             "Delegate turns may not call bridge actions and may not delegate recursively.\n"
             "Do not delegate explore repeatedly when no new facts were found. If live inspection is still needed and a visible read capability matches, call it directly.\n"
@@ -622,6 +634,11 @@ class ContextManager:
     def _runtime_policy_payload(self, request: TurnStartRequest, turn_state: TurnState) -> dict[str, Any]:
         return {
             "language": "Simplified Chinese by default",
+            "turn_mode": (
+                "proactive_companion"
+                if request.companion_trigger is not None and request.companion_trigger.mode == "proactive_companion"
+                else "normal"
+            ),
             "server_env": request.server_env.model_dump(),
             "player_role": request.player.role,
             "limits": request.limits.model_dump(),
@@ -644,6 +661,7 @@ class ContextManager:
                 "Use recovery refs instead of repeating long content.",
                 "Delegate exploration or planning when it reduces uncertainty without polluting the main context.",
                 "Bridge actions remain in the main turn only.",
+                "If this is a proactive companion turn, do not call tools and keep the message brief.",
             ],
             "runtime_notes": turn_state.runtime_notes[-4:],
         }
@@ -864,6 +882,26 @@ class ContextManager:
             "memory_summary_ref": summary_ref,
             "memory_hits": memory_hits,
             "recovery_refs": recovery_refs,
+        }
+
+    def _build_companion_trigger_slot(self, request: TurnStartRequest) -> dict[str, Any]:
+        trigger = request.companion_trigger
+        if trigger is None:
+            return {"active": False}
+        return {
+            "active": True,
+            "mode": trigger.mode,
+            "importance": trigger.importance,
+            "occurred_at": trigger.occurred_at,
+            "primary_signal": trigger.primary_signal.model_dump(),
+            "supporting_signals": [signal.model_dump() for signal in trigger.supporting_signals],
+            "delivery_constraints": trigger.delivery_constraints.model_dump(),
+            "rules": {
+                "max_sentences": 2,
+                "allow_tools": False,
+                "allow_lists": False,
+                "allow_open_question_by_default": False,
+            },
         }
 
     def _memory_summary_ref(self, path: Path, *, max_lines: int = 24) -> dict[str, Any]:

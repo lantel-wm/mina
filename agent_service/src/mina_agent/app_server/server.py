@@ -10,6 +10,7 @@ from mina_agent.app_server.command_runner import AppCommandRunner
 from mina_agent.core import MinaCoreEngine, ThreadManager
 from mina_agent.protocol import (
     ApprovalResponse,
+    CompanionEvaluateParams,
     CommandExecParams,
     CommandExecResizeParams,
     CommandExecTerminateParams,
@@ -144,6 +145,7 @@ class MinaAppServer:
                     "thread/compact/start",
                     "thread/shellCommand",
                     "thread/rollback",
+                    "companion/evaluate",
                     "turn/start",
                     "turn/steer",
                     "turn/interrupt",
@@ -312,6 +314,11 @@ class MinaAppServer:
             params = ThreadRollbackParams.model_validate(request.params)
             thread = await self._engine.rollback_thread(params)
             return {"thread": thread}
+
+        if request.method == "companion/evaluate":
+            params = CompanionEvaluateParams.model_validate(request.params)
+            decision = await self._engine.evaluate_companion(params)
+            return decision
 
         if request.method == "turn/start":
             params = TurnStartParams.model_validate(request.params)

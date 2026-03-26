@@ -8,6 +8,7 @@ from mina_agent.debug import DebugRecorder
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.runtime.capability_registry import CapabilityRegistry
+from mina_agent.runtime.companion_evaluator import CompanionEvaluator
 from mina_agent.runtime.context_engine import ContextEngine
 from mina_agent.runtime.context_manager import ContextManager
 from mina_agent.runtime.decision_engine import DecisionEngine
@@ -38,3 +39,4 @@ class AgentServices:
     memory_manager: MemoryManager | None = None
     task_manager: TaskManager | None = None
     delegate_runtime: DelegateRuntime | None = None
+    companion_evaluator: CompanionEvaluator | None = None

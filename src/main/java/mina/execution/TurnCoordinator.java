@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import mina.MinaMod;
 import mina.bridge.AppServerClient;
 import mina.bridge.AppServerModels;
+import mina.companion.CompanionCoordinator;
 import mina.capability.CapabilityExecutorRegistry;
 import mina.chat.MinaChatRenderer;
 import mina.chat.MinaChatRenderer.ActionTracePresentation;
@@ -53,6 +54,7 @@ public final class TurnCoordinator {
     private final DevTurnLog devTurnLog;
     private final ExecutorService ioExecutor;
     private final Gson gson;
+    private CompanionCoordinator companionCoordinator;
 
     public TurnCoordinator(
             MinaConfig config,
@@ -79,6 +81,10 @@ public final class TurnCoordinator {
         this.gson = new GsonBuilder().serializeNulls().create();
     }
 
+    public void setCompanionCoordinator(CompanionCoordinator companionCoordinator) {
+        this.companionCoordinator = companionCoordinator;
+    }
+
     public boolean submitTurn(ServerCommandSource source, String userMessage, Runnable acceptedCallback) throws CommandSyntaxException {
         ServerPlayerEntity player = source.getPlayerOrThrow();
         UUID playerId = player.getUuid();
@@ -98,9 +104,55 @@ public final class TurnCoordinator {
         }
 
         recentEventTracker.recordPlayerEvent("mina_user_message", player, Map.of("message", userMessage));
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerUserMessage(player, userMessage);
+        }
         acceptedCallback.run();
         devTurnLog.recordAccepted(turnId, sessionRef, playerName, userMessage, startedAt);
-        ioExecutor.submit(() -> runTurn(playerId, sessionRef, playerName, turnId, userMessage, source.getServer(), startedAt));
+        ioExecutor.submit(() -> runTurn(
+                playerId,
+                sessionRef,
+                playerName,
+                turnId,
+                userMessage,
+                source.getServer(),
+                startedAt,
+                null,
+                false
+        ));
+        return true;
+    }
+
+    public boolean submitProactiveCompanionTurn(
+            UUID playerId,
+            net.minecraft.server.MinecraftServer server,
+            String syntheticUserMessage,
+            AppServerModels.CompanionTriggerPayload companionTrigger
+    ) {
+        String turnId = UUID.randomUUID().toString();
+        if (!pendingTurnRegistry.tryOpen(playerId, turnId)) {
+            return false;
+        }
+        String sessionRef = playerId.toString();
+        String playerName = serverPlayer(server, playerId)
+                .map(player -> player.getName().getString())
+                .orElse(sessionRef);
+        Instant startedAt = Instant.now();
+        serverPlayer(server, playerId).ifPresent(player ->
+                recentEventTracker.recordTurnEvent("mina_proactive_companion", player, syntheticUserMessage)
+        );
+        devTurnLog.recordAccepted(turnId, sessionRef, playerName, syntheticUserMessage, startedAt);
+        ioExecutor.submit(() -> runTurn(
+                playerId,
+                sessionRef,
+                playerName,
+                turnId,
+                syntheticUserMessage,
+                server,
+                startedAt,
+                companionTrigger,
+                true
+        ));
         return true;
     }
 
@@ -142,7 +194,9 @@ public final class TurnCoordinator {
             String turnId,
             String userMessage,
             net.minecraft.server.MinecraftServer server,
-            Instant startedAt
+            Instant startedAt,
+            AppServerModels.CompanionTriggerPayload companionTrigger,
+            boolean proactiveCompanion
     ) {
         long turnStartedAtNanos = System.nanoTime();
         AppServerClient.TurnStream stream = null;
@@ -152,7 +206,7 @@ public final class TurnCoordinator {
             playerName = turnContext.playerPayload().name;
 
             appServerClient.ensureThread(sessionRef, turnContext.playerPayload().uuid, turnContext.playerPayload().name);
-            AppServerModels.TurnStartParams startParams = toTurnStartParams(turnContext, turnId, userMessage);
+            AppServerModels.TurnStartParams startParams = toTurnStartParams(turnContext, turnId, userMessage, companionTrigger, proactiveCompanion);
             stream = appServerClient.startTurn(startParams);
 
             int actionCount = 0;
@@ -221,7 +275,7 @@ public final class TurnCoordinator {
                         deliverReply(
                                 server,
                                 playerId,
-                                buildReplyPresentation(finalReply, turnStartedAtNanos, actionCount, approvalSeen)
+                                buildReplyPresentation(finalReply, turnStartedAtNanos, actionCount, approvalSeen, proactiveCompanion)
                         );
                         return;
                     }
@@ -291,6 +345,16 @@ public final class TurnCoordinator {
     }
 
     private AppServerModels.TurnStartParams toTurnStartParams(TurnContext context, String turnId, String userMessage) {
+        return toTurnStartParams(context, turnId, userMessage, null, false);
+    }
+
+    private AppServerModels.TurnStartParams toTurnStartParams(
+            TurnContext context,
+            String turnId,
+            String userMessage,
+            AppServerModels.CompanionTriggerPayload companionTrigger,
+            boolean proactiveCompanion
+    ) {
         AppServerModels.TurnStartParams params = new AppServerModels.TurnStartParams();
         params.thread_id = context.sessionRef();
         params.turn_id = turnId;
@@ -300,13 +364,16 @@ public final class TurnCoordinator {
         payload.player = context.playerPayload();
         payload.server_env = context.serverEnvPayload();
         payload.scoped_snapshot = context.scopedSnapshot();
-        payload.tool_specs = context.visibleCapabilities().stream()
-                .map(AppServerModels.ToolSpecPayload::fromDefinition)
-                .toList();
+        payload.tool_specs = proactiveCompanion
+                ? List.of()
+                : context.visibleCapabilities().stream()
+                        .map(AppServerModels.ToolSpecPayload::fromDefinition)
+                        .toList();
+        payload.companion_trigger = companionTrigger;
 
         AppServerModels.LimitsPayload limits = new AppServerModels.LimitsPayload();
         limits.max_agent_steps = config.maxAgentSteps();
-        limits.max_bridge_actions_per_turn = config.maxBridgeActionsPerTurn();
+        limits.max_bridge_actions_per_turn = proactiveCompanion ? 0 : config.maxBridgeActionsPerTurn();
         limits.max_continuation_depth = config.maxContinuationDepth();
         payload.limits = limits;
 
@@ -397,9 +464,13 @@ public final class TurnCoordinator {
             String finalReply,
             long turnStartedAt,
             int actionCount,
-            boolean approvalSeen
+            boolean approvalSeen,
+            boolean proactiveCompanion
     ) {
         List<SecondaryChip> chips = new ArrayList<>();
+        if (proactiveCompanion) {
+            chips.add(new SecondaryChip("主动陪伴", ChipTone.INFO));
+        }
         if (approvalSeen) {
             chips.add(new SecondaryChip("已确认", ChipTone.SUCCESS));
         }
@@ -413,6 +484,10 @@ public final class TurnCoordinator {
         chips.add(new SecondaryChip(formatElapsed(System.nanoTime() - turnStartedAt), ChipTone.MUTED));
         String title = actionCount > 0 ? "我替你看到的结果" : "";
         return new ReplyPresentation(title, finalReply, chips, null, ChipTone.MUTED);
+    }
+
+    private java.util.Optional<ServerPlayerEntity> serverPlayer(net.minecraft.server.MinecraftServer server, UUID playerId) {
+        return java.util.Optional.ofNullable(server.getPlayerManager().getPlayer(playerId));
     }
 
     private ActionTracePresentation actionStartedPresentation(AppServerModels.ToolCallRequestPayload actionRequest, int actionIndex) {

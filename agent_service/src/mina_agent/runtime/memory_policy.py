@@ -42,6 +42,28 @@ class MemoryPolicy:
         artifact_refs: list[ArtifactRef] | None = None,
         status: str = "completed",
     ) -> MemoryWriteResult:
+        if task.task_type == "companion_nudge":
+            return MemoryWriteResult(
+                semantic_writes=[],
+                episodic_writes=[],
+                session_summary={
+                    "topic": task.goal,
+                    "task_id": task.task_id,
+                    "status": status,
+                    "next_best_companion_move": "wait for the player's reply before extending the exchange",
+                    "last_user_message": user_message,
+                    "last_assistant_reply": final_reply,
+                    "recent_dialogue_turn": {
+                        "task_id": task.task_id,
+                        "task_goal": task.goal,
+                        "task_status": status,
+                        "user_message": user_message,
+                        "assistant_reply": final_reply,
+                    },
+                    "active_dialogue_loop": None,
+                    "companion_nudge": True,
+                },
+            )
         semantic_writes: list[dict[str, Any]] = []
         episodic_writes: list[dict[str, Any]] = []
         dialogue_turn = self._build_dialogue_turn(

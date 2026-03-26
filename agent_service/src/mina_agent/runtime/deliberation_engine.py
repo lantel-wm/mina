@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeVar
 
 import json
 
@@ -11,12 +11,15 @@ from mina_agent.providers.openai_compatible import (
     ProviderValueResult,
 )
 from mina_agent.schemas import (
+    CompanionEvaluateDecision,
     CapabilityRequest,
     ConfirmationRequest,
     DelegateRequest,
     DelegateSummary,
     ModelDecision,
 )
+
+ModelT = TypeVar("ModelT")
 
 
 class DeliberationEngine:
@@ -60,6 +63,15 @@ class DeliberationEngine:
         if complete_json is None:
             raise AttributeError("Provider does not support structured delegate summaries.")
         return complete_json(messages, DelegateSummary)
+
+    def evaluate_companion(self, messages: list[dict[str, str]]) -> ProviderStructuredResult[CompanionEvaluateDecision]:
+        return self.complete_structured(messages, CompanionEvaluateDecision)
+
+    def complete_structured(self, messages: list[dict[str, str]], response_model: type[ModelT]):
+        complete_json = getattr(self._provider, "complete_json", None)
+        if complete_json is None:
+            raise AttributeError("Provider does not support structured responses.")
+        return complete_json(messages, response_model)
 
     def compact_target(
         self,

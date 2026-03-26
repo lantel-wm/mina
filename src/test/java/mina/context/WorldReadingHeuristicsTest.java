@@ -1,5 +1,6 @@
 package mina.context;
 
+import mina.companion.PlayerActivityTracker;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -103,5 +104,45 @@ class WorldReadingHeuristicsTest {
         assertNull(hands.get("main_hand"));
         assertNull(hands.get("off_hand"));
         assertEquals(false, hands.get("using_item"));
+    }
+
+    @Test
+    void playerActivityClassificationRecognizesCoreFamilies() {
+        assertEquals(
+                "mining_like",
+                PlayerActivityTracker.classifyFamily(
+                        "minecraft:iron_pickaxe",
+                        "minecraft:stone",
+                        "surface",
+                        "low"
+                )
+        );
+        assertEquals(
+                "building_like",
+                PlayerActivityTracker.classifyFamily(
+                        "minecraft:oak_planks",
+                        "minecraft:oak_planks",
+                        "base",
+                        "low"
+                )
+        );
+        assertEquals(
+                "harvesting_like",
+                PlayerActivityTracker.classifyFamily(
+                        "minecraft:iron_hoe",
+                        "minecraft:wheat",
+                        "surface",
+                        "low"
+                )
+        );
+        assertEquals(
+                "combat_grind",
+                PlayerActivityTracker.classifyFamily(
+                        "minecraft:diamond_sword",
+                        "minecraft:air",
+                        "surface",
+                        "critical"
+                )
+        );
     }
 }

@@ -15,6 +15,10 @@ public final class PendingTurnRegistry {
         activeTurns.remove(playerId, turnId);
     }
 
+    public boolean hasActiveTurn(UUID playerId) {
+        return activeTurns.containsKey(playerId);
+    }
+
     public void closeAll() {
         activeTurns.clear();
     }

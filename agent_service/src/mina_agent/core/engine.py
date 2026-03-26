@@ -15,6 +15,7 @@ from mina_agent.memories.citations import (
 from mina_agent.protocol import (
     ApprovalRequest,
     ApprovalResponse,
+    CompanionEvaluateParams,
     ItemCompletedPayload,
     ItemStartedPayload,
     ThreadRollbackParams,
@@ -95,6 +96,12 @@ class MinaCoreEngine:
     async def rollback_thread(self, params: ThreadRollbackParams) -> dict[str, object]:
         return await self._thread_manager.rollback_thread(params)
 
+    async def evaluate_companion(self, params: CompanionEvaluateParams) -> dict[str, object]:
+        if self._services.companion_evaluator is None:
+            raise RuntimeError("Companion evaluator is not initialized.")
+        decision = await asyncio.to_thread(self._services.companion_evaluator.evaluate, params)
+        return decision.model_dump()
+
     async def _run_turn(self, params: TurnStartParams, handle: ActiveTurnHandle) -> None:
         try:
             player = self._player_payload(params)
@@ -108,6 +115,7 @@ class MinaCoreEngine:
                 scoped_snapshot=params.context.scoped_snapshot,
                 tool_specs=params.context.tool_specs,
                 limits=params.context.limits,
+                companion_trigger=params.context.companion_trigger,
             )
             request = resolved_tools.legacy_request
             self._services.store.ensure_thread(
@@ -324,6 +332,7 @@ class MinaCoreEngine:
                 scoped_snapshot=params.context.scoped_snapshot,
                 tool_specs=params.context.tool_specs,
                 limits=params.context.limits,
+                companion_trigger=params.context.companion_trigger,
             ).legacy_request
             turn_state.request = request.model_dump()
             current_step = turn_state.step_index + 1

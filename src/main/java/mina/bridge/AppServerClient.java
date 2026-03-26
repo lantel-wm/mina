@@ -128,6 +128,16 @@ public final class AppServerClient implements AutoCloseable {
         return sendRequest("thread/metadata/update", params);
     }
 
+    public JsonObject readThread(String threadId, boolean includeTurns) throws IOException, InterruptedException {
+        return sendRequest("thread/read", Map.of("thread_id", threadId, "include_turns", includeTurns));
+    }
+
+    public AppServerModels.CompanionEvaluateResult evaluateCompanion(AppServerModels.CompanionEvaluateParams params)
+            throws IOException, InterruptedException {
+        JsonObject result = sendRequest("companion/evaluate", params);
+        return gson.fromJson(result, AppServerModels.CompanionEvaluateResult.class);
+    }
+
     public JsonObject shellCommand(String threadId, String command) throws IOException, InterruptedException {
         AppServerModels.ThreadShellCommandParams params = new AppServerModels.ThreadShellCommandParams();
         params.thread_id = threadId;

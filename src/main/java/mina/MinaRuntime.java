@@ -8,6 +8,7 @@ import mina.capability.DirectWorldReader;
 import mina.capability.ServerDirectWorldReader;
 import mina.capability.ServerVanillaCommandBackend;
 import mina.capability.VanillaCommandBackend;
+import mina.companion.CompanionCoordinator;
 import mina.command.MinaCommand;
 import mina.config.MinaConfig;
 import mina.context.EnvironmentAssessmentProvider;
@@ -58,6 +59,7 @@ public final class MinaRuntime {
     private ExecutionGuard executionGuard;
     private TurnCoordinator turnCoordinator;
     private DevTurnLog devTurnLog;
+    private CompanionCoordinator companionCoordinator;
     private MinecraftServer server;
 
     private MinaRuntime() {
@@ -157,6 +159,17 @@ public final class MinaRuntime {
                 devTurnLog,
                 ioExecutor
         );
+        this.companionCoordinator = new CompanionCoordinator(
+                config,
+                minecraftServer,
+                appServerClient,
+                contextCollector,
+                turnCoordinator,
+                pendingTurns,
+                recentEventTracker,
+                ioExecutor
+        );
+        this.turnCoordinator.setCompanionCoordinator(companionCoordinator);
 
         MinaMod.LOGGER.info("Mina runtime started against agent service {}", config.agentBaseUrl());
     }
@@ -170,6 +183,7 @@ public final class MinaRuntime {
         pendingApprovals.clearAll();
         turnCoordinator = null;
         executionGuard = null;
+        companionCoordinator = null;
         if (appServerClient != null) {
             appServerClient.close();
         }
@@ -221,17 +235,26 @@ public final class MinaRuntime {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerJoin(player);
         }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerJoin(player);
+        }
     }
 
     public synchronized void onPlayerLeave(ServerPlayerEntity player) {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerLeave(player);
         }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerLeave(player);
+        }
     }
 
     public synchronized void onPlayerRespawn(ServerPlayerEntity oldPlayer, ServerPlayerEntity newPlayer, boolean alive) {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerRespawn(oldPlayer, newPlayer, alive);
+        }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerRespawn(oldPlayer, newPlayer, alive);
         }
     }
 
@@ -245,11 +268,17 @@ public final class MinaRuntime {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerAfterDamage(player, source, baseDamageTaken, damageTaken, blocked);
         }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerAfterDamage(player, source, baseDamageTaken, damageTaken, blocked);
+        }
     }
 
     public synchronized void onPlayerDeath(ServerPlayerEntity player, DamageSource source) {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerDeath(player, source);
+        }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerDeath(player, source);
         }
     }
 
@@ -257,11 +286,17 @@ public final class MinaRuntime {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerChangeWorld(player, origin, destination);
         }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerChangeWorld(player, origin, destination);
+        }
     }
 
     public synchronized void onPlayerKilledEntity(ServerPlayerEntity player, LivingEntity killedEntity, DamageSource source) {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerKilledEntity(player, killedEntity, source);
+        }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerKilledEntity(player, killedEntity, source);
         }
     }
 
@@ -273,6 +308,9 @@ public final class MinaRuntime {
     ) {
         if (recentEventTracker != null) {
             recentEventTracker.onPlayerEquipmentChange(player, slot, previous, current);
+        }
+        if (companionCoordinator != null) {
+            companionCoordinator.onPlayerEquipmentChange(player, slot, previous, current);
         }
     }
 
@@ -291,6 +329,9 @@ public final class MinaRuntime {
     public synchronized void onServerTick(MinecraftServer server) {
         if (recentEventTracker != null) {
             recentEventTracker.onServerTick(server);
+        }
+        if (companionCoordinator != null) {
+            companionCoordinator.onServerTick(server);
         }
     }
 

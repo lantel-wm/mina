@@ -17,6 +17,8 @@ from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.protocol import (
     ApprovalResponse,
+    CompanionEvaluateContextPayload,
+    CompanionEvaluateParams,
     ExternalToolSpec,
     JsonRpcRequest,
     PlayerContext,
@@ -38,7 +40,13 @@ from mina_agent.runtime.execution_orchestrator import ExecutionOrchestrator
 from mina_agent.runtime.memory_manager import MemoryManager
 from mina_agent.runtime.memory_policy import MemoryPolicy
 from mina_agent.runtime.task_manager import TaskManager
-from mina_agent.schemas import LimitsPayload, ModelDecision
+from mina_agent.schemas import (
+    CompanionDeliveryConstraintsPayload,
+    CompanionSignalPayload,
+    CompanionTriggerPayload,
+    LimitsPayload,
+    ModelDecision,
+)
 from mina_agent.tools import MinaToolRegistry
 
 
@@ -242,6 +250,144 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("thread/unarchived", [method for method, _ in connection.notifications])
         self.assertIn("thread/status/changed", [method for method, _ in connection.notifications])
         self.assertIn("thread/closed", [method for method, _ in connection.notifications])
+
+    async def test_companion_evaluate_method_dispatches_result(self) -> None:
+        engine, thread_manager, _ = self._build_engine(
+            [ModelDecision(mode="final_reply", intent="reply", final_reply="hi")]
+        )
+        app_server = MinaAppServer(thread_manager=thread_manager, engine=engine)
+        connection = _FakeConnection()
+
+        async def _fake_evaluate(params):
+            self.assertEqual(params.thread_id, "thread-companion")
+            return {
+                "action": "drop",
+                "selected_signal_ids": ["signal-1"],
+                "reason": "test_result",
+            }
+
+        engine.evaluate_companion = _fake_evaluate  # type: ignore[method-assign]
+
+        await app_server.handle(connection, JsonRpcRequest(id=1, method="initialize"))
+        params = CompanionEvaluateParams(
+            thread_id="thread-companion",
+            signals=[
+                CompanionSignalPayload(
+                    signal_id="signal-1",
+                    kind="player_join_greeting",
+                    importance="low",
+                    occurred_at="2026-03-26T00:00:00+00:00",
+                    payload={},
+                )
+            ],
+            context=CompanionEvaluateContextPayload(
+                player=PlayerContext(
+                    uuid="player-1",
+                    name="Tester",
+                    role="read_only",
+                    dimension="minecraft:overworld",
+                    position={"x": 0, "y": 64, "z": 0},
+                ),
+                server_env=ServerEnvContext(
+                    dedicated=True,
+                    motd="Test",
+                    current_players=1,
+                    max_players=10,
+                    carpet_loaded=False,
+                    experimental_enabled=False,
+                    dynamic_scripting_enabled=False,
+                ),
+                scoped_snapshot={},
+            ),
+            companion_state={},
+            delivery_constraints=CompanionDeliveryConstraintsPayload(),
+        )
+        await app_server.handle(
+            connection,
+            JsonRpcRequest(id=2, method="companion/evaluate", params=params.model_dump()),
+        )
+
+        self.assertEqual(connection.responses[2]["result"]["action"], "drop")
+        self.assertEqual(connection.responses[2]["result"]["selected_signal_ids"], ["signal-1"])
+
+    async def test_proactive_companion_turn_has_no_tool_requests_and_no_long_term_memory_writes(self) -> None:
+        engine, thread_manager, events = self._build_engine(
+            [ModelDecision(mode="final_reply", intent="reply", final_reply="欢迎回来，我在。")]
+        )
+        await thread_manager.start_thread(
+            ThreadStartParams(
+                thread_id="thread-proactive",
+                player_uuid="player-1",
+                player_name="Tester",
+            )
+        )
+
+        proactive_params = TurnStartParams(
+            thread_id="thread-proactive",
+            turn_id="turn-proactive",
+            user_message="Produce one brief companion-first proactive message.",
+            context=TurnContextPayload(
+                player=PlayerContext(
+                    uuid="player-1",
+                    name="Tester",
+                    role="read_only",
+                    dimension="minecraft:overworld",
+                    position={"x": 0, "y": 64, "z": 0},
+                ),
+                server_env=ServerEnvContext(
+                    dedicated=True,
+                    motd="Test",
+                    current_players=1,
+                    max_players=10,
+                    carpet_loaded=False,
+                    experimental_enabled=False,
+                    dynamic_scripting_enabled=False,
+                ),
+                scoped_snapshot={"risk_state": {"level": "low"}},
+                tool_specs=[
+                    ExternalToolSpec(
+                        id="game.player_snapshot.read",
+                        description="Read player snapshot.",
+                        risk_class="read_only",
+                        execution_mode="server_main_thread",
+                        requires_confirmation=False,
+                        input_schema={},
+                        output_schema={},
+                    )
+                ],
+                limits=LimitsPayload(
+                    max_agent_steps=4,
+                    max_bridge_actions_per_turn=2,
+                    max_continuation_depth=1,
+                ),
+                companion_trigger=CompanionTriggerPayload(
+                    primary_signal=CompanionSignalPayload(
+                        signal_id="signal-join-1",
+                        kind="player_join_greeting",
+                        importance="low",
+                        occurred_at="2026-03-26T00:00:00+00:00",
+                        payload={"session_join_tick": 123},
+                    ),
+                    supporting_signals=[],
+                    occurred_at="2026-03-26T00:00:00+00:00",
+                    importance="low",
+                ),
+            ),
+        )
+
+        await engine.start_turn(proactive_params, self._emitter(events))
+        await self._wait_for_method(events, "turn/completed")
+
+        methods = [method for method, _ in events]
+        self.assertNotIn("item/toolCall/requested", methods)
+        self.assertEqual(
+            engine._services.store.list_thread_semantic_memories("thread-proactive", limit=10),
+            [],
+        )
+        self.assertEqual(
+            engine._services.store.list_thread_episodic_memories("thread-proactive", limit=10),
+            [],
+        )
 
     async def test_app_server_thread_fork_and_compact_methods(self) -> None:
         engine, thread_manager, events = self._build_engine(
