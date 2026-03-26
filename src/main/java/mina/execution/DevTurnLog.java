@@ -35,14 +35,14 @@ public final class DevTurnLog {
 
     public void recordAccepted(
             String turnId,
-            String sessionRef,
+            String threadId,
             String playerName,
             String userMessage,
             Instant startedAt
     ) {
         append(record(
                 turnId,
-                sessionRef,
+                threadId,
                 playerName,
                 userMessage,
                 "accepted",
@@ -55,7 +55,7 @@ public final class DevTurnLog {
 
     public void recordCompleted(
             String turnId,
-            String sessionRef,
+            String threadId,
             String playerName,
             String userMessage,
             Instant startedAt,
@@ -64,7 +64,7 @@ public final class DevTurnLog {
     ) {
         append(record(
                 turnId,
-                sessionRef,
+                threadId,
                 playerName,
                 userMessage,
                 "completed",
@@ -77,7 +77,7 @@ public final class DevTurnLog {
 
     public void recordFailed(
             String turnId,
-            String sessionRef,
+            String threadId,
             String playerName,
             String userMessage,
             Instant startedAt,
@@ -87,7 +87,7 @@ public final class DevTurnLog {
     ) {
         append(record(
                 turnId,
-                sessionRef,
+                threadId,
                 playerName,
                 userMessage,
                 "failed",
@@ -100,7 +100,7 @@ public final class DevTurnLog {
 
     private Map<String, Object> record(
             String turnId,
-            String sessionRef,
+            String threadId,
             String playerName,
             String userMessage,
             String status,
@@ -111,7 +111,7 @@ public final class DevTurnLog {
     ) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("turn_id", turnId);
-        payload.put("session_ref", sessionRef);
+        payload.put("thread_id", threadId);
         payload.put("player_name", playerName);
         payload.put("user_message", userMessage);
         payload.put("status", status);

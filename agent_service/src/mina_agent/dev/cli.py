@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,7 @@ REVIEW_BUNDLE_FILENAMES = frozenset(
 @dataclass(slots=True)
 class TurnRunResult:
     turn_id: str
+    thread_id: str
     actor_id: str
     message: str
     bundle_dir: Path
@@ -88,6 +89,7 @@ class ScenarioExecutionRecord:
     bundle_dirs: list[str]
     quality_review: dict[str, Any] | None
     scenario_category: str | None = None
+    thread_ids: list[str] = field(default_factory=list)
 
 
 class LineProcess:
@@ -135,7 +137,11 @@ class LineProcess:
         next_heartbeat = started + DEFAULT_PROGRESS_HEARTBEAT
         while time.time() < deadline:
             if self.poll() is not None:
-                raise RuntimeError(f"{self._name} exited before emitting expected output: {substring}")
+                tail = " | ".join(self._lines[-40:]) if self._lines else "<no output>"
+                raise RuntimeError(
+                    f"{self._name} exited before emitting expected output: {substring}. "
+                    f"exit_code={self.poll()} tail={tail}"
+                )
             remaining = max(deadline - time.time(), 0.1)
             try:
                 line = self._queue.get(timeout=min(0.5, remaining))
@@ -174,6 +180,9 @@ class LineProcess:
         if self._process is None:
             return None
         return self._process.poll()
+
+    def tail_lines(self, limit: int = 20) -> list[str]:
+        return self._lines[-limit:]
 
     def _terminate_group(self, sig: int) -> None:
         if self._process is None:
@@ -444,7 +453,8 @@ def execute_suite(
             f"[{group_index}/{total_groups}] Preparing group {group_key} "
             f"(template={world_template}, scenarios={len(group_scenarios_list)})"
         )
-        prepare_server_run_directory(server_run_dir, world_template_dir, world_template, group_scenarios_list)
+        server_port = find_free_port()
+        prepare_server_run_directory(server_run_dir, world_template_dir, world_template, group_scenarios_list, server_port=server_port)
         run_swap = ActiveRunDirectory(repo_root, server_run_dir)
         run_swap.activate()
         cleanup_root_eula = ensure_repo_root_eula(repo_root)
@@ -452,6 +462,7 @@ def execute_suite(
         server_env = os.environ.copy()
         server_env["MINA_AGENT_BASE_URL"] = f"http://{DEFAULT_AGENT_HOST}:{effective_port}"
         server_env["MINA_CONFIG_FILE"] = str((active_run_dir / "config" / "mina.properties").resolve())
+        server_env["GRADLE_USER_HOME"] = str((repo_root / "tmp" / "gradle-user-home").resolve())
         server = LineProcess(
             ["./gradlew", "runServer", "--no-daemon"],
             cwd=repo_root,
@@ -521,6 +532,7 @@ def execute_suite(
                                 bundle_dirs=[str(item.bundle_dir) for item in result],
                                 quality_review=quality_review.model_dump(by_alias=True) if quality_review is not None else None,
                                 scenario_category=scenario.scenario_category,
+                                thread_ids=[item.thread_id for item in result if item.thread_id],
                             )
                         )
                     else:
@@ -551,6 +563,7 @@ def execute_suite(
                                 bundle_dirs=[str(item.bundle_dir) for item in result],
                                 quality_review=quality_review.model_dump(by_alias=True) if quality_review is not None else None,
                                 scenario_category=scenario.scenario_category,
+                                thread_ids=[item.thread_id for item in result if item.thread_id],
                             )
                         )
                         if infra and infra_failures >= max_infra_failures:
@@ -558,6 +571,11 @@ def execute_suite(
                             break
                 except Exception as exc:  # noqa: BLE001
                     category, detail = normalize_exception(exc)
+                    if agent.poll() is not None:
+                        detail = (
+                            f"{detail} | agent_exit={agent.poll()} | "
+                            f"agent_tail={' | '.join(agent.tail_lines()) or '<no output>'}"
+                        )
                     infra = is_infra_failure(category)
                     if infra:
                         infra_failures += 1
@@ -655,8 +673,15 @@ def run_scenario(
         enrich_capture(bundle_dir, scenario, turn_index)
         final_payload = json.loads((bundle_dir / "response.final.json").read_text(encoding="utf-8"))
         capture = json.loads((bundle_dir / "scenario.capture.json").read_text(encoding="utf-8"))
+        thread_id = str(
+            accepted.get("thread_id")
+            or capture.get("thread_id")
+            or ((final_payload.get("turn") or {}).get("thread_id") if isinstance(final_payload.get("turn"), dict) else "")
+            or ""
+        )
         turn_result = TurnRunResult(
             turn_id=turn_id,
+            thread_id=thread_id,
             actor_id=turn.actor_id,
             message=normalized_message,
             bundle_dir=bundle_dir,
@@ -944,9 +969,11 @@ def prepare_server_run_directory(
     world_template_root: Path,
     world_template: str,
     scenarios: list[HeadlessScenario],
+    *,
+    server_port: int,
 ) -> None:
     materialize_run_directory(world_template_root, world_template, server_run_dir)
-    write_mina_properties(server_run_dir, scenarios)
+    write_mina_properties(server_run_dir, scenarios, server_port=server_port)
 
 
 def materialize_run_directory(world_template_root: Path, template_id: str, run_dir: Path) -> None:
@@ -966,6 +993,8 @@ def materialize_run_directory(world_template_root: Path, template_id: str, run_d
     ):
         if source.exists():
             shutil.copytree(source, run_dir / name)
+    for session_lock in run_dir.rglob("session.lock"):
+        session_lock.unlink(missing_ok=True)
     for name, fallback in (
         ("eula.txt", "#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA).\neula=TRUE\n"),
         ("ops.json", "[]\n"),
@@ -1014,7 +1043,7 @@ def resolve_template_asset_dir(
     return resolve_template_asset_dir(world_template_root, source_template, source_metadata, asset_name=asset_name, seen=seen)
 
 
-def write_mina_properties(run_dir: Path, scenarios: list[HeadlessScenario]) -> None:
+def write_mina_properties(run_dir: Path, scenarios: list[HeadlessScenario], *, server_port: int) -> None:
     config_dir = run_dir / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     target = config_dir / "mina.properties"
@@ -1028,6 +1057,10 @@ def write_mina_properties(run_dir: Path, scenarios: list[HeadlessScenario]) -> N
             lines.append(f"role.override.{offline_player_uuid(actor.name)}={actor.role}")
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     write_ops_file(run_dir / "ops.json", merged_actors(scenarios))
+    properties_path = run_dir / "server.properties"
+    current_properties = load_properties_file(properties_path)
+    current_properties["server-port"] = str(server_port)
+    write_server_properties(properties_path, current_properties)
 
 
 def merged_actors(scenarios: list[HeadlessScenario]) -> list[ActorSpec]:

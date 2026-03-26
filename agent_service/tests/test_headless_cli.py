@@ -210,6 +210,90 @@ class HeadlessCliTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertGreater(final_offset, offset)
 
+    def test_run_scenario_captures_thread_id_from_new_architecture_artifacts(self) -> None:
+        scenario = HeadlessScenario.model_validate(
+            {
+                "suite": "real",
+                "scenario_id": "thread_id_case",
+                "world_template": "overworld_day_spawn",
+                "actors": [{"actor_id": "player", "name": "Steve", "role": "read_only"}],
+                "turns": [{"actor_id": "player", "message": "hello Mina"}],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dev_log = root / "turns.jsonl"
+            dev_log.write_text("", encoding="utf-8")
+            bundle_dir = root / "bundle"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "response.final.json").write_text(
+                json.dumps(
+                    {"status": "completed", "final_reply": "stub-ok", "turn": {"thread_id": "thread-1"}},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (bundle_dir / "scenario.capture.json").write_text(
+                json.dumps({"thread_id": "thread-1", "selected_capability_ids": []}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            class _FakeServer:
+                def __init__(self) -> None:
+                    self.commands: list[str] = []
+
+                def send_line(self, command: str) -> None:
+                    self.commands.append(command)
+                    if command == "execute as Steve run mina hello Mina":
+                        dev_log.write_text(
+                            "".join(
+                                [
+                                    json.dumps(
+                                        {
+                                            "turn_id": "turn-1",
+                                            "thread_id": "thread-1",
+                                            "status": "accepted",
+                                            "player_name": "Steve",
+                                            "user_message": "hello Mina",
+                                            "started_at": "2026-03-23T03:00:00Z",
+                                        }
+                                    )
+                                    + "\n",
+                                    json.dumps(
+                                        {
+                                            "turn_id": "turn-1",
+                                            "thread_id": "thread-1",
+                                            "status": "completed",
+                                            "player_name": "Steve",
+                                            "user_message": "hello Mina",
+                                            "ended_at": "2026-03-23T03:00:01Z",
+                                        }
+                                    )
+                                    + "\n",
+                                ]
+                            ),
+                            encoding="utf-8",
+                        )
+
+            server = _FakeServer()
+            with (
+                mock.patch("mina_agent.dev.cli.ensure_actor_spawned"),
+                mock.patch("mina_agent.dev.cli.wait_for_bundle", return_value=bundle_dir),
+            ):
+                results, final_offset = cli.run_scenario(
+                    scenario=scenario,
+                    server=server,
+                    known_actors=set(),
+                    dev_log_path=dev_log,
+                    dev_log_offset=0,
+                    debug_dir=root,
+                    timeout=1.0,
+                )
+                self.assertEqual(final_offset, dev_log.stat().st_size)
+                self.assertEqual(results[0].thread_id, "thread-1")
+                self.assertIn("execute as Steve run mina hello Mina", server.commands[0])
+
     def test_run_functional_returns_nonzero_when_any_case_fails(self) -> None:
         args = argparse.Namespace(
             scenario_dir="unused",
@@ -422,6 +506,20 @@ class HeadlessCliTests(unittest.TestCase):
             self.assertEqual(cli.run_real(args), 0)
 
         prune_mock.assert_not_called()
+
+    def test_materialize_run_directory_removes_world_session_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            world_templates = root / "world_templates"
+            template_dir = world_templates / "test_template"
+            (template_dir / "world").mkdir(parents=True, exist_ok=True)
+            (template_dir / "world" / "session.lock").write_text("locked", encoding="utf-8")
+            (template_dir / "template.json").write_text("{}", encoding="utf-8")
+            run_dir = root / "run"
+
+            cli.materialize_run_directory(world_templates, "test_template", run_dir)
+
+            self.assertFalse((run_dir / "world" / "session.lock").exists())
 
     def test_prune_real_review_artifacts_keeps_only_review_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -580,6 +580,7 @@ public final class TurnCoordinator {
             replyEvent.put("title", presentation.title());
             replyEvent.put("body", presentation.body());
             recentEventTracker.recordPlayerEvent("mina_reply_sent", player, replyEvent);
+            MinaMod.LOGGER.info(formatConsoleReply(player.getName().getString(), presentation));
             MinaChatRenderer.sendReply(player, presentation);
         });
     }
@@ -605,7 +606,33 @@ public final class TurnCoordinator {
                 return;
             }
 
+            MinaMod.LOGGER.error(formatConsoleError(player.getName().getString(), message));
             MinaChatRenderer.sendErrorReply(player, message);
         });
+    }
+
+    static String formatConsoleReply(String playerName, ReplyPresentation presentation) {
+        String normalizedPlayer = playerName == null || playerName.isBlank() ? "unknown" : playerName;
+        String title = presentation.title() == null ? "" : presentation.title().trim();
+        String body = presentation.body() == null ? "" : presentation.body().trim();
+        if (!title.isEmpty() && !body.isEmpty()) {
+            return String.format("[Mina -> %s] %s | %s", normalizedPlayer, title, body);
+        }
+        if (!body.isEmpty()) {
+            return String.format("[Mina -> %s] %s", normalizedPlayer, body);
+        }
+        if (!title.isEmpty()) {
+            return String.format("[Mina -> %s] %s", normalizedPlayer, title);
+        }
+        return String.format("[Mina -> %s] <empty reply>", normalizedPlayer);
+    }
+
+    static String formatConsoleError(String playerName, String message) {
+        String normalizedPlayer = playerName == null || playerName.isBlank() ? "unknown" : playerName;
+        String body = message == null ? "" : message.trim();
+        if (!body.isEmpty()) {
+            return String.format("[Mina -> %s] ERROR | %s", normalizedPlayer, body);
+        }
+        return String.format("[Mina -> %s] ERROR | <empty error>", normalizedPlayer);
     }
 }

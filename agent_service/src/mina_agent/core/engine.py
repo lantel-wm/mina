@@ -91,89 +91,89 @@ class MinaCoreEngine:
         return await self._thread_manager.rollback_thread(params)
 
     async def _run_turn(self, params: TurnStartParams, handle: ActiveTurnHandle) -> None:
-        player = self._player_payload(params)
-        server_env = self._server_env_payload(params)
-        resolved_tools = self._tool_registry.resolve_tools(
-            thread_id=params.thread_id,
-            turn_id=params.turn_id,
-            user_message=params.user_message,
-            player=player,
-            server_env=server_env,
-            scoped_snapshot=params.context.scoped_snapshot,
-            tool_specs=params.context.tool_specs,
-            limits=params.context.limits,
-        )
-        request = resolved_tools.legacy_request
-        self._services.store.ensure_thread(
-            params.thread_id,
-            player_uuid=player.uuid,
-            player_name=player.name,
-            metadata={"role": player.role},
-        )
-        task = self._task_manager.prepare_task(request, None)
-        active_task_candidate = self._task_manager.load_active_task_candidate(
-            request,
-            None,
-            current_task_id=task.task_id,
-        )
-        turn_state = TurnState(
-            thread_id=params.thread_id,
-            turn_id=params.turn_id,
-            request=request.model_dump(),
-            task=task,
-            working_memory=WorkingMemory(
-                primary_goal=task.goal,
-                focus=task.goal,
-                current_status="analyzing",
-                next_best_step="Inspect, guide, or reply based on the current trigger.",
-                companion_state={"stance": "present", "mode": "companion_first"},
-            ),
-            active_task_candidate=active_task_candidate,
-        )
-        self._services.store.create_thread_turn(
-            params.turn_id,
-            params.thread_id,
-            params.user_message,
-            turn_state.to_runtime_dict(),
-            task_id=task.task_id,
-        )
-        self._services.audit.record(
-            "turn_started",
-            {
-                "turn_id": params.turn_id,
-                "thread_id": params.thread_id,
-                "task_id": task.task_id,
-            },
-        )
-        self._services.debug.record_event(
-            params.turn_id,
-            "turn_started",
-            {
-                "thread_id": params.thread_id,
-                "user_message": params.user_message,
-                "player": player.model_dump(),
-                "server_env": server_env.model_dump(),
-                "limits": params.context.limits.model_dump(),
-                "task": task.context_entry(),
-            },
-        )
-        await handle.emitter(
-            "turn/started",
-            {
-                "thread_id": params.thread_id,
-                "turn": {
-                    "thread_id": params.thread_id,
-                    "turn_id": params.turn_id,
-                    "status": "running",
-                },
-            },
-        )
-        await handle.emitter(
-            "thread/status/changed",
-            {"thread_id": params.thread_id, "status": "running", "archived": False},
-        )
-        await self._record_user_item(handle, params)
         try:
+            player = self._player_payload(params)
+            server_env = self._server_env_payload(params)
+            resolved_tools = self._tool_registry.resolve_tools(
+                thread_id=params.thread_id,
+                turn_id=params.turn_id,
+                user_message=params.user_message,
+                player=player,
+                server_env=server_env,
+                scoped_snapshot=params.context.scoped_snapshot,
+                tool_specs=params.context.tool_specs,
+                limits=params.context.limits,
+            )
+            request = resolved_tools.legacy_request
+            self._services.store.ensure_thread(
+                params.thread_id,
+                player_uuid=player.uuid,
+                player_name=player.name,
+                metadata={"role": player.role},
+            )
+            task = self._task_manager.prepare_task(request, None)
+            active_task_candidate = self._task_manager.load_active_task_candidate(
+                request,
+                None,
+                current_task_id=task.task_id,
+            )
+            turn_state = TurnState(
+                thread_id=params.thread_id,
+                turn_id=params.turn_id,
+                request=request.model_dump(),
+                task=task,
+                working_memory=WorkingMemory(
+                    primary_goal=task.goal,
+                    focus=task.goal,
+                    current_status="analyzing",
+                    next_best_step="Inspect, guide, or reply based on the current trigger.",
+                    companion_state={"stance": "present", "mode": "companion_first"},
+                ),
+                active_task_candidate=active_task_candidate,
+            )
+            self._services.store.create_thread_turn(
+                params.turn_id,
+                params.thread_id,
+                params.user_message,
+                turn_state.to_runtime_dict(),
+                task_id=task.task_id,
+            )
+            self._services.audit.record(
+                "turn_started",
+                {
+                    "turn_id": params.turn_id,
+                    "thread_id": params.thread_id,
+                    "task_id": task.task_id,
+                },
+            )
+            self._services.debug.record_event(
+                params.turn_id,
+                "turn_started",
+                {
+                    "thread_id": params.thread_id,
+                    "user_message": params.user_message,
+                    "player": player.model_dump(),
+                    "server_env": server_env.model_dump(),
+                    "limits": params.context.limits.model_dump(),
+                    "task": task.context_entry(),
+                },
+            )
+            await handle.emitter(
+                "turn/started",
+                {
+                    "thread_id": params.thread_id,
+                    "turn": {
+                        "thread_id": params.thread_id,
+                        "turn_id": params.turn_id,
+                        "status": "running",
+                    },
+                },
+            )
+            await handle.emitter(
+                "thread/status/changed",
+                {"thread_id": params.thread_id, "status": "running", "archived": False},
+            )
+            await self._record_user_item(handle, params)
             final_reply = await self._advance_turn(params, handle, turn_state, resolved_tools.capabilities)
         except TurnInterrupted:
             await handle.emitter(
@@ -196,42 +196,7 @@ class MinaCoreEngine:
             )
             return
         except Exception as exc:
-            await self._emit_warning(
-                handle,
-                message="Mina turn failed.",
-                detail=str(exc),
-            )
-            self._services.debug.record_event(
-                params.turn_id,
-                "turn_failed",
-                {
-                    "thread_id": params.thread_id,
-                    "turn_id": params.turn_id,
-                    "final_reply": str(exc),
-                    "error": str(exc),
-                    "task_id": turn_state.task.task_id,
-                },
-            )
-            self._services.store.finish_thread_turn(params.turn_id, str(exc), status="failed")
-            await handle.emitter(
-                "turn/failed",
-                TurnFailedPayload(
-                    thread_id=params.thread_id,
-                    turn_id=params.turn_id,
-                    message="Mina turn failed.",
-                    detail=str(exc),
-                ).model_dump(),
-            )
-            await handle.emitter(
-                "thread/status/changed",
-                {"thread_id": params.thread_id, "status": "idle", "archived": False},
-            )
-            await self._thread_manager.complete_turn(
-                thread_id=params.thread_id,
-                turn_id=params.turn_id,
-                status="failed",
-                final_reply=str(exc),
-            )
+            await self._handle_turn_failure(params, handle, exc)
             return
 
         self._task_manager.sync_task(turn_state.task)
@@ -274,6 +239,53 @@ class MinaCoreEngine:
             status="completed",
             final_reply=final_reply,
         )
+
+    async def _handle_turn_failure(
+        self,
+        params: TurnStartParams,
+        handle: ActiveTurnHandle,
+        exc: Exception,
+    ) -> None:
+        try:
+            await self._emit_warning(
+                handle,
+                message="Mina turn failed.",
+                detail=str(exc),
+            )
+        except Exception:
+            pass
+        self._services.debug.record_event(
+            params.turn_id,
+            "turn_failed",
+            {
+                "thread_id": params.thread_id,
+                "turn_id": params.turn_id,
+                "final_reply": str(exc),
+                "error": str(exc),
+            },
+        )
+        self._services.store.finish_thread_turn(params.turn_id, str(exc), status="failed")
+        try:
+            await handle.emitter(
+                "turn/failed",
+                TurnFailedPayload(
+                    thread_id=params.thread_id,
+                    turn_id=params.turn_id,
+                    message="Mina turn failed.",
+                    detail=str(exc),
+                ).model_dump(),
+            )
+            await handle.emitter(
+                "thread/status/changed",
+                {"thread_id": params.thread_id, "status": "idle", "archived": False},
+            )
+        finally:
+            await self._thread_manager.complete_turn(
+                thread_id=params.thread_id,
+                turn_id=params.turn_id,
+                status="failed",
+                final_reply=str(exc),
+            )
 
     async def _advance_turn(
         self,

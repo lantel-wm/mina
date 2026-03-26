@@ -564,6 +564,29 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
         items = thread["turns"][0]["items"]
         self.assertTrue(any(item["item_kind"] == "command_execution" for item in items))
 
+    async def test_turn_failure_before_first_notification_still_emits_turn_failed(self) -> None:
+        engine, thread_manager, events = self._build_engine(
+            [ModelDecision(mode="final_reply", intent="reply", final_reply="unused")]
+        )
+        await thread_manager.start_thread(
+            ThreadStartParams(
+                thread_id="thread-prestart-fail",
+                player_uuid="player-1",
+                player_name="Tester",
+            )
+        )
+
+        def _boom(**kwargs):
+            raise RuntimeError("prestart boom")
+
+        engine._tool_registry.resolve_tools = _boom  # type: ignore[method-assign]
+        await engine.start_turn(self._turn_params("thread-prestart-fail", "turn-prestart-fail"), self._emitter(events))
+        _, payload = await self._wait_for_method(events, "turn/failed")
+
+        self.assertEqual(payload["thread_id"], "thread-prestart-fail")
+        self.assertEqual(payload["turn_id"], "turn-prestart-fail")
+        self.assertIn("prestart boom", payload["detail"])
+
     def _build_engine(self, decisions: list[ModelDecision]) -> tuple[MinaCoreEngine, ThreadManager, list[tuple[str, dict]]]:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

@@ -22,9 +22,9 @@ class DevTurnLogTest {
         Instant startedAt = Instant.parse("2026-03-23T03:00:00Z");
         Instant endedAt = Instant.parse("2026-03-23T03:00:02Z");
 
-        log.recordAccepted("turn-1", "session-1", "Steve", "hello Mina", startedAt);
-        log.recordCompleted("turn-1", "session-1", "Steve", "hello Mina", startedAt, endedAt, "reply\nline");
-        log.recordFailed("turn-2", "session-2", "Alex", "where are we", startedAt, endedAt, "boom", null);
+        log.recordAccepted("turn-1", "thread-1", "Steve", "hello Mina", startedAt);
+        log.recordCompleted("turn-1", "thread-1", "Steve", "hello Mina", startedAt, endedAt, "reply\nline");
+        log.recordFailed("turn-2", "thread-2", "Alex", "where are we", startedAt, endedAt, "boom", null);
 
         Path turnsPath = runDir.resolve("mina-dev").resolve("turns.jsonl");
         List<String> lines = Files.readAllLines(turnsPath);
@@ -32,7 +32,7 @@ class DevTurnLogTest {
 
         JsonObject accepted = JsonParser.parseString(lines.get(0)).getAsJsonObject();
         assertEquals("turn-1", accepted.get("turn_id").getAsString());
-        assertEquals("session-1", accepted.get("session_ref").getAsString());
+        assertEquals("thread-1", accepted.get("thread_id").getAsString());
         assertEquals("Steve", accepted.get("player_name").getAsString());
         assertEquals("accepted", accepted.get("status").getAsString());
         assertEquals("2026-03-23T03:00:00Z", accepted.get("started_at").getAsString());
@@ -57,7 +57,7 @@ class DevTurnLogTest {
         Path runDir = Files.createTempDirectory("mina-dev-turn-log-disabled");
         DevTurnLog log = DevTurnLog.forRunDirectory(runDir, false);
 
-        log.recordAccepted("turn-1", "session-1", "Steve", "hello Mina", Instant.parse("2026-03-23T03:00:00Z"));
+        log.recordAccepted("turn-1", "thread-1", "Steve", "hello Mina", Instant.parse("2026-03-23T03:00:00Z"));
 
         assertFalse(Files.exists(runDir.resolve("mina-dev").resolve("turns.jsonl")));
     }

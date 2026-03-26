@@ -1221,7 +1221,7 @@ class Store:
                 "summary": row["summary"],
                 "tags": json.loads(row["tags_json"]),
                 "task_id": row["task_id"],
-                "artifact_refs": json.loads(row["artifact_refs_json"]),
+                "artifact_refs": self._normalize_artifact_list(json.loads(row["artifact_refs_json"])),
                 "metadata": json.loads(row["metadata_json"]),
                 "created_at": row["created_at"],
             }
@@ -1980,8 +1980,26 @@ class Store:
             "continuity_score": float(row["continuity_score"] or 0.0),
             "last_active_at": row["last_active_at"],
             "constraints": json.loads(row["constraints_json"]),
-            "artifacts": json.loads(row["artifacts_json"]),
+            "artifacts": self._normalize_artifact_list(json.loads(row["artifacts_json"])),
             "summary": json.loads(row["summary_json"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _normalize_artifact_list(self, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(self._normalize_artifact_payload(item))
+        return normalized
+
+    def _normalize_artifact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        thread_id = normalized.get("thread_id")
+        if (thread_id is None or str(thread_id).strip() == "") and normalized.get("session_ref") is not None:
+            normalized["thread_id"] = normalized.get("session_ref")
+        normalized.pop("session_ref", None)
+        return normalized

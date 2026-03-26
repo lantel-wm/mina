@@ -51,6 +51,31 @@ public final class AppServerClient implements AutoCloseable {
         if (webSocket != null) {
             return;
         }
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= 30; attempt++) {
+            try {
+                connectOnce();
+                if (!initialized) {
+                    sendRequest("initialize", Map.of());
+                    initialized = true;
+                }
+                return;
+            } catch (IOException exception) {
+                lastError = exception;
+                closeWebSocketSilently();
+                initialized = false;
+                if (attempt >= 30) {
+                    throw lastError;
+                }
+                Thread.sleep(Math.min(250L * attempt, 1_000L));
+            }
+        }
+        if (lastError != null) {
+            throw lastError;
+        }
+    }
+
+    private void connectOnce() throws IOException, InterruptedException {
         try {
             webSocket = httpClient.newWebSocketBuilder()
                     .connectTimeout(config.connectTimeout())
@@ -61,9 +86,16 @@ public final class AppServerClient implements AutoCloseable {
         } catch (TimeoutException exception) {
             throw new IOException("Timed out while connecting to Mina app-server websocket", exception);
         }
-        if (!initialized) {
-            sendRequest("initialize", Map.of());
-            initialized = true;
+    }
+
+    private synchronized void closeWebSocketSilently() {
+        if (webSocket != null) {
+            try {
+                webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "retry");
+            } catch (Exception ignored) {
+                // ignore retry cleanup failures
+            }
+            webSocket = null;
         }
     }
 
