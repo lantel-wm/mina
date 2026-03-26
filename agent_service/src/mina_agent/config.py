@@ -41,6 +41,11 @@ class Settings:
     script_memory_mb: int
     script_max_actions: int
     model_request_timeout_seconds: int = 120
+    memories_generate: bool = True
+    memories_use: bool = True
+    memories_pollute_on_wiki: bool = False
+    memories_max_raw_memories_for_consolidation: int = 32
+    memories_max_unused_days: int = 30
 
     @classmethod
     def load(cls) -> "Settings":
@@ -124,6 +129,40 @@ class Settings:
                     config_data,
                     "model_request_timeout_seconds",
                     120,
+                )
+            ),
+            memories_generate=_read_bool(
+                "MINA_AGENT_MEMORIES_GENERATE",
+                config_data,
+                "memories_generate",
+                True,
+            ),
+            memories_use=_read_bool(
+                "MINA_AGENT_MEMORIES_USE",
+                config_data,
+                "memories_use",
+                True,
+            ),
+            memories_pollute_on_wiki=_read_bool(
+                "MINA_AGENT_MEMORIES_POLLUTE_ON_WIKI",
+                config_data,
+                "memories_pollute_on_wiki",
+                False,
+            ),
+            memories_max_raw_memories_for_consolidation=int(
+                _read(
+                    "MINA_AGENT_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION",
+                    config_data,
+                    "memories_max_raw_memories_for_consolidation",
+                    32,
+                )
+            ),
+            memories_max_unused_days=int(
+                _read(
+                    "MINA_AGENT_MEMORIES_MAX_UNUSED_DAYS",
+                    config_data,
+                    "memories_max_unused_days",
+                    30,
                 )
             ),
         )

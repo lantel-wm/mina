@@ -247,6 +247,7 @@ class Store:
                     status TEXT NOT NULL,
                     archived INTEGER NOT NULL DEFAULT 0,
                     name TEXT,
+                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -283,6 +284,17 @@ class Store:
                     state_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS memory_phase2_jobs (
+                    player_uuid TEXT PRIMARY KEY,
+                    desired_fingerprint TEXT NOT NULL,
+                    last_completed_fingerprint TEXT,
+                    ownership_token TEXT,
+                    lease_expires_at TEXT,
+                    dirty INTEGER NOT NULL DEFAULT 1,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -290,6 +302,7 @@ class Store:
             )
             self._ensure_column(connection, "threads", "archived", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "threads", "name", "TEXT")
+            self._ensure_column(connection, "threads", "memory_mode", "TEXT NOT NULL DEFAULT 'enabled'")
             self._ensure_column(connection, "turns", "task_id", "TEXT")
             self._ensure_column(connection, "turns", "thread_id", "TEXT")
             self._ensure_column(connection, "execution_records", "task_id", "TEXT")
@@ -307,6 +320,13 @@ class Store:
             self._ensure_column(connection, "semantic_memories", "thread_id", "TEXT")
             self._ensure_column(connection, "episodic_memories", "thread_id", "TEXT")
             self._migrate_session_summaries(connection)
+            connection.execute(
+                """
+                UPDATE threads
+                SET memory_mode = 'enabled'
+                WHERE memory_mode IS NULL OR trim(memory_mode) = ''
+                """
+            )
             self._backfill_thread_id(connection, "turns")
             self._backfill_thread_id(connection, "pending_confirmations")
             self._backfill_thread_id(connection, "memories")
@@ -380,27 +400,36 @@ class Store:
         player_uuid: str,
         player_name: str,
         metadata: dict[str, Any] | None = None,
+        memory_mode: str = "enabled",
     ) -> None:
         now = _utc_now()
         with self.connection() as connection:
             connection.execute(
                 """
-                INSERT INTO threads(thread_id, player_uuid, player_name, status, archived, name, metadata_json, created_at, updated_at)
-                VALUES(?, ?, ?, 'idle', 0, NULL, ?, ?, ?)
+                INSERT INTO threads(thread_id, player_uuid, player_name, status, archived, name, memory_mode, metadata_json, created_at, updated_at)
+                VALUES(?, ?, ?, 'idle', 0, NULL, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     player_uuid = excluded.player_uuid,
                     player_name = excluded.player_name,
                     metadata_json = excluded.metadata_json,
                     updated_at = excluded.updated_at
                 """,
-                (thread_id, player_uuid, player_name, json.dumps(metadata or {}, ensure_ascii=False), now, now),
+                (
+                    thread_id,
+                    player_uuid,
+                    player_name,
+                    memory_mode,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
             )
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             row = connection.execute(
                 """
-                SELECT thread_id, player_uuid, player_name, status, archived, name, metadata_json, created_at, updated_at
+                SELECT thread_id, player_uuid, player_name, status, archived, name, memory_mode, metadata_json, created_at, updated_at
                 FROM threads
                 WHERE thread_id = ?
                 """,
@@ -415,6 +444,7 @@ class Store:
             "status": row["status"],
             "archived": bool(row["archived"]),
             "name": row["name"],
+            "memory_mode": row["memory_mode"],
             "metadata": json.loads(row["metadata_json"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -426,19 +456,23 @@ class Store:
         limit: int = 50,
         archived: bool | None = None,
         search_term: str | None = None,
+        player_uuid: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = ["1 = 1"]
         params: list[Any] = []
         if archived is not None:
             clauses.append("archived = ?")
             params.append(1 if archived else 0)
+        if player_uuid is not None and player_uuid.strip():
+            clauses.append("player_uuid = ?")
+            params.append(player_uuid.strip())
         if search_term is not None and search_term.strip():
             clauses.append("(thread_id LIKE ? OR player_name LIKE ? OR COALESCE(name, '') LIKE ?)")
             needle = f"%{search_term.strip()}%"
             params.extend([needle, needle, needle])
         params.append(max(int(limit), 1))
         query = f"""
-            SELECT thread_id, player_uuid, player_name, status, archived, name, metadata_json, created_at, updated_at
+            SELECT thread_id, player_uuid, player_name, status, archived, name, memory_mode, metadata_json, created_at, updated_at
             FROM threads
             WHERE {" AND ".join(clauses)}
             ORDER BY updated_at DESC, created_at DESC
@@ -454,6 +488,7 @@ class Store:
                 "status": row["status"],
                 "archived": bool(row["archived"]),
                 "name": row["name"],
+                "memory_mode": row["memory_mode"],
                 "metadata": json.loads(row["metadata_json"]),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
@@ -496,6 +531,7 @@ class Store:
                 **(metadata or {}),
                 "forked_from": source_thread_id,
             },
+            memory_mode=str(source.get("memory_mode") or "enabled"),
         )
         turns = self.list_thread_turns(source_thread_id)
         for index, turn in enumerate(turns, start=1):
@@ -573,6 +609,79 @@ class Store:
                 (json.dumps(merged_metadata, ensure_ascii=False), _utc_now(), thread_id),
             )
         return self.get_thread(thread_id) or thread
+
+    def get_thread_memory_mode(self, thread_id: str) -> str | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT memory_mode
+                FROM threads
+                WHERE thread_id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["memory_mode"])
+
+    def set_thread_memory_mode(self, thread_id: str, memory_mode: str) -> bool:
+        with self.connection() as connection:
+            result = connection.execute(
+                """
+                UPDATE threads
+                SET memory_mode = ?, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (memory_mode, _utc_now(), thread_id),
+            )
+        return result.rowcount > 0
+
+    def mark_thread_memory_mode_polluted(self, thread_id: str) -> bool:
+        now = _utc_now()
+        with self.connection() as connection:
+            thread = connection.execute(
+                """
+                SELECT player_uuid, memory_mode
+                FROM threads
+                WHERE thread_id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+            if thread is None:
+                return False
+            if str(thread["memory_mode"] or "") == "polluted":
+                return False
+            connection.execute(
+                """
+                UPDATE threads
+                SET memory_mode = 'polluted', updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (now, thread_id),
+            )
+            selected_row = connection.execute(
+                """
+                SELECT selected_for_phase2
+                FROM memory_phase1_outputs
+                WHERE thread_id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+            if selected_row is not None and int(selected_row["selected_for_phase2"] or 0) != 0:
+                connection.execute(
+                    """
+                    INSERT INTO memory_phase2_jobs(
+                        player_uuid, desired_fingerprint, last_completed_fingerprint,
+                        ownership_token, lease_expires_at, dirty, last_error, updated_at
+                    )
+                    VALUES(?, '', NULL, NULL, NULL, 1, NULL, ?)
+                    ON CONFLICT(player_uuid) DO UPDATE SET
+                        dirty = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (str(thread["player_uuid"]), now),
+                )
+        return True
 
     def compact_thread(self, thread_id: str) -> dict[str, Any]:
         turns = self.list_thread_turns(thread_id)
@@ -802,6 +911,26 @@ class Store:
                 WHERE item_id = ?
                 """,
                 (status, json.dumps(payload, ensure_ascii=False), now, item_id),
+            )
+            row = connection.execute(
+                """
+                SELECT thread_id, turn_id, item_kind
+                FROM turn_items
+                WHERE item_id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        if row is not None:
+            self.append_rollout_event(
+                row["thread_id"],
+                {
+                    "ts": now,
+                    "turn_id": row["turn_id"],
+                    "item_id": item_id,
+                    "item_kind": row["item_kind"],
+                    "status": status,
+                    "payload": payload,
+                },
             )
 
     def list_turn_items(self, thread_id: str, turn_id: str) -> list[dict[str, Any]]:
@@ -1728,20 +1857,113 @@ class Store:
                 (thread_id, raw_memory, rollout_summary, rollout_slug, source_updated_at, now),
             )
 
-    def list_memory_phase1_outputs(self, *, limit: int = 64) -> list[dict[str, Any]]:
+    def list_memory_phase1_outputs(self, *, limit: int = 64, player_uuid: str | None = None) -> list[dict[str, Any]]:
+        clauses = ["1 = 1"]
+        params: list[Any] = []
+        if player_uuid is not None and player_uuid.strip():
+            clauses.append("threads.player_uuid = ?")
+            params.append(player_uuid.strip())
+        params.append(limit)
         with self.connection() as connection:
             rows = connection.execute(
-                """
-                SELECT thread_id, raw_memory, rollout_summary, rollout_slug, source_updated_at,
-                       generated_at, usage_count, last_usage, selected_for_phase2,
-                       selected_for_phase2_source_updated_at
-                FROM memory_phase1_outputs
-                ORDER BY generated_at DESC, thread_id DESC
+                f"""
+                SELECT so.thread_id, so.raw_memory, so.rollout_summary, so.rollout_slug, so.source_updated_at,
+                       so.generated_at, so.usage_count, so.last_usage, so.selected_for_phase2,
+                       so.selected_for_phase2_source_updated_at,
+                       threads.player_uuid, threads.player_name, threads.name AS thread_name,
+                       threads.memory_mode AS thread_memory_mode
+                FROM memory_phase1_outputs AS so
+                LEFT JOIN threads ON threads.thread_id = so.thread_id
+                WHERE {" AND ".join(clauses)}
+                ORDER BY so.generated_at DESC, so.thread_id DESC
                 LIMIT ?
                 """,
-                (limit,),
+                tuple(params),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_player_phase2_input_selection(
+        self,
+        player_uuid: str,
+        *,
+        limit: int,
+        max_unused_days: int,
+    ) -> dict[str, Any]:
+        if limit <= 0:
+            return {
+                "selected": [],
+                "previous_selected": [],
+                "retained_thread_ids": [],
+                "removed": [],
+            }
+        cutoff_iso = datetime.now(timezone.utc).timestamp() - max(max_unused_days, 0) * 86400
+        cutoff = datetime.fromtimestamp(cutoff_iso, tz=timezone.utc).isoformat()
+        with self.connection() as connection:
+            current_rows = connection.execute(
+                """
+                SELECT so.thread_id, so.raw_memory, so.rollout_summary, so.rollout_slug, so.source_updated_at,
+                       so.generated_at, so.usage_count, so.last_usage, so.selected_for_phase2,
+                       so.selected_for_phase2_source_updated_at,
+                       threads.player_uuid, threads.player_name, threads.name AS thread_name,
+                       threads.memory_mode AS thread_memory_mode
+                FROM memory_phase1_outputs AS so
+                JOIN threads ON threads.thread_id = so.thread_id
+                WHERE threads.player_uuid = ?
+                  AND threads.memory_mode = 'enabled'
+                  AND (length(trim(so.raw_memory)) > 0 OR length(trim(so.rollout_summary)) > 0)
+                  AND (
+                        (so.last_usage IS NOT NULL AND so.last_usage >= ?)
+                        OR (so.last_usage IS NULL AND so.source_updated_at >= ?)
+                  )
+                ORDER BY
+                    COALESCE(so.usage_count, 0) DESC,
+                    COALESCE(so.last_usage, so.source_updated_at) DESC,
+                    so.source_updated_at DESC,
+                    so.thread_id DESC
+                LIMIT ?
+                """,
+                (player_uuid, cutoff, cutoff, int(limit)),
+            ).fetchall()
+            previous_rows = connection.execute(
+                """
+                SELECT so.thread_id, so.raw_memory, so.rollout_summary, so.rollout_slug, so.source_updated_at,
+                       so.generated_at, so.usage_count, so.last_usage, so.selected_for_phase2,
+                       so.selected_for_phase2_source_updated_at,
+                       threads.player_uuid, threads.player_name, threads.name AS thread_name,
+                       threads.memory_mode AS thread_memory_mode
+                FROM memory_phase1_outputs AS so
+                JOIN threads ON threads.thread_id = so.thread_id
+                WHERE threads.player_uuid = ?
+                  AND so.selected_for_phase2 = 1
+                ORDER BY so.source_updated_at DESC, so.thread_id DESC
+                """,
+                (player_uuid,),
+            ).fetchall()
+
+        selected = [dict(row) for row in current_rows]
+        current_thread_ids = {str(row["thread_id"]) for row in current_rows}
+        retained_thread_ids = [
+            str(row["thread_id"])
+            for row in current_rows
+            if int(row["selected_for_phase2"] or 0) != 0
+            and str(row["selected_for_phase2_source_updated_at"] or "") == str(row["source_updated_at"] or "")
+        ]
+        previous_selected = [dict(row) for row in previous_rows]
+        removed = [
+            {
+                "thread_id": str(row["thread_id"]),
+                "source_updated_at": str(row["source_updated_at"]),
+                "rollout_slug": row["rollout_slug"],
+            }
+            for row in previous_rows
+            if str(row["thread_id"]) not in current_thread_ids
+        ]
+        return {
+            "selected": selected,
+            "previous_selected": previous_selected,
+            "retained_thread_ids": retained_thread_ids,
+            "removed": removed,
+        }
 
     def mark_memory_phase1_selected(
         self,
@@ -1766,6 +1988,55 @@ class Store:
                     """,
                     ((source_updated_at_by_thread or {}).get(thread_id), thread_id),
                 )
+
+    def mark_player_memory_phase1_selected(self, player_uuid: str, selected_entries: list[dict[str, Any]]) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_phase1_outputs
+                SET selected_for_phase2 = 0,
+                    selected_for_phase2_source_updated_at = NULL
+                WHERE thread_id IN (
+                    SELECT thread_id
+                    FROM threads
+                    WHERE player_uuid = ?
+                )
+                """,
+                (player_uuid,),
+            )
+            for entry in selected_entries:
+                thread_id = str(entry.get("thread_id") or "")
+                source_updated_at = str(entry.get("source_updated_at") or "")
+                if not thread_id or not source_updated_at:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE memory_phase1_outputs
+                    SET selected_for_phase2 = 1,
+                        selected_for_phase2_source_updated_at = ?
+                    WHERE thread_id = ? AND source_updated_at = ?
+                    """,
+                    (source_updated_at, thread_id, source_updated_at),
+                )
+
+    def record_stage1_output_usage(self, thread_ids: list[str]) -> int:
+        if not thread_ids:
+            return 0
+        now = _utc_now()
+        updated_rows = 0
+        with self.connection() as connection:
+            for thread_id in thread_ids:
+                result = connection.execute(
+                    """
+                    UPDATE memory_phase1_outputs
+                    SET usage_count = COALESCE(usage_count, 0) + 1,
+                        last_usage = ?
+                    WHERE thread_id = ?
+                    """,
+                    (now, thread_id),
+                )
+                updated_rows += int(result.rowcount or 0)
+        return updated_rows
 
     def read_memory_pipeline_state(self, pipeline_key: str) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -1796,6 +2067,155 @@ class Store:
                 """,
                 (pipeline_key, json.dumps(state, ensure_ascii=False), now),
             )
+
+    def try_claim_player_phase2_job(
+        self,
+        player_uuid: str,
+        *,
+        desired_fingerprint: str,
+        lease_seconds: int = 3600,
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        lease_expires_at = datetime.now(timezone.utc).timestamp() + max(int(lease_seconds), 1)
+        lease_expires_at_iso = datetime.fromtimestamp(lease_expires_at, tz=timezone.utc).isoformat()
+        ownership_token = uuid.uuid4().hex
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT player_uuid, desired_fingerprint, last_completed_fingerprint,
+                       ownership_token, lease_expires_at, dirty, last_error
+                FROM memory_phase2_jobs
+                WHERE player_uuid = ?
+                """,
+                (player_uuid,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO memory_phase2_jobs(
+                        player_uuid, desired_fingerprint, last_completed_fingerprint,
+                        ownership_token, lease_expires_at, dirty, last_error, updated_at
+                    )
+                    VALUES(?, ?, NULL, ?, ?, 1, NULL, ?)
+                    """,
+                    (player_uuid, desired_fingerprint, ownership_token, lease_expires_at_iso, now),
+                )
+                return {"status": "claimed", "ownership_token": ownership_token}
+
+            current_owner = row["ownership_token"]
+            current_lease = row["lease_expires_at"]
+            if current_owner and current_lease and str(current_lease) > now:
+                return {"status": "skipped_running"}
+
+            last_completed = row["last_completed_fingerprint"]
+            dirty = bool(row["dirty"])
+            should_run = dirty or str(last_completed or "") != desired_fingerprint
+            connection.execute(
+                """
+                UPDATE memory_phase2_jobs
+                SET desired_fingerprint = ?, updated_at = ?
+                WHERE player_uuid = ?
+                """,
+                (desired_fingerprint, now, player_uuid),
+            )
+            if not should_run:
+                return {"status": "skipped_not_dirty"}
+
+            connection.execute(
+                """
+                UPDATE memory_phase2_jobs
+                SET desired_fingerprint = ?, ownership_token = ?, lease_expires_at = ?,
+                    dirty = 1, last_error = NULL, updated_at = ?
+                WHERE player_uuid = ?
+                """,
+                (desired_fingerprint, ownership_token, lease_expires_at_iso, now, player_uuid),
+            )
+            return {"status": "claimed", "ownership_token": ownership_token}
+
+    def heartbeat_player_phase2_job(
+        self,
+        player_uuid: str,
+        *,
+        ownership_token: str,
+        lease_seconds: int = 3600,
+    ) -> bool:
+        now = _utc_now()
+        lease_expires_at = datetime.now(timezone.utc).timestamp() + max(int(lease_seconds), 1)
+        lease_expires_at_iso = datetime.fromtimestamp(lease_expires_at, tz=timezone.utc).isoformat()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                UPDATE memory_phase2_jobs
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE player_uuid = ? AND ownership_token = ?
+                """,
+                (lease_expires_at_iso, now, player_uuid, ownership_token),
+            )
+        return row.rowcount > 0
+
+    def mark_player_phase2_job_succeeded(
+        self,
+        player_uuid: str,
+        *,
+        ownership_token: str,
+        completed_fingerprint: str,
+    ) -> bool:
+        now = _utc_now()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                UPDATE memory_phase2_jobs
+                SET last_completed_fingerprint = ?, ownership_token = NULL,
+                    lease_expires_at = NULL, dirty = 0, last_error = NULL, updated_at = ?
+                WHERE player_uuid = ? AND ownership_token = ?
+                """,
+                (completed_fingerprint, now, player_uuid, ownership_token),
+            )
+        return row.rowcount > 0
+
+    def mark_player_phase2_job_failed(
+        self,
+        player_uuid: str,
+        *,
+        ownership_token: str,
+        error: str,
+    ) -> bool:
+        now = _utc_now()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                UPDATE memory_phase2_jobs
+                SET ownership_token = NULL, lease_expires_at = NULL,
+                    dirty = 1, last_error = ?, updated_at = ?
+                WHERE player_uuid = ? AND ownership_token = ?
+                """,
+                (error, now, player_uuid, ownership_token),
+            )
+        return row.rowcount > 0
+
+    def get_player_phase2_job(self, player_uuid: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT player_uuid, desired_fingerprint, last_completed_fingerprint,
+                       ownership_token, lease_expires_at, dirty, last_error, updated_at
+                FROM memory_phase2_jobs
+                WHERE player_uuid = ?
+                """,
+                (player_uuid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "player_uuid": row["player_uuid"],
+            "desired_fingerprint": row["desired_fingerprint"],
+            "last_completed_fingerprint": row["last_completed_fingerprint"],
+            "ownership_token": row["ownership_token"],
+            "lease_expires_at": row["lease_expires_at"],
+            "dirty": bool(row["dirty"]),
+            "last_error": row["last_error"],
+            "updated_at": row["updated_at"],
+        }
 
     def write_compact_summary(
         self,
@@ -1895,6 +2315,9 @@ class Store:
 
     def append_rollout_event(self, thread_id: str, payload: dict[str, Any]) -> None:
         self._append_jsonl(self.thread_dir(thread_id) / "rollout.jsonl", payload)
+
+    def read_thread_rollout_events(self, thread_id: str) -> list[dict[str, Any]]:
+        return self._read_jsonl(self.thread_dir(thread_id) / "rollout.jsonl")
 
     def append_episode_log(self, payload: dict[str, Any]) -> None:
         target = self._data_dir / "memory" / "episodes.jsonl"

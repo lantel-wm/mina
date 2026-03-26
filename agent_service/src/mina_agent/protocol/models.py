@@ -252,6 +252,7 @@ class ThreadRecord(MinaBaseModel):
     player_name: str
     status: str
     status_detail: dict[str, Any] | None = None
+    memory_mode: str | None = None
     archived: bool = False
     name: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

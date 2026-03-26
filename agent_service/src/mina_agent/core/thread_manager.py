@@ -55,8 +55,9 @@ class ActiveTurnHandle:
 
 
 class ThreadManager:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, *, generate_memories: bool = True) -> None:
         self._store = store
+        self._creation_memory_mode = "enabled" if generate_memories else "disabled"
         self._active_turns: dict[str, ActiveTurnHandle] = {}
         self._loaded_threads: set[str] = set()
         self._thread_subscribers: dict[str, int] = {}
@@ -68,6 +69,7 @@ class ThreadManager:
             player_uuid=params.player_uuid,
             player_name=params.player_name,
             metadata=params.metadata,
+            memory_mode=self._creation_memory_mode,
         )
         self._loaded_threads.add(params.thread_id)
         return ThreadRecord.model_validate(self._store.get_thread(params.thread_id))

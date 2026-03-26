@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass
+from pathlib import Path
+import re
 from typing import Any
 
 from mina_agent.config import Settings
@@ -57,16 +59,19 @@ class ContextManager:
         "dialogue_history",
         "dialogue_continuity",
         "observation_brief",
+        "memory_citation_rules",
     )
     _SCENE_SLICE_PROTECTED_KEYS = ("player", "world", "target_block", "risk_state")
     _COMPACTION_CANDIDATE_SLOT_NAMES = (
         "recoverable_history",
+        "player_memory",
         "runtime_policy",
         "scene_slice",
         "task_focus",
     )
     _COMPACTION_TARGET_PRIORITY = (
         "recoverable_history",
+        "player_memory",
         "task_focus",
         "scene_slice.recent_events",
         "scene_slice.social",
@@ -81,6 +86,7 @@ class ContextManager:
             "dialogue_continuity",
             "dialogue_history",
             "recoverable_history",
+            "player_memory",
             "scene_slice",
             "task_focus",
             "confirmation_loop",
@@ -116,7 +122,14 @@ class ContextManager:
         )
         session_summary = self._store.get_thread_summary(request.thread_id)
         recent_dialogue_memory = self._build_recent_dialogue_memory(session_summary)
-        recovery_refs = self._collect_recovery_refs(turn_state, compacted_history, session_summary, retrieved_memory)
+        player_memory = self._build_player_memory_read_path(request)
+        recovery_refs = self._collect_recovery_refs(
+            turn_state,
+            compacted_history,
+            session_summary,
+            retrieved_memory,
+            player_memory,
+        )
 
         pack = ContextPack(
             slots=[
@@ -197,6 +210,23 @@ class ContextManager:
                     },
                     priority=55,
                     recoverable=True,
+                ),
+                self._slot(
+                    "player_memory",
+                    "user",
+                    "player_memory_root.read_path",
+                    "player_scoped_progressive_disclosure",
+                    player_memory,
+                    priority=54,
+                    recoverable=True,
+                ),
+                self._slot(
+                    "memory_citation_rules",
+                    "system",
+                    "player_memory.citation_rules",
+                    "memory_citation_contract",
+                    self._memory_citation_rules(player_memory),
+                    priority=53,
                 ),
                 self._slot(
                     "capability_brief",
@@ -577,6 +607,10 @@ class ContextManager:
             "If a follow-up asks for more detail about the same target and observation_brief has a locked block subject, use carpet.block_info.read next instead of a generic fallback reply.\n"
             "When the player asks what nearby place is worth visiting and a POI capability is visible, prefer observe.poi or world.poi.read over delegate_explore.\n"
             "When the player sounds panicked or asks whether the current night situation is safe, and a scene or threats capability is visible, prefer a fresh threat read before reassuring them.\n"
+            "If you relied on player_memory, append exactly one <oai-mem-citation> block as the very last content of final_reply.\n"
+            "The citation block is hidden from the player and will be stripped before display, so keep all visible wording before it.\n"
+            "Use citation_entries lines formatted as relative_path:start-end|note=[short note].\n"
+            "Use thread_ids (or rollout_ids) with one relevant thread id per line.\n"
             "Return JSON only.\n"
             'Reply/guide with {"intent":"reply","final_reply":"..."} or {"intent":"guide","final_reply":"..."}.\n'
             'Inspect/retrieve/execute with {"intent":"execute","capability_request":{"capability_id":"...","arguments":{},"effect_summary":"...","requires_confirmation":false}}.\n'
@@ -781,6 +815,7 @@ class ContextManager:
         compacted_history: dict[str, Any],
         session_summary: dict[str, Any] | None,
         retrieved_memory: list[Any],
+        player_memory: dict[str, Any],
     ) -> list[dict[str, Any]]:
         refs = self._collect_observation_recovery_refs(turn_state)
         refs.extend(compacted_history.get("recovery_refs", []))
@@ -788,6 +823,8 @@ class ContextManager:
             refs.append({"kind": "session_summary", "path": session_summary["transcript_path"]})
         for memory in retrieved_memory:
             refs.extend(memory.context_entry().get("artifact_refs", []))
+        if isinstance(player_memory, dict):
+            refs.extend(player_memory.get("recovery_refs", []))
         unique: list[dict[str, Any]] = []
         seen: set[str] = set()
         for ref in refs:
@@ -797,6 +834,163 @@ class ContextManager:
             seen.add(key)
             unique.append(ref)
         return unique
+
+    def _build_player_memory_read_path(self, request: TurnStartRequest) -> dict[str, Any]:
+        if not self._settings.memories_use:
+            return {"available": False, "disabled": True}
+        player_uuid = str(request.player.uuid).strip()
+        root = self._player_memory_root(player_uuid)
+        memory_summary_path = root / "memory_summary.md"
+        memory_index_path = root / "MEMORY.md"
+        if not memory_summary_path.exists() and not memory_index_path.exists():
+            return {"available": False}
+
+        summary_ref = self._memory_summary_ref(memory_summary_path)
+        memory_hits = self._search_memory_blocks(memory_index_path, request.user_message)
+        recovery_refs = [
+            ref
+            for ref in [
+                {"kind": "memory_summary", "path": str(memory_summary_path)} if memory_summary_path.exists() else None,
+                {"kind": "memory_index", "path": str(memory_index_path)} if memory_index_path.exists() else None,
+            ]
+            if ref is not None
+        ]
+        return {
+            "available": True,
+            "player_uuid": player_uuid,
+            "player_name": request.player.name,
+            "memory_root": str(root),
+            "memory_summary": str(summary_ref.get("excerpt") or ""),
+            "memory_summary_ref": summary_ref,
+            "memory_hits": memory_hits,
+            "recovery_refs": recovery_refs,
+        }
+
+    def _memory_summary_ref(self, path: Path, *, max_lines: int = 24) -> dict[str, Any]:
+        text = self._read_text(path)
+        raw_lines = text.splitlines()
+        excerpt_lines = raw_lines[:max_lines]
+        return {
+            "path": str(path),
+            "citation_path": path.name,
+            "line_start": 1,
+            "line_end": len(excerpt_lines),
+            "excerpt": "\n".join(excerpt_lines).strip(),
+            "truncated": len(raw_lines) > len(excerpt_lines),
+        }
+
+    def _player_memory_root(self, player_uuid: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", player_uuid.strip())[:96] or "unknown"
+        return self._settings.data_dir / "memories" / "players" / safe
+
+    def _read_text(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+
+    def _search_memory_blocks(self, memory_index_path: Path, query: str, *, max_hits: int = 2) -> list[dict[str, Any]]:
+        text = self._read_text(memory_index_path)
+        if not text.strip():
+            return []
+        blocks = self._memory_index_blocks(text)
+        query_terms = {
+            match.group(0).lower()
+            for match in re.finditer(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", query)
+        }
+        if not query_terms:
+            return []
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for block in blocks:
+            block_text = str(block["text"])
+            first_line, _, remainder = block_text.partition("\n")
+            block_terms = {
+                match.group(0).lower()
+                for match in re.finditer(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", block_text)
+            }
+            overlap = len(query_terms & block_terms)
+            if overlap <= 0:
+                continue
+            scored.append(
+                (
+                    overlap,
+                    {
+                        "task_group": first_line.strip(),
+                        "excerpt": self._summary_excerpt(remainder.strip(), max_chars=420),
+                        "path": str(memory_index_path),
+                        "citation_path": memory_index_path.name,
+                        "line_start": block["line_start"],
+                        "line_end": block["line_end"],
+                        "thread_ids": self._extract_thread_ids_from_memory_block(block_text),
+                    },
+                )
+            )
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [payload for _, payload in scored[:max_hits]]
+
+    def _memory_index_blocks(self, text: str) -> list[dict[str, Any]]:
+        lines = text.splitlines()
+        blocks: list[dict[str, Any]] = []
+        current_lines: list[str] = []
+        current_start: int | None = None
+        for index, line in enumerate(lines, start=1):
+            if line.startswith("# Task Group:"):
+                if current_lines and current_start is not None:
+                    blocks.append(
+                        {
+                            "text": "\n".join(current_lines).strip(),
+                            "line_start": current_start,
+                            "line_end": index - 1,
+                        }
+                    )
+                current_lines = [line.removeprefix("# Task Group:").strip()]
+                current_start = index
+                continue
+            if current_start is not None:
+                current_lines.append(line)
+        if current_lines and current_start is not None:
+            blocks.append(
+                {
+                    "text": "\n".join(current_lines).strip(),
+                    "line_start": current_start,
+                    "line_end": len(lines),
+                }
+            )
+        return blocks
+
+    def _extract_thread_ids_from_memory_block(self, block_text: str) -> list[str]:
+        thread_ids: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"thread_id=([A-Za-z0-9._:-]+)", block_text):
+            thread_id = match.group(1).strip()
+            if not thread_id or thread_id in seen:
+                continue
+            seen.add(thread_id)
+            thread_ids.append(thread_id)
+        return thread_ids
+
+    def _memory_citation_rules(self, player_memory: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(player_memory, dict) or not player_memory.get("available"):
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "use_when": "Only when player_memory materially informed the reply.",
+            "format": {
+                "wrapper": "<oai-mem-citation>...</oai-mem-citation>",
+                "citation_entries": "relative_path:start-end|note=[short note]",
+                "thread_ids": "one thread id per line",
+            },
+            "example": (
+                "<oai-mem-citation>\n"
+                "<citation_entries>\n"
+                "MEMORY.md:10-18|note=[player preference]\n"
+                "memory_summary.md:1-8|note=[recent continuity]\n"
+                "</citation_entries>\n"
+                "<thread_ids>\n"
+                "thread-123\n"
+                "</thread_ids>\n"
+                "</oai-mem-citation>"
+            ),
+        }
 
     def _collect_observation_recovery_refs(self, turn_state: TurnState) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []

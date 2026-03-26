@@ -61,7 +61,7 @@ def create_app() -> FastAPI:
     execution_orchestrator = ExecutionOrchestrator(settings, store)
     execution_manager = ExecutionManager(capability_registry, execution_orchestrator)
     memory_manager = MemoryManager(store, memory_policy)
-    thread_manager = ThreadManager(store)
+    thread_manager = ThreadManager(store, generate_memories=settings.memories_generate)
     tool_registry = MinaToolRegistry(capability_registry)
     memory_pipeline = MemoryPipeline(settings, store, memory_manager)
     services = AgentServices(

@@ -7,6 +7,11 @@ from typing import Any
 
 from mina_agent.core.thread_manager import ActiveTurnHandle, ThreadManager
 from mina_agent.memories import MemoryPipeline
+from mina_agent.memories.citations import (
+    get_thread_ids_from_citations,
+    parse_memory_citation,
+    strip_memory_citations,
+)
 from mina_agent.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -110,6 +115,7 @@ class MinaCoreEngine:
                 player_uuid=player.uuid,
                 player_name=player.name,
                 metadata={"role": player.role},
+                memory_mode="enabled" if self._services.settings.memories_generate else "disabled",
             )
             task = self._task_manager.prepare_task(request, None)
             active_task_candidate = self._task_manager.load_active_task_candidate(
@@ -340,8 +346,11 @@ class MinaCoreEngine:
             self._task_manager.apply_task_selection(request.turn_id, turn_state, decision)
             self._task_manager.classify_task_patch(turn_state, decision)
             if decision.intent in {"reply", "guide"} or decision.mode == "final_reply":
-                final_reply = decision.final_reply or "我先陪你把这件事理清楚。"
-                await self._emit_assistant_message(handle, params, final_reply)
+                final_reply = await self._emit_assistant_message(
+                    handle,
+                    params,
+                    decision.final_reply or "我先陪你把这件事理清楚。",
+                )
                 return final_reply
 
             if decision.intent in {"delegate_explore", "delegate_plan"} and decision.delegate_request is not None:
@@ -416,8 +425,11 @@ class MinaCoreEngine:
                 )
                 turn_state.step_index += 1
                 if unknown_attempts >= 2:
-                    final_reply = "我不会执行不存在的能力。这一步先停下，我会改用当前确实可见的能力或直接回答。"
-                    await self._emit_assistant_message(handle, params, final_reply)
+                    final_reply = await self._emit_assistant_message(
+                        handle,
+                        params,
+                        "我不会执行不存在的能力。这一步先停下，我会改用当前确实可见的能力或直接回答。",
+                    )
                     return final_reply
                 continue
 
@@ -446,8 +458,11 @@ class MinaCoreEngine:
                     step_index=turn_state.step_index + 1,
                 )
                 if not approved:
-                    final_reply = "这一步我先停下，不会直接替你动手。"
-                    await self._emit_assistant_message(handle, params, final_reply)
+                    final_reply = await self._emit_assistant_message(
+                        handle,
+                        params,
+                        "这一步我先停下，不会直接替你动手。",
+                    )
                     return final_reply
 
             runtime_state = RuntimeState(
@@ -486,8 +501,11 @@ class MinaCoreEngine:
                 task_id=turn_state.task.task_id,
             )
 
-        final_reply = "Mina stopped because the configured step budget was exhausted."
-        await self._emit_assistant_message(handle, params, final_reply)
+        final_reply = await self._emit_assistant_message(
+            handle,
+            params,
+            "Mina stopped because the configured step budget was exhausted.",
+        )
         return final_reply
 
     async def _run_local_capability(
@@ -600,6 +618,7 @@ class MinaCoreEngine:
             },
             step_index=turn_state.step_index,
         )
+        self._maybe_mark_thread_memory_polluted(params.thread_id, capability.descriptor.id)
         return None
 
     async def _run_external_tool_call(
@@ -674,6 +693,13 @@ class MinaCoreEngine:
                 "observation": observation.context_entry(),
             },
         )
+
+    def _maybe_mark_thread_memory_polluted(self, thread_id: str, capability_id: str) -> None:
+        if not self._services.settings.memories_pollute_on_wiki:
+            return
+        if not capability_id.startswith("wiki."):
+            return
+        self._services.store.mark_thread_memory_mode_polluted(thread_id)
 
     async def _await_approval(
         self,
@@ -814,13 +840,14 @@ class MinaCoreEngine:
             step_index=turn_state.step_index + 1,
         )
 
-    async def _emit_assistant_message(self, handle: ActiveTurnHandle, params: TurnStartParams, message: str) -> None:
+    async def _emit_assistant_message(self, handle: ActiveTurnHandle, params: TurnStartParams, message: str) -> str:
+        visible_message, memory_citation = self._prepare_assistant_message_payload(message)
         item_id = await self._start_item(
             handle,
             item_kind="assistant_message",
             payload={"text": ""},
         )
-        for chunk in self._message_chunks(message):
+        for chunk in self._message_chunks(visible_message):
             await handle.emitter(
                 "item/assistantMessage/delta",
                 {
@@ -834,8 +861,23 @@ class MinaCoreEngine:
             handle,
             item_id,
             item_kind="assistant_message",
-            payload={"text": message},
+            payload={
+                "text": visible_message,
+                **({"memory_citation": memory_citation} if memory_citation is not None else {}),
+            },
         )
+        return visible_message
+
+    def _prepare_assistant_message_payload(
+        self,
+        message: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        visible_message, citations = strip_memory_citations(message)
+        memory_citation = parse_memory_citation(citations)
+        thread_ids = get_thread_ids_from_citations(citations)
+        if thread_ids:
+            self._services.store.record_stage1_output_usage(thread_ids)
+        return visible_message, memory_citation
 
     async def _emit_warning(self, handle: ActiveTurnHandle, *, message: str, detail: str | None = None) -> None:
         payload = WarningPayload(

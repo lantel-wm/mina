@@ -587,7 +587,97 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["turn_id"], "turn-prestart-fail")
         self.assertIn("prestart boom", payload["detail"])
 
-    def _build_engine(self, decisions: list[ModelDecision]) -> tuple[MinaCoreEngine, ThreadManager, list[tuple[str, dict]]]:
+    async def test_wiki_turn_marks_thread_memory_mode_polluted_when_enabled(self) -> None:
+        engine, thread_manager, events = self._build_engine(
+            [
+                ModelDecision(
+                    mode="call_capability",
+                    capability_id="wiki.page.get",
+                    arguments={"title": "Villager"},
+                    effect_summary="Look up villager knowledge.",
+                ),
+                ModelDecision(mode="final_reply", intent="reply", final_reply="我查到了村民资料。"),
+            ],
+            memories_pollute_on_wiki=True,
+        )
+        await thread_manager.start_thread(
+            ThreadStartParams(
+                thread_id="thread-wiki-polluted",
+                player_uuid="player-1",
+                player_name="Tester",
+            )
+        )
+        engine._execution_manager.execute_internal = lambda capability, arguments, state: {  # type: ignore[method-assign]
+            "page": {"title": arguments.get("title", "Unknown")},
+            "summary": "stub wiki result",
+        }
+
+        await engine.start_turn(
+            self._turn_params("thread-wiki-polluted", "turn-wiki-polluted"),
+            self._emitter(events),
+        )
+        await self._wait_for_method(events, "turn/completed")
+
+        self.assertEqual(
+            engine._services.store.get_thread_memory_mode("thread-wiki-polluted"),
+            "polluted",
+        )
+
+    async def test_reply_turn_strips_memory_citation_and_records_usage(self) -> None:
+        engine, thread_manager, events = self._build_engine(
+            [
+                ModelDecision(
+                    mode="final_reply",
+                    intent="reply",
+                    final_reply=(
+                        "我记得你之前把这里当作家。\n"
+                        "<oai-mem-citation>\n"
+                        "<citation_entries>\n"
+                        "MEMORY.md:10-18|note=[home location preference]\n"
+                        "</citation_entries>\n"
+                        "<thread_ids>\n"
+                        "thread-cited-memory\n"
+                        "</thread_ids>\n"
+                        "</oai-mem-citation>"
+                    ),
+                ),
+            ]
+        )
+        await thread_manager.start_thread(
+            ThreadStartParams(
+                thread_id="thread-cited-memory",
+                player_uuid="player-1",
+                player_name="Tester",
+            )
+        )
+        engine._services.store.upsert_memory_phase1_output(
+            thread_id="thread-cited-memory",
+            raw_memory="raw memory",
+            rollout_summary="summary",
+            rollout_slug="thread-cited-memory",
+            source_updated_at="2026-03-26T00:00:00+00:00",
+        )
+
+        await engine.start_turn(
+            self._turn_params("thread-cited-memory", "turn-cited-memory"),
+            self._emitter(events),
+        )
+        _, completed = await self._wait_for_method(events, "turn/completed")
+
+        self.assertEqual(completed["turn"]["final_reply"], "我记得你之前把这里当作家。")
+        phase1_outputs = engine._services.store.list_memory_phase1_outputs(limit=10)
+        cited = next(
+            output for output in phase1_outputs if output["thread_id"] == "thread-cited-memory"
+        )
+        self.assertEqual(cited["usage_count"], 1)
+        self.assertIsNotNone(cited["last_usage"])
+
+    def _build_engine(
+        self,
+        decisions: list[ModelDecision],
+        *,
+        memories_pollute_on_wiki: bool = False,
+    ) -> tuple[MinaCoreEngine, ThreadManager, list[tuple[str, dict]]]:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         root = Path(tempdir.name)
@@ -625,6 +715,7 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
             script_memory_mb=128,
             script_max_actions=8,
             model_request_timeout_seconds=30,
+            memories_pollute_on_wiki=memories_pollute_on_wiki,
         )
         store = Store(settings.db_path, settings.data_dir)
         policy_engine = PolicyEngine()
