@@ -13,9 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class BridgeModelsTest {
+class AppServerModelsTest {
     @Test
-    void visibleCapabilityPayloadIncludesSchemasFromDefinition() {
+    void toolSpecPayloadIncludesSchemasFromDefinition() {
         Map<String, Object> argsSchema = Map.of(
                 "block_pos",
                 Map.of(
@@ -45,7 +45,7 @@ class BridgeModelsTest {
                 (player, arguments) -> new CapabilityResult(Map.of("target_found", true), "ok")
         );
 
-        BridgeModels.VisibleCapabilityPayload payload = BridgeModels.VisibleCapabilityPayload.fromDefinition(definition);
+        AppServerModels.ToolSpecPayload payload = AppServerModels.ToolSpecPayload.fromDefinition(definition);
 
         assertEquals("game.target_block.read", payload.id);
         assertEquals("tool", payload.kind);
@@ -53,32 +53,11 @@ class BridgeModelsTest {
         assertEquals("read_only", payload.risk_class);
         assertEquals("server_main_thread", payload.execution_mode);
         assertFalse(payload.requires_confirmation);
-        assertSame(argsSchema, payload.args_schema);
-        assertSame(resultSchema, payload.result_schema);
+        assertSame(argsSchema, payload.input_schema);
+        assertSame(resultSchema, payload.output_schema);
         assertEquals("world", payload.domain);
         assertTrue(payload.preferred);
         assertEquals("semantic", payload.semantic_level);
-        assertEquals("ambient", payload.freshness_hint);
-    }
-
-    @Test
-    void turnResponseHelpersReflectResponseType() {
-        BridgeModels.TurnResponse finalReply = new BridgeModels.TurnResponse();
-        finalReply.type = "final_reply";
-        assertTrue(finalReply.isFinalReply());
-        assertFalse(finalReply.isActionBatch());
-        assertFalse(finalReply.isProgressUpdate());
-
-        BridgeModels.TurnResponse actionBatch = new BridgeModels.TurnResponse();
-        actionBatch.type = "action_request_batch";
-        assertTrue(actionBatch.isActionBatch());
-        assertFalse(actionBatch.isFinalReply());
-        assertFalse(actionBatch.isProgressUpdate());
-
-        BridgeModels.TurnResponse progressUpdate = new BridgeModels.TurnResponse();
-        progressUpdate.type = "progress_update";
-        assertTrue(progressUpdate.isProgressUpdate());
-        assertFalse(progressUpdate.isFinalReply());
-        assertFalse(progressUpdate.isActionBatch());
+        assertEquals("ambient", payload.freshness);
     }
 }

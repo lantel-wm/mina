@@ -33,7 +33,7 @@ class MemoryPolicy:
     def derive_writes(
         self,
         *,
-        session_ref: str,
+        thread_id: str,
         task: TaskState,
         user_message: str,
         final_reply: str,

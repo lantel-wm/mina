@@ -5,7 +5,6 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -56,13 +55,6 @@ def _safe_segment(value: str) -> str:
     return cleaned[:96] or "unknown"
 
 
-@dataclass(slots=True)
-class ContinuationState:
-    continuation_id: str
-    turn_id: str
-    state: dict[str, Any]
-
-
 class Store:
     def __init__(self, db_path: Path, data_dir: Path | None = None) -> None:
         self._db_path = db_path
@@ -85,24 +77,15 @@ class Store:
         with self.connection() as connection:
             connection.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_ref TEXT NOT NULL UNIQUE,
-                    last_player_name TEXT,
-                    last_role TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS turns (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     turn_id TEXT NOT NULL UNIQUE,
                     session_ref TEXT NOT NULL,
+                    thread_id TEXT,
                     user_message TEXT NOT NULL,
                     status TEXT NOT NULL,
                     final_reply TEXT,
                     runtime_state_json TEXT,
-                    pending_continuation_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -132,6 +115,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS pending_confirmations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_ref TEXT NOT NULL UNIQUE,
+                    thread_id TEXT,
                     confirmation_id TEXT NOT NULL UNIQUE,
                     effect_summary TEXT NOT NULL,
                     action_payload_json TEXT NOT NULL,
@@ -143,6 +127,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS memories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_ref TEXT NOT NULL,
+                    thread_id TEXT,
                     kind TEXT NOT NULL,
                     content TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
@@ -171,6 +156,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL UNIQUE,
                     session_ref TEXT NOT NULL,
+                    thread_id TEXT,
                     task_type TEXT NOT NULL,
                     owner_player TEXT NOT NULL,
                     goal TEXT NOT NULL,
@@ -204,6 +190,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     artifact_id TEXT NOT NULL UNIQUE,
                     session_ref TEXT NOT NULL,
+                    thread_id TEXT,
                     task_id TEXT,
                     turn_id TEXT,
                     kind TEXT NOT NULL,
@@ -219,6 +206,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     memory_id TEXT NOT NULL UNIQUE,
                     session_ref TEXT NOT NULL,
+                    thread_id TEXT,
                     memory_type TEXT NOT NULL,
                     memory_key TEXT NOT NULL,
                     value TEXT NOT NULL,
@@ -233,6 +221,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     memory_id TEXT NOT NULL UNIQUE,
                     session_ref TEXT NOT NULL,
+                    thread_id TEXT,
                     summary TEXT NOT NULL,
                     tags_json TEXT NOT NULL,
                     task_id TEXT,
@@ -241,25 +230,90 @@ class Store:
                     created_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS session_summaries (
+                CREATE TABLE IF NOT EXISTS thread_summaries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_ref TEXT NOT NULL UNIQUE,
+                    thread_id TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     transcript_path TEXT,
                     metadata_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS threads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL UNIQUE,
+                    player_uuid TEXT NOT NULL,
+                    player_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    name TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS turn_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id TEXT NOT NULL UNIQUE,
+                    thread_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    item_kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_phase1_outputs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL UNIQUE,
+                    raw_memory TEXT NOT NULL,
+                    rollout_summary TEXT NOT NULL,
+                    rollout_slug TEXT,
+                    source_updated_at TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    usage_count INTEGER NOT NULL DEFAULT 0,
+                    last_usage TEXT,
+                    selected_for_phase2 INTEGER NOT NULL DEFAULT 0,
+                    selected_for_phase2_source_updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_pipeline_state (
+                    pipeline_key TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_summaries_thread_id ON thread_summaries(thread_id)"
+            )
+            self._ensure_column(connection, "threads", "archived", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "threads", "name", "TEXT")
             self._ensure_column(connection, "turns", "task_id", "TEXT")
+            self._ensure_column(connection, "turns", "thread_id", "TEXT")
             self._ensure_column(connection, "execution_records", "task_id", "TEXT")
             self._ensure_column(connection, "execution_records", "state_fingerprint", "TEXT")
             self._ensure_column(connection, "execution_records", "artifact_refs_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(connection, "pending_confirmations", "task_id", "TEXT")
+            self._ensure_column(connection, "pending_confirmations", "thread_id", "TEXT")
+            self._ensure_column(connection, "memories", "thread_id", "TEXT")
+            self._ensure_column(connection, "tasks", "thread_id", "TEXT")
             self._ensure_column(connection, "tasks", "parent_task_id", "TEXT")
             self._ensure_column(connection, "tasks", "origin_turn_id", "TEXT")
             self._ensure_column(connection, "tasks", "continuity_score", "REAL NOT NULL DEFAULT 0")
             self._ensure_column(connection, "tasks", "last_active_at", "TEXT")
+            self._ensure_column(connection, "artifacts", "thread_id", "TEXT")
+            self._ensure_column(connection, "semantic_memories", "thread_id", "TEXT")
+            self._ensure_column(connection, "episodic_memories", "thread_id", "TEXT")
+            self._migrate_session_summaries(connection)
+            self._backfill_thread_id(connection, "turns")
+            self._backfill_thread_id(connection, "pending_confirmations")
+            self._backfill_thread_id(connection, "memories")
+            self._backfill_thread_id(connection, "tasks")
+            self._backfill_thread_id(connection, "artifacts")
+            self._backfill_thread_id(connection, "semantic_memories")
+            self._backfill_thread_id(connection, "episodic_memories")
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing = {
@@ -269,25 +323,516 @@ class Store:
         if column not in existing:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def ensure_session(self, session_ref: str, player_name: str, role: str) -> None:
+    def _backfill_thread_id(self, connection: sqlite3.Connection, table: str) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "thread_id" not in columns or "session_ref" not in columns:
+            return
+        connection.execute(
+            f"UPDATE {table} SET thread_id = session_ref WHERE (thread_id IS NULL OR thread_id = '') AND session_ref IS NOT NULL"
+        )
+
+    def _migrate_session_summaries(self, connection: sqlite3.Connection) -> None:
+        table_names = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if "session_summaries" not in table_names:
+            return
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(session_summaries)").fetchall()
+        }
+        has_thread_id = "thread_id" in columns
+        select_thread_expr = "thread_id" if has_thread_id else "session_ref"
+        rows = connection.execute(
+            f"""
+            SELECT {select_thread_expr} AS thread_id, summary, transcript_path, metadata_json, updated_at
+            FROM session_summaries
+            """
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                """
+                INSERT INTO thread_summaries(thread_id, summary, transcript_path, metadata_json, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    transcript_path = excluded.transcript_path,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    row["thread_id"],
+                    row["summary"],
+                    row["transcript_path"],
+                    row["metadata_json"],
+                    row["updated_at"],
+                ),
+            )
+
+    def ensure_thread(
+        self,
+        thread_id: str,
+        *,
+        player_uuid: str,
+        player_name: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         now = _utc_now()
         with self.connection() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions(session_ref, last_player_name, last_role, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(session_ref) DO UPDATE SET
-                    last_player_name = excluded.last_player_name,
-                    last_role = excluded.last_role,
+                INSERT INTO threads(thread_id, player_uuid, player_name, status, archived, name, metadata_json, created_at, updated_at)
+                VALUES(?, ?, ?, 'idle', 0, NULL, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    player_uuid = excluded.player_uuid,
+                    player_name = excluded.player_name,
+                    metadata_json = excluded.metadata_json,
                     updated_at = excluded.updated_at
                 """,
-                (session_ref, player_name, role, now, now),
+                (thread_id, player_uuid, player_name, json.dumps(metadata or {}, ensure_ascii=False), now, now),
             )
 
-    def create_turn(
+    def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT thread_id, player_uuid, player_name, status, archived, name, metadata_json, created_at, updated_at
+                FROM threads
+                WHERE thread_id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "thread_id": row["thread_id"],
+            "player_uuid": row["player_uuid"],
+            "player_name": row["player_name"],
+            "status": row["status"],
+            "archived": bool(row["archived"]),
+            "name": row["name"],
+            "metadata": json.loads(row["metadata_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_threads(
+        self,
+        *,
+        limit: int = 50,
+        archived: bool | None = None,
+        search_term: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = ["1 = 1"]
+        params: list[Any] = []
+        if archived is not None:
+            clauses.append("archived = ?")
+            params.append(1 if archived else 0)
+        if search_term is not None and search_term.strip():
+            clauses.append("(thread_id LIKE ? OR player_name LIKE ? OR COALESCE(name, '') LIKE ?)")
+            needle = f"%{search_term.strip()}%"
+            params.extend([needle, needle, needle])
+        params.append(max(int(limit), 1))
+        query = f"""
+            SELECT thread_id, player_uuid, player_name, status, archived, name, metadata_json, created_at, updated_at
+            FROM threads
+            WHERE {" AND ".join(clauses)}
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+        """
+        with self.connection() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [
+            {
+                "thread_id": row["thread_id"],
+                "player_uuid": row["player_uuid"],
+                "player_name": row["player_name"],
+                "status": row["status"],
+                "archived": bool(row["archived"]),
+                "name": row["name"],
+                "metadata": json.loads(row["metadata_json"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def read_thread(self, thread_id: str, *, include_turns: bool = False) -> dict[str, Any] | None:
+        thread = self.get_thread(thread_id)
+        if thread is None:
+            return None
+        if not include_turns:
+            return thread
+        turns = self.list_thread_turns(thread_id)
+        for turn in turns:
+            turn["items"] = self.list_turn_items(thread_id, turn["turn_id"])
+        return {
+            **thread,
+            "turns": turns,
+        }
+
+    def fork_thread(
+        self,
+        *,
+        source_thread_id: str,
+        thread_id: str,
+        player_uuid: str | None = None,
+        player_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source = self.get_thread(source_thread_id)
+        if source is None:
+            raise KeyError(f"Unknown thread_id: {source_thread_id}")
+        self.ensure_thread(
+            thread_id,
+            player_uuid=player_uuid or str(source["player_uuid"]),
+            player_name=player_name or str(source["player_name"]),
+            metadata={
+                **dict(source.get("metadata", {})),
+                **(metadata or {}),
+                "forked_from": source_thread_id,
+            },
+        )
+        turns = self.list_thread_turns(source_thread_id)
+        for index, turn in enumerate(turns, start=1):
+            cloned_turn_id = f"{thread_id}__fork_{index:03d}"
+            self.create_thread_turn(
+                cloned_turn_id,
+                thread_id,
+                str(turn.get("user_message") or ""),
+                {},
+                task_id=None,
+            )
+            if str(turn.get("status") or "") != "running":
+                self.finish_thread_turn(
+                    cloned_turn_id,
+                    str(turn.get("final_reply") or ""),
+                    status=str(turn.get("status") or "completed"),
+                )
+            for item_index, item in enumerate(self.list_turn_items(source_thread_id, str(turn["turn_id"])), start=1):
+                self.create_turn_item(
+                    thread_id=thread_id,
+                    turn_id=cloned_turn_id,
+                    item_id=f"{cloned_turn_id}__item_{item_index:03d}",
+                    item_kind=str(item.get("item_kind") or "item"),
+                    payload=dict(item.get("payload") or {}),
+                    status=str(item.get("status") or "completed"),
+                )
+        return self.get_thread(thread_id) or {"thread_id": thread_id}
+
+    def archive_thread(self, thread_id: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE threads
+                SET archived = 1, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (_utc_now(), thread_id),
+            )
+
+    def unarchive_thread(self, thread_id: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE threads
+                SET archived = 0, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (_utc_now(), thread_id),
+            )
+
+    def set_thread_name(self, thread_id: str, name: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE threads
+                SET name = ?, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (name, _utc_now(), thread_id),
+            )
+
+    def update_thread_metadata(self, thread_id: str, metadata_patch: dict[str, Any]) -> dict[str, Any]:
+        thread = self.get_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Unknown thread_id: {thread_id}")
+        merged_metadata = dict(thread.get("metadata", {}))
+        merged_metadata.update(metadata_patch)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE threads
+                SET metadata_json = ?, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (json.dumps(merged_metadata, ensure_ascii=False), _utc_now(), thread_id),
+            )
+        return self.get_thread(thread_id) or thread
+
+    def compact_thread(self, thread_id: str) -> dict[str, Any]:
+        turns = self.list_thread_turns(thread_id)
+        summary = self._build_compact_summary_text(thread_id, turns)
+        summary_record = self.write_compact_summary(
+            thread_id,
+            summary,
+            metadata={"turn_count": len(turns)},
+        )
+        return {
+            "thread_id": thread_id,
+            "summary": summary,
+            "path": summary_record["path"],
+            "transcript_path": summary_record["transcript_path"],
+        }
+
+    def rollback_thread(self, thread_id: str, *, num_turns: int) -> dict[str, Any]:
+        thread = self.get_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Unknown thread_id: {thread_id}")
+        turns = self.list_thread_turns(thread_id)
+        if not turns:
+            raise RuntimeError(f"Thread {thread_id} has no turns to roll back.")
+        remove_count = min(max(num_turns, 1), len(turns))
+        removed_turns = turns[-remove_count:]
+        removed_turn_ids = [str(turn["turn_id"]) for turn in removed_turns]
+        removed_task_ids = {
+            str(turn["task_id"])
+            for turn in removed_turns
+            if turn.get("task_id")
+        }
+        placeholders = ",".join("?" for _ in removed_turn_ids)
+        now = _utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                f"DELETE FROM turn_items WHERE thread_id = ? AND turn_id IN ({placeholders})",
+                (thread_id, *removed_turn_ids),
+            )
+            connection.execute(
+                f"DELETE FROM step_events WHERE turn_id IN ({placeholders})",
+                tuple(removed_turn_ids),
+            )
+            connection.execute(
+                f"DELETE FROM execution_records WHERE turn_id IN ({placeholders})",
+                tuple(removed_turn_ids),
+            )
+            connection.execute(
+                f"DELETE FROM turns WHERE thread_id = ? AND turn_id IN ({placeholders})",
+                (thread_id, *removed_turn_ids),
+            )
+            connection.execute(
+                f"DELETE FROM artifacts WHERE thread_id = ? AND turn_id IN ({placeholders})",
+                (thread_id, *removed_turn_ids),
+            )
+            if removed_task_ids:
+                task_placeholders = ",".join("?" for _ in removed_task_ids)
+                connection.execute(
+                    f"DELETE FROM task_steps WHERE task_id IN ({task_placeholders})",
+                    tuple(removed_task_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM episodic_memories WHERE thread_id = ? AND task_id IN ({task_placeholders})",
+                    (thread_id, *removed_task_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM artifacts WHERE thread_id = ? AND task_id IN ({task_placeholders})",
+                    (thread_id, *removed_task_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM tasks WHERE thread_id = ? AND task_id IN ({task_placeholders})",
+                    (thread_id, *removed_task_ids),
+                )
+            connection.execute(
+                "DELETE FROM memory_phase1_outputs WHERE thread_id = ?",
+                (thread_id,),
+            )
+            connection.execute(
+                """
+                UPDATE threads
+                SET status = 'idle', updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (now, thread_id),
+            )
+        self._rewrite_thread_logs_after_rollback(
+            thread_id,
+            removed_turn_ids=removed_turn_ids,
+            payload={
+                "ts": now,
+                "event": "thread_rollback",
+                "thread_id": thread_id,
+                "num_turns": remove_count,
+                "removed_turn_ids": removed_turn_ids,
+            },
+        )
+        remaining_turns = self.list_thread_turns(thread_id)
+        self.write_compact_summary(
+            thread_id,
+            self._build_compact_summary_text(thread_id, remaining_turns),
+            metadata={
+                "turn_count": len(remaining_turns),
+                "rollback": {
+                    "rolled_back_at": now,
+                    "num_turns": remove_count,
+                    "removed_turn_ids": removed_turn_ids,
+                },
+            },
+        )
+        return self.read_thread(thread_id, include_turns=True) or {
+            **thread,
+            "status": "idle",
+            "turns": [],
+        }
+
+    def set_thread_status(self, thread_id: str, status: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE threads
+                SET status = ?, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (status, _utc_now(), thread_id),
+            )
+
+    def ensure_turn_record(self, thread_id: str, turn_id: str) -> None:
+        now = _utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO turns(
+                    turn_id, session_ref, thread_id, task_id, user_message, status, runtime_state_json, created_at, updated_at
+                )
+                VALUES(?, ?, ?, NULL, '', 'running', '{}', ?, ?)
+                ON CONFLICT(turn_id) DO UPDATE SET
+                    session_ref = excluded.session_ref,
+                    thread_id = excluded.thread_id,
+                    status = 'running',
+                    updated_at = excluded.updated_at
+                """,
+                (turn_id, thread_id, thread_id, now, now),
+            )
+
+    def get_turn_record(self, turn_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT turn_id, thread_id, status, created_at, updated_at, final_reply
+                FROM turns
+                WHERE turn_id = ?
+                """,
+                (turn_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "thread_id": row["thread_id"],
+            "turn_id": row["turn_id"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "final_reply": row["final_reply"],
+        }
+
+    def finish_turn_record(self, turn_id: str, *, status: str, final_reply: str | None = None) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE turns
+                SET status = ?, final_reply = COALESCE(?, final_reply), updated_at = ?
+                WHERE turn_id = ?
+                """,
+                (status, final_reply, _utc_now(), turn_id),
+            )
+
+    def create_turn_item(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        item_id: str,
+        item_kind: str,
+        payload: dict[str, Any],
+        status: str = "started",
+    ) -> None:
+        now = _utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO turn_items(item_id, thread_id, turn_id, item_kind, status, payload_json, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    status = excluded.status,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    item_id,
+                    thread_id,
+                    turn_id,
+                    item_kind,
+                    status,
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        self.append_rollout_event(
+            thread_id,
+            {
+                "ts": now,
+                "turn_id": turn_id,
+                "item_id": item_id,
+                "item_kind": item_kind,
+                "status": status,
+                "payload": payload,
+            },
+        )
+
+    def update_turn_item(self, item_id: str, *, status: str, payload: dict[str, Any]) -> None:
+        now = _utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE turn_items
+                SET status = ?, payload_json = ?, updated_at = ?
+                WHERE item_id = ?
+                """,
+                (status, json.dumps(payload, ensure_ascii=False), now, item_id),
+            )
+
+    def list_turn_items(self, thread_id: str, turn_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT item_id, thread_id, turn_id, item_kind, status, payload_json, created_at, updated_at
+                FROM turn_items
+                WHERE thread_id = ? AND turn_id = ?
+                ORDER BY id ASC
+                """,
+                (thread_id, turn_id),
+            ).fetchall()
+        return [
+            {
+                "item_id": row["item_id"],
+                "thread_id": row["thread_id"],
+                "turn_id": row["turn_id"],
+                "item_kind": row["item_kind"],
+                "status": row["status"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def create_thread_turn(
         self,
         turn_id: str,
-        session_ref: str,
+        thread_id: str,
         user_message: str,
         runtime_state: dict[str, Any],
         *,
@@ -298,14 +843,14 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO turns(
-                    turn_id, session_ref, task_id, user_message, status, runtime_state_json, created_at, updated_at
+                    turn_id, session_ref, thread_id, task_id, user_message, status, runtime_state_json, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, 'running', ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, 'running', ?, ?, ?)
                 """,
-                (turn_id, session_ref, task_id, user_message, json.dumps(runtime_state, ensure_ascii=False), now, now),
+                (turn_id, thread_id, thread_id, task_id, user_message, json.dumps(runtime_state, ensure_ascii=False), now, now),
             )
-        self.append_transcript_event(
-            session_ref,
+        self.append_thread_transcript_event(
+            thread_id,
             {
                 "ts": now,
                 "turn_id": turn_id,
@@ -320,17 +865,16 @@ class Store:
         turn_id: str,
         runtime_state: dict[str, Any],
         *,
-        pending_continuation_id: str | None = None,
         task_id: str | None = None,
     ) -> None:
         with self.connection() as connection:
             connection.execute(
                 """
                 UPDATE turns
-                SET runtime_state_json = ?, pending_continuation_id = ?, task_id = COALESCE(?, task_id), updated_at = ?
+                SET runtime_state_json = ?, task_id = COALESCE(?, task_id), updated_at = ?
                 WHERE turn_id = ?
                 """,
-                (json.dumps(runtime_state, ensure_ascii=False), pending_continuation_id, task_id, _utc_now(), turn_id),
+                (json.dumps(runtime_state, ensure_ascii=False), task_id, _utc_now(), turn_id),
             )
 
     def finish_turn(
@@ -344,18 +888,18 @@ class Store:
             connection.execute(
                 """
                 UPDATE turns
-                SET status = ?, final_reply = ?, pending_continuation_id = NULL, updated_at = ?
+                SET status = ?, final_reply = ?, updated_at = ?
                 WHERE turn_id = ?
                 """,
                 (status, final_reply, _utc_now(), turn_id),
             )
             row = connection.execute(
-                "SELECT session_ref, task_id FROM turns WHERE turn_id = ?",
+                "SELECT thread_id, task_id FROM turns WHERE turn_id = ?",
                 (turn_id,),
             ).fetchone()
         if row is not None:
-            self.append_transcript_event(
-                row["session_ref"],
+            self.append_thread_transcript_event(
+                row["thread_id"],
                 {
                     "ts": _utc_now(),
                     "turn_id": turn_id,
@@ -365,6 +909,15 @@ class Store:
                     "content": final_reply,
                 },
             )
+
+    def finish_thread_turn(
+        self,
+        turn_id: str,
+        final_reply: str,
+        *,
+        status: str = "completed",
+    ) -> None:
+        self.finish_turn(turn_id, final_reply, status=status)
 
     def get_turn_state(self, turn_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -387,12 +940,12 @@ class Store:
                 (turn_id, step_index, event_type, json.dumps(payload, ensure_ascii=False), now),
             )
             row = connection.execute(
-                "SELECT session_ref, task_id FROM turns WHERE turn_id = ?",
+                "SELECT thread_id, task_id FROM turns WHERE turn_id = ?",
                 (turn_id,),
             ).fetchone()
         if row is not None:
-            self.append_session_event(
-                row["session_ref"],
+            self.append_thread_event(
+                row["thread_id"],
                 {
                     "ts": now,
                     "turn_id": turn_id,
@@ -443,143 +996,56 @@ class Store:
                 ),
             )
 
-    def list_turns(self, session_ref: str, limit: int | None = None) -> list[dict[str, Any]]:
+    def list_thread_turns(self, thread_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         with self.connection() as connection:
             if limit is None:
                 rows = connection.execute(
                     """
                     SELECT turn_id, task_id, user_message, final_reply, status, created_at
                     FROM turns
-                    WHERE session_ref = ?
+                    WHERE thread_id = ?
                     ORDER BY id ASC
                     """,
-                    (session_ref,),
+                    (thread_id,),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     """
                     SELECT turn_id, task_id, user_message, final_reply, status, created_at
                     FROM turns
-                    WHERE session_ref = ?
+                    WHERE thread_id = ?
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (session_ref, limit),
+                    (thread_id, limit),
                 ).fetchall()
                 rows = rows[::-1]
         return [dict(row) for row in rows]
 
-    def list_recent_turns(self, session_ref: str, limit: int = 12) -> list[dict[str, Any]]:
-        return self.list_turns(session_ref, limit=limit)
+    def list_recent_thread_turns(self, thread_id: str, limit: int = 12) -> list[dict[str, Any]]:
+        return self.list_thread_turns(thread_id, limit=limit)
 
-    def put_continuation(self, continuation_id: str, turn_id: str, state: dict[str, Any], *, task_id: str | None = None) -> None:
-        state = dict(state)
-        state["continuation_id"] = continuation_id
-        self.update_turn_state(turn_id, state, pending_continuation_id=continuation_id, task_id=task_id)
-
-    def get_continuation(self, continuation_id: str) -> ContinuationState | None:
-        with self.connection() as connection:
-            row = connection.execute(
-                """
-                SELECT turn_id, runtime_state_json
-                FROM turns
-                WHERE pending_continuation_id = ?
-                """,
-                (continuation_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        state = json.loads(row["runtime_state_json"])
-        state.pop("continuation_id", None)
-        return ContinuationState(
-            continuation_id=continuation_id,
-            turn_id=row["turn_id"],
-            state=state,
-        )
-
-    def clear_continuation(self, turn_id: str, state: dict[str, Any], *, task_id: str | None = None) -> None:
-        self.update_turn_state(turn_id, state, pending_continuation_id=None, task_id=task_id)
-
-    def get_pending_confirmation(self, session_ref: str) -> dict[str, Any] | None:
-        with self.connection() as connection:
-            row = connection.execute(
-                """
-                SELECT confirmation_id, effect_summary, action_payload_json, status, task_id
-                FROM pending_confirmations
-                WHERE session_ref = ? AND status = 'pending'
-                """,
-                (session_ref,),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "confirmation_id": row["confirmation_id"],
-            "effect_summary": row["effect_summary"],
-            "action_payload": json.loads(row["action_payload_json"]),
-            "status": row["status"],
-            "task_id": row["task_id"],
-        }
-
-    def put_pending_confirmation(
-        self,
-        session_ref: str,
-        confirmation_id: str,
-        effect_summary: str,
-        action_payload: dict[str, Any],
-        *,
-        task_id: str | None = None,
-    ) -> None:
-        now = _utc_now()
+    def add_thread_memory(self, thread_id: str, kind: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         with self.connection() as connection:
             connection.execute(
                 """
-                INSERT INTO pending_confirmations(
-                    session_ref, confirmation_id, effect_summary, action_payload_json, task_id, status, created_at, updated_at
-                )
-                VALUES(?, ?, ?, ?, ?, 'pending', ?, ?)
-                ON CONFLICT(session_ref) DO UPDATE SET
-                    confirmation_id = excluded.confirmation_id,
-                    effect_summary = excluded.effect_summary,
-                    action_payload_json = excluded.action_payload_json,
-                    task_id = excluded.task_id,
-                    status = 'pending',
-                    updated_at = excluded.updated_at
+                INSERT INTO memories(session_ref, thread_id, kind, content, metadata_json, created_at)
+                VALUES(?, ?, ?, ?, ?, ?)
                 """,
-                (session_ref, confirmation_id, effect_summary, json.dumps(action_payload, ensure_ascii=False), task_id, now, now),
+                (thread_id, thread_id, kind, content, json.dumps(metadata or {}, ensure_ascii=False), _utc_now()),
             )
 
-    def clear_pending_confirmation(self, session_ref: str) -> None:
-        with self.connection() as connection:
-            connection.execute(
-                """
-                UPDATE pending_confirmations
-                SET status = 'resolved', updated_at = ?
-                WHERE session_ref = ? AND status = 'pending'
-                """,
-                (_utc_now(), session_ref),
-            )
-
-    def add_memory(self, session_ref: str, kind: str, content: str, metadata: dict[str, Any] | None = None) -> None:
-        with self.connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO memories(session_ref, kind, content, metadata_json, created_at)
-                VALUES(?, ?, ?, ?, ?)
-                """,
-                (session_ref, kind, content, json.dumps(metadata or {}, ensure_ascii=False), _utc_now()),
-            )
-
-    def list_memories(self, session_ref: str, limit: int = 6) -> list[dict[str, Any]]:
+    def list_thread_memories(self, thread_id: str, limit: int = 6) -> list[dict[str, Any]]:
         with self.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT kind, content, metadata_json, created_at
                 FROM memories
-                WHERE session_ref = ?
+                WHERE thread_id = ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (session_ref, limit),
+                (thread_id, limit),
             ).fetchall()
         return [
             {
@@ -591,9 +1057,9 @@ class Store:
             for row in rows
         ][::-1]
 
-    def add_semantic_memory(
+    def add_thread_semantic_memory(
         self,
-        session_ref: str,
+        thread_id: str,
         memory_type: str,
         memory_key: str,
         value: str,
@@ -608,10 +1074,10 @@ class Store:
                 """
                 SELECT id, memory_id, created_at
                 FROM semantic_memories
-                WHERE session_ref = ? AND memory_type = ? AND memory_key = ?
+                WHERE thread_id = ? AND memory_type = ? AND memory_key = ?
                 ORDER BY updated_at DESC, id DESC
                 """,
-                (session_ref, memory_type, memory_key),
+                (thread_id, memory_type, memory_key),
             ).fetchall()
             if existing_rows:
                 primary = existing_rows[0]
@@ -643,13 +1109,14 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO semantic_memories(
-                    memory_id, session_ref, memory_type, memory_key, value, summary, confidence, metadata_json, updated_at, created_at
+                    memory_id, session_ref, thread_id, memory_type, memory_key, value, summary, confidence, metadata_json, updated_at, created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
-                    session_ref,
+                    thread_id,
+                    thread_id,
                     memory_type,
                     memory_key,
                     value,
@@ -662,9 +1129,9 @@ class Store:
             )
         return memory_id
 
-    def add_episodic_memory(
+    def add_thread_episodic_memory(
         self,
-        session_ref: str,
+        thread_id: str,
         summary: str,
         *,
         tags: list[str] | None = None,
@@ -676,7 +1143,7 @@ class Store:
         memory_id = str(uuid.uuid4())
         payload = {
             "memory_id": memory_id,
-            "session_ref": session_ref,
+            "thread_id": thread_id,
             "summary": summary,
             "tags": tags or [],
             "task_id": task_id,
@@ -688,13 +1155,14 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO episodic_memories(
-                    memory_id, session_ref, summary, tags_json, task_id, artifact_refs_json, metadata_json, created_at
+                    memory_id, session_ref, thread_id, summary, tags_json, task_id, artifact_refs_json, metadata_json, created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
-                    session_ref,
+                    thread_id,
+                    thread_id,
                     summary,
                     json.dumps(tags or [], ensure_ascii=False),
                     task_id,
@@ -706,17 +1174,17 @@ class Store:
         self.append_episode_log(payload)
         return memory_id
 
-    def list_semantic_memories(self, session_ref: str, limit: int = 6) -> list[dict[str, Any]]:
+    def list_thread_semantic_memories(self, thread_id: str, limit: int = 6) -> list[dict[str, Any]]:
         with self.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT memory_id, memory_type, memory_key, value, summary, confidence, metadata_json, updated_at, created_at
                 FROM semantic_memories
-                WHERE session_ref = ?
+                WHERE thread_id = ?
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (session_ref, limit),
+                (thread_id, limit),
             ).fetchall()
         return [
             {
@@ -734,17 +1202,17 @@ class Store:
             for row in rows
         ]
 
-    def list_episodic_memories(self, session_ref: str, limit: int = 6) -> list[dict[str, Any]]:
+    def list_thread_episodic_memories(self, thread_id: str, limit: int = 6) -> list[dict[str, Any]]:
         with self.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT memory_id, summary, tags_json, task_id, artifact_refs_json, metadata_json, created_at
                 FROM episodic_memories
-                WHERE session_ref = ?
+                WHERE thread_id = ?
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (session_ref, limit),
+                (thread_id, limit),
             ).fetchall()
         return [
             {
@@ -760,17 +1228,17 @@ class Store:
             for row in rows
         ]
 
-    def search_memories(self, session_ref: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
+    def search_thread_memories(self, thread_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
         scored: list[tuple[float, dict[str, Any]]] = []
-        for memory in self.list_semantic_memories(session_ref, limit=24):
+        for memory in self.list_thread_semantic_memories(thread_id, limit=24):
             score = _score_text(query, memory["summary"], memory["value"], memory["memory_key"])
             if score > 0:
                 scored.append((score, memory))
-        for memory in self.list_episodic_memories(session_ref, limit=24):
+        for memory in self.list_thread_episodic_memories(thread_id, limit=24):
             score = _score_text(query, memory["summary"], " ".join(memory["tags"]))
             if score > 0:
                 scored.append((score, memory))
-        for memory in self.list_memories(session_ref, limit=24):
+        for memory in self.list_thread_memories(thread_id, limit=24):
             score = _score_text(query, memory["content"], memory["kind"])
             if score > 0:
                 scored.append(
@@ -786,7 +1254,7 @@ class Store:
                 )
         scored.sort(key=lambda item: item[0], reverse=True)
         if not scored and _is_brief_follow_up_query(query):
-            for memory in self.list_episodic_memories(session_ref, limit=max(limit, 6)):
+            for memory in self.list_thread_episodic_memories(thread_id, limit=max(limit, 6)):
                 if _has_recent_dialogue_signal(memory):
                     scored.append((0.05, memory))
         results: list[dict[str, Any]] = []
@@ -796,9 +1264,9 @@ class Store:
             results.append(entry)
         return results
 
-    def create_task(
+    def create_thread_task(
         self,
-        session_ref: str,
+        thread_id: str,
         owner_player: str,
         goal: str,
         *,
@@ -818,7 +1286,7 @@ class Store:
         now = _utc_now()
         payload = {
             "task_id": task_id,
-            "session_ref": session_ref,
+            "thread_id": thread_id,
             "task_type": task_type,
             "owner_player": owner_player,
             "goal": goal,
@@ -840,15 +1308,16 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO tasks(
-                    task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
+                    task_id, session_ref, thread_id, task_type, owner_player, goal, status, priority, risk_class,
                     requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
                     constraints_json, artifacts_json, summary_json, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
-                    session_ref,
+                    thread_id,
+                    thread_id,
                     task_type,
                     owner_player,
                     goal,
@@ -920,7 +1389,7 @@ class Store:
         with self.connection() as connection:
             row = connection.execute(
                 """
-                SELECT task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
+                SELECT task_id, thread_id, task_type, owner_player, goal, status, priority, risk_class,
                        requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
                        constraints_json, artifacts_json, summary_json, created_at, updated_at
                 FROM tasks
@@ -932,39 +1401,39 @@ class Store:
             return None
         return self._task_row_to_dict(row)
 
-    def get_active_task(self, session_ref: str) -> dict[str, Any] | None:
+    def get_active_thread_task(self, thread_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             row = connection.execute(
                 """
-                SELECT task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
+                SELECT task_id, thread_id, task_type, owner_player, goal, status, priority, risk_class,
                        requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
                        constraints_json, artifacts_json, summary_json, created_at, updated_at
                 FROM tasks
-                WHERE session_ref = ? AND status IN ('pending', 'analyzing', 'planned', 'awaiting_confirmation', 'in_progress', 'blocked')
+                WHERE thread_id = ? AND status IN ('pending', 'analyzing', 'planned', 'awaiting_confirmation', 'in_progress', 'blocked')
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (session_ref,),
+                (thread_id,),
             ).fetchone()
         if row is None:
             return None
         return self._task_row_to_dict(row)
 
-    def get_latest_task(
+    def get_latest_thread_task(
         self,
-        session_ref: str,
+        thread_id: str,
         *,
         excluded_statuses: Iterable[str] | None = ("failed", "canceled"),
     ) -> dict[str, Any] | None:
-        clauses = ["session_ref = ?"]
-        params: list[Any] = [session_ref]
+        clauses = ["thread_id = ?"]
+        params: list[Any] = [thread_id]
         normalized_excluded = [str(status) for status in (excluded_statuses or ()) if str(status).strip()]
         if normalized_excluded:
             placeholders = ", ".join("?" for _ in normalized_excluded)
             clauses.append(f"status NOT IN ({placeholders})")
             params.extend(normalized_excluded)
         query = f"""
-            SELECT task_id, session_ref, task_type, owner_player, goal, status, priority, risk_class,
+            SELECT task_id, thread_id, task_type, owner_player, goal, status, priority, risk_class,
                    requires_confirmation, parent_task_id, origin_turn_id, continuity_score, last_active_at,
                    constraints_json, artifacts_json, summary_json, created_at, updated_at
             FROM tasks
@@ -1019,9 +1488,9 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def write_artifact(
+    def write_thread_artifact(
         self,
-        session_ref: str,
+        thread_id: str,
         task_id: str | None,
         turn_id: str | None,
         kind: str,
@@ -1036,7 +1505,7 @@ class Store:
         if task_id is not None:
             target_dir = self._data_dir / "tasks" / _safe_segment(task_id) / "artifacts"
         else:
-            target_dir = self._data_dir / "sessions" / _safe_segment(session_ref) / "observations"
+            target_dir = self._data_dir / "sessions" / _safe_segment(thread_id) / "observations"
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{artifact_id}{extension}"
         if "json" in content_type:
@@ -1046,7 +1515,7 @@ class Store:
         char_count = len(target_path.read_text(encoding="utf-8"))
         record = {
             "artifact_id": artifact_id,
-            "session_ref": session_ref,
+            "thread_id": thread_id,
             "task_id": task_id,
             "turn_id": turn_id,
             "kind": kind,
@@ -1061,13 +1530,14 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO artifacts(
-                    artifact_id, session_ref, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
+                    artifact_id, session_ref, thread_id, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact_id,
-                    session_ref,
+                    thread_id,
+                    thread_id,
                     task_id,
                     turn_id,
                     kind,
@@ -1085,7 +1555,7 @@ class Store:
         with self.connection() as connection:
             row = connection.execute(
                 """
-                SELECT artifact_id, session_ref, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
+                SELECT artifact_id, thread_id, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
                 FROM artifacts
                 WHERE artifact_id = ?
                 """,
@@ -1097,7 +1567,7 @@ class Store:
         content = path.read_text(encoding="utf-8") if path.exists() else ""
         return {
             "artifact_id": row["artifact_id"],
-            "session_ref": row["session_ref"],
+            "thread_id": row["thread_id"],
             "task_id": row["task_id"],
             "turn_id": row["turn_id"],
             "kind": row["kind"],
@@ -1110,36 +1580,36 @@ class Store:
             "content": content,
         }
 
-    def list_artifacts(self, session_ref: str, *, task_id: str | None = None, limit: int = 24) -> list[dict[str, Any]]:
+    def list_thread_artifacts(self, thread_id: str, *, task_id: str | None = None, limit: int = 24) -> list[dict[str, Any]]:
         with self.connection() as connection:
             if task_id is None:
                 rows = connection.execute(
                     """
-                    SELECT artifact_id, session_ref, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
+                    SELECT artifact_id, thread_id, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
                     FROM artifacts
-                    WHERE session_ref = ?
+                    WHERE thread_id = ?
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (session_ref, limit),
+                    (thread_id, limit),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     """
-                    SELECT artifact_id, session_ref, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
+                    SELECT artifact_id, thread_id, task_id, turn_id, kind, artifact_path, summary, content_type, char_count, metadata_json, created_at
                     FROM artifacts
-                    WHERE session_ref = ? AND task_id = ?
+                    WHERE thread_id = ? AND task_id = ?
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (session_ref, task_id, limit),
+                    (thread_id, task_id, limit),
                 ).fetchall()
         records: list[dict[str, Any]] = []
         for row in rows:
             records.append(
                 {
                     "artifact_id": row["artifact_id"],
-                    "session_ref": row["session_ref"],
+                    "thread_id": row["thread_id"],
                     "task_id": row["task_id"],
                     "turn_id": row["turn_id"],
                     "kind": row["kind"],
@@ -1153,16 +1623,16 @@ class Store:
             )
         return records
 
-    def search_artifacts(
+    def search_thread_artifacts(
         self,
-        session_ref: str,
+        thread_id: str,
         query: str,
         *,
         task_id: str | None = None,
         limit: int = 6,
     ) -> list[dict[str, Any]]:
         scored: list[tuple[float, dict[str, Any]]] = []
-        for artifact in self.list_artifacts(session_ref, task_id=task_id, limit=48):
+        for artifact in self.list_thread_artifacts(thread_id, task_id=task_id, limit=48):
             path = Path(artifact["path"])
             content = path.read_text(encoding="utf-8") if path.exists() else ""
             score = _score_text(query, artifact["summary"], artifact["kind"], content[:4000])
@@ -1186,9 +1656,9 @@ class Store:
             results.append(entry)
         return results
 
-    def upsert_session_summary(
+    def upsert_thread_summary(
         self,
-        session_ref: str,
+        thread_id: str,
         summary: str,
         *,
         transcript_path: str | None = None,
@@ -1198,56 +1668,154 @@ class Store:
         with self.connection() as connection:
             connection.execute(
                 """
-                INSERT INTO session_summaries(session_ref, summary, transcript_path, metadata_json, updated_at)
+                INSERT INTO thread_summaries(thread_id, summary, transcript_path, metadata_json, updated_at)
                 VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(session_ref) DO UPDATE SET
+                ON CONFLICT(thread_id) DO UPDATE SET
                     summary = excluded.summary,
                     transcript_path = excluded.transcript_path,
                     metadata_json = excluded.metadata_json,
                     updated_at = excluded.updated_at
                 """,
-                (session_ref, summary, transcript_path, json.dumps(metadata or {}, ensure_ascii=False), now),
+                (thread_id, summary, transcript_path, json.dumps(metadata or {}, ensure_ascii=False), now),
             )
 
-    def get_session_summary(self, session_ref: str) -> dict[str, Any] | None:
+    def get_thread_summary(self, thread_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             row = connection.execute(
                 """
-                SELECT session_ref, summary, transcript_path, metadata_json, updated_at
-                FROM session_summaries
-                WHERE session_ref = ?
+                SELECT thread_id, summary, transcript_path, metadata_json, updated_at
+                FROM thread_summaries
+                WHERE thread_id = ?
                 """,
-                (session_ref,),
+                (thread_id,),
             ).fetchone()
         if row is None:
             return None
         return {
-            "session_ref": row["session_ref"],
+            "thread_id": row["thread_id"],
             "summary": row["summary"],
             "transcript_path": row["transcript_path"],
             "metadata": json.loads(row["metadata_json"]),
             "updated_at": row["updated_at"],
         }
 
+    def upsert_memory_phase1_output(
+        self,
+        *,
+        thread_id: str,
+        raw_memory: str,
+        rollout_summary: str,
+        rollout_slug: str | None,
+        source_updated_at: str,
+    ) -> None:
+        now = _utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_phase1_outputs(
+                    thread_id, raw_memory, rollout_summary, rollout_slug,
+                    source_updated_at, generated_at, usage_count, last_usage,
+                    selected_for_phase2, selected_for_phase2_source_updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, 0, NULL, 0, NULL)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    raw_memory = excluded.raw_memory,
+                    rollout_summary = excluded.rollout_summary,
+                    rollout_slug = excluded.rollout_slug,
+                    source_updated_at = excluded.source_updated_at,
+                    generated_at = excluded.generated_at
+                """,
+                (thread_id, raw_memory, rollout_summary, rollout_slug, source_updated_at, now),
+            )
+
+    def list_memory_phase1_outputs(self, *, limit: int = 64) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT thread_id, raw_memory, rollout_summary, rollout_slug, source_updated_at,
+                       generated_at, usage_count, last_usage, selected_for_phase2,
+                       selected_for_phase2_source_updated_at
+                FROM memory_phase1_outputs
+                ORDER BY generated_at DESC, thread_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_memory_phase1_selected(
+        self,
+        thread_ids: list[str],
+        *,
+        source_updated_at_by_thread: dict[str, str] | None = None,
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_phase1_outputs
+                SET selected_for_phase2 = 0
+                """
+            )
+            for thread_id in thread_ids:
+                connection.execute(
+                    """
+                    UPDATE memory_phase1_outputs
+                    SET selected_for_phase2 = 1,
+                        selected_for_phase2_source_updated_at = ?
+                    WHERE thread_id = ?
+                    """,
+                    ((source_updated_at_by_thread or {}).get(thread_id), thread_id),
+                )
+
+    def read_memory_pipeline_state(self, pipeline_key: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT state_json, updated_at
+                FROM memory_pipeline_state
+                WHERE pipeline_key = ?
+                """,
+                (pipeline_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["state_json"])
+        payload["updated_at"] = row["updated_at"]
+        return payload
+
+    def write_memory_pipeline_state(self, pipeline_key: str, state: dict[str, Any]) -> None:
+        now = _utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_pipeline_state(pipeline_key, state_json, updated_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(pipeline_key) DO UPDATE SET
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (pipeline_key, json.dumps(state, ensure_ascii=False), now),
+            )
+
     def write_compact_summary(
         self,
-        session_ref: str,
+        thread_id: str,
         summary: str,
         *,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        transcript_path = self.session_dir(session_ref) / "transcript.jsonl"
-        existing_summary = self.get_session_summary(session_ref)
+        transcript_path = self.thread_dir(thread_id) / "transcript.jsonl"
+        existing_summary = self.get_thread_summary(thread_id)
         merged_metadata = dict(existing_summary.get("metadata", {})) if isinstance(existing_summary, dict) else {}
         if isinstance(metadata, dict):
             merged_metadata.update(metadata)
-        self.upsert_session_summary(
-            session_ref,
+        self.upsert_thread_summary(
+            thread_id,
             summary,
             transcript_path=str(transcript_path),
             metadata=merged_metadata,
         )
-        target = self.session_dir(session_ref) / "compact_summary.md"
+        target = self.thread_dir(thread_id) / "compact_summary.md"
         target.write_text(summary, encoding="utf-8")
         return {
             "path": str(target),
@@ -1314,31 +1882,92 @@ class Store:
             for row in rows
         ]
 
-    def session_dir(self, session_ref: str) -> Path:
-        target = self._data_dir / "sessions" / _safe_segment(session_ref)
+    def thread_dir(self, thread_id: str) -> Path:
+        target = self._data_dir / "threads" / _safe_segment(thread_id)
         target.mkdir(parents=True, exist_ok=True)
         return target
 
-    def append_transcript_event(self, session_ref: str, payload: dict[str, Any]) -> None:
-        self._append_jsonl(self.session_dir(session_ref) / "transcript.jsonl", payload)
+    def append_thread_transcript_event(self, thread_id: str, payload: dict[str, Any]) -> None:
+        self._append_jsonl(self.thread_dir(thread_id) / "transcript.jsonl", payload)
 
-    def append_session_event(self, session_ref: str, payload: dict[str, Any]) -> None:
-        self._append_jsonl(self.session_dir(session_ref) / "events.jsonl", payload)
+    def append_thread_event(self, thread_id: str, payload: dict[str, Any]) -> None:
+        self._append_jsonl(self.thread_dir(thread_id) / "events.jsonl", payload)
+
+    def append_rollout_event(self, thread_id: str, payload: dict[str, Any]) -> None:
+        self._append_jsonl(self.thread_dir(thread_id) / "rollout.jsonl", payload)
 
     def append_episode_log(self, payload: dict[str, Any]) -> None:
         target = self._data_dir / "memory" / "episodes.jsonl"
         target.parent.mkdir(parents=True, exist_ok=True)
         self._append_jsonl(target, payload)
 
+    def _build_compact_summary_text(self, thread_id: str, turns: list[dict[str, Any]]) -> str:
+        lines = [
+            "Mina Compact Summary",
+            "",
+            f"Thread: {thread_id}",
+            "",
+            "Recent Turns",
+        ]
+        if not turns:
+            lines.append("- No turns recorded.")
+            return "\n".join(lines)
+        for turn in turns[-12:]:
+            lines.append(
+                f"- {turn['created_at']}: user={turn.get('user_message')!r}; "
+                f"status={turn.get('status')}; reply={turn.get('final_reply')!r}"
+            )
+        return "\n".join(lines)
+
+    def _rewrite_thread_logs_after_rollback(
+        self,
+        thread_id: str,
+        *,
+        removed_turn_ids: list[str],
+        payload: dict[str, Any],
+    ) -> None:
+        removed = set(removed_turn_ids)
+        thread_dir = self.thread_dir(thread_id)
+        for file_name in ("transcript.jsonl", "events.jsonl", "rollout.jsonl"):
+            path = thread_dir / file_name
+            entries = self._read_jsonl(path)
+            if entries:
+                entries = [
+                    entry
+                    for entry in entries
+                    if str(entry.get("turn_id") or "") not in removed
+                ]
+            if file_name == "rollout.jsonl":
+                entries.append(payload)
+            self._write_jsonl(path, entries)
+
+    def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+        return rows
+
     def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
+    def _write_jsonl(self, path: Path, rows: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def _task_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "task_id": row["task_id"],
-            "session_ref": row["session_ref"],
+            "thread_id": row["thread_id"],
             "task_type": row["task_type"],
             "owner_player": row["owner_player"],
             "goal": row["goal"],

@@ -105,16 +105,16 @@ class ContextManager:
         capability_descriptors: list[CapabilityDescriptor],
     ) -> ContextBuildResult:
         normalized_snapshot = self._normalize_snapshot(request.scoped_snapshot)
-        session_turns = self._store.list_turns(request.session_ref)
-        recent_turns = self._store.list_recent_turns(
-            request.session_ref,
+        session_turns = self._store.list_thread_turns(request.thread_id)
+        recent_turns = self._store.list_recent_thread_turns(
+            request.thread_id,
             limit=self._settings.context_recent_full_turns,
         )
-        compacted_history = self._compact_history(request.session_ref, session_turns, turn_state)
+        compacted_history = self._compact_history(request.thread_id, session_turns, turn_state)
         retrieved_memory = self._memory_policy.summarize_for_context(
-            self._store.search_memories(request.session_ref, request.user_message, limit=6)
+            self._store.search_thread_memories(request.thread_id, request.user_message, limit=6)
         )
-        session_summary = self._store.get_session_summary(request.session_ref)
+        session_summary = self._store.get_thread_summary(request.thread_id)
         recent_dialogue_memory = self._build_recent_dialogue_memory(session_summary)
         recovery_refs = self._collect_recovery_refs(turn_state, compacted_history, session_summary, retrieved_memory)
 
@@ -719,11 +719,11 @@ class ContextManager:
 
     def _compact_history(
         self,
-        session_ref: str,
-        session_turns: list[dict[str, Any]],
+        thread_id: str,
+        thread_turns: list[dict[str, Any]],
         turn_state: TurnState,
     ) -> dict[str, Any]:
-        if len(session_turns) <= self._settings.context_recent_full_turns:
+        if len(thread_turns) <= self._settings.context_recent_full_turns:
             return {
                 "current_trigger": {"turn_id": turn_state.turn_id},
                 "older_turn_count": 0,
@@ -731,7 +731,7 @@ class ContextManager:
                 "recovery_refs": [],
             }
 
-        older_turns = session_turns[: -self._settings.context_recent_full_turns]
+        older_turns = thread_turns[: -self._settings.context_recent_full_turns]
         summary_lines = [
             "Mina Compact Summary",
             "",
@@ -752,12 +752,12 @@ class ContextManager:
                 "- Confirm exact effects or preferences via artifacts, memory search, or transcript before acting.",
                 "",
                 "4. Recovery Rule",
-                f"- Read the full transcript at {self._store.session_dir(session_ref) / 'transcript.jsonl'} when exact wording matters.",
+                f"- Read the full transcript at {self._store.thread_dir(thread_id) / 'transcript.jsonl'} when exact wording matters.",
             ]
         )
         compact_summary = "\n".join(summary_lines)
         summary_record = self._store.write_compact_summary(
-            session_ref,
+            thread_id,
             compact_summary,
             metadata={"older_turn_count": len(older_turns), "task_id": turn_state.task.task_id},
         )

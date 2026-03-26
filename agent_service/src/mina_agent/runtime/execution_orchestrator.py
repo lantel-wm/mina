@@ -23,8 +23,8 @@ class ExecutionOrchestrator:
         kind: str = "observation",
     ) -> ObservationRef:
         summary = self._summarize_observation(source, payload)
-        artifact_record = self._store.write_artifact(
-            turn_state.session_ref,
+        artifact_record = self._store.write_thread_artifact(
+            turn_state.thread_id,
             turn_state.task.task_id,
             turn_state.turn_id,
             kind,

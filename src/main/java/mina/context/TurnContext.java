@@ -1,6 +1,6 @@
 package mina.context;
 
-import mina.bridge.BridgeModels;
+import mina.bridge.AppServerModels;
 import mina.capability.CapabilityDefinition;
 import mina.policy.PlayerRole;
 
@@ -10,8 +10,8 @@ import java.util.Map;
 public record TurnContext(
         String sessionRef,
         PlayerRole role,
-        BridgeModels.PlayerPayload playerPayload,
-        BridgeModels.ServerEnvPayload serverEnvPayload,
+        AppServerModels.PlayerPayload playerPayload,
+        AppServerModels.ServerEnvPayload serverEnvPayload,
         Map<String, Object> scopedSnapshot,
         List<CapabilityDefinition> visibleCapabilities,
         String stateFingerprint

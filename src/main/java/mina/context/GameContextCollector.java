@@ -1,6 +1,6 @@
 package mina.context;
 
-import mina.bridge.BridgeModels;
+import mina.bridge.AppServerModels;
 import mina.capability.DirectWorldReader;
 import mina.capability.CapabilityDefinition;
 import mina.capability.CapabilityExecutorRegistry;
@@ -86,14 +86,14 @@ public final class GameContextCollector {
         scopedSnapshot.put("recent_events", recentEventTracker.collect(player));
         scopedSnapshot.put("visible_capability_ids", visibleCapabilities.stream().map(CapabilityDefinition::id).toList());
 
-        BridgeModels.PlayerPayload playerPayload = new BridgeModels.PlayerPayload();
+        AppServerModels.PlayerPayload playerPayload = new AppServerModels.PlayerPayload();
         playerPayload.uuid = player.getUuidAsString();
         playerPayload.name = player.getName().getString();
         playerPayload.role = role.wireValue();
         playerPayload.dimension = world.getRegistryKey().getValue().toString();
         playerPayload.position = positionMap(player);
 
-        BridgeModels.ServerEnvPayload serverEnvPayload = new BridgeModels.ServerEnvPayload();
+        AppServerModels.ServerEnvPayload serverEnvPayload = new AppServerModels.ServerEnvPayload();
         serverEnvPayload.dedicated = world.getServer().isDedicated();
         serverEnvPayload.motd = world.getServer().getServerMotd();
         serverEnvPayload.current_players = world.getServer().getCurrentPlayerCount();

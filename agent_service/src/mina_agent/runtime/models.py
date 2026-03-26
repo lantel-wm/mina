@@ -22,7 +22,7 @@ TaskStatus = Literal[
 
 class ArtifactRef(MinaBaseModel):
     artifact_id: str
-    session_ref: str
+    thread_id: str
     task_id: str | None = None
     turn_id: str | None = None
     kind: str
@@ -218,7 +218,7 @@ class MemoryCandidate(MinaBaseModel):
 
 
 class TurnState(MinaBaseModel):
-    session_ref: str
+    thread_id: str
     turn_id: str
     request: dict[str, Any]
     step_index: int = 0

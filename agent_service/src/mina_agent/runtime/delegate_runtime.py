@@ -45,8 +45,8 @@ class DelegateRuntime:
             )
 
         objective = request.objective or turn_state.task.goal
-        artifacts = self._store.search_artifacts(turn_state.session_ref, objective, task_id=turn_state.task.task_id, limit=4)
-        memories = self._store.search_memories(turn_state.session_ref, objective, limit=4)
+        artifacts = self._store.search_thread_artifacts(turn_state.thread_id, objective, task_id=turn_state.task.task_id, limit=4)
+        memories = self._store.search_thread_memories(turn_state.thread_id, objective, limit=4)
         summary = self._summarize_delegate(policy, objective, turn_state, artifacts, memories, request.context_hints)
 
         return DelegateResult(

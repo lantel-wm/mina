@@ -48,7 +48,7 @@ class ContextBuilder:
             )
 
         effective_turn_state = turn_state or TurnState(
-            session_ref=request.session_ref,
+            thread_id=request.thread_id,
             turn_id=request.turn_id,
             request=request.model_dump(),
             task=TaskState(

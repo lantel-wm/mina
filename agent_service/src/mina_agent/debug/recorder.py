@@ -172,7 +172,7 @@ class FileDebugRecorder(DebugRecorder):
             "version": SUMMARY_VERSION,
             "turn": {
                 "turn_id": turn_id,
-                "session_ref": None,
+                "thread_id": None,
                 "started_at": None,
                 "ended_at": None,
                 "status": "running",
@@ -218,7 +218,7 @@ class FileDebugRecorder(DebugRecorder):
     ) -> None:
         if event_type == "turn_started":
             turn = summary["turn"]
-            turn["session_ref"] = payload.get("session_ref")
+            turn["thread_id"] = payload.get("thread_id")
             turn["started_at"] = turn["started_at"] or stamp.isoformat()
             turn["status"] = "running"
             summary["user_input"] = {
@@ -227,6 +227,7 @@ class FileDebugRecorder(DebugRecorder):
                 "server_env": payload.get("server_env"),
                 "limits": payload.get("limits"),
                 "pending_confirmation": payload.get("pending_confirmation"),
+                "thread_id": payload.get("thread_id"),
             }
             return
 
@@ -315,6 +316,36 @@ class FileDebugRecorder(DebugRecorder):
         if event_type == "delegate_result" and step_index is not None:
             step = self._upsert_step(summary["timeline"], step_index)
             step["delegate_result"] = payload
+            return
+
+        if event_type == "tool_requested" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            step["tool_request"] = payload
+            return
+
+        if event_type == "tool_result" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            step["tool_result"] = payload
+            return
+
+        if event_type == "approval_requested" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            step["approval_request"] = payload
+            return
+
+        if event_type == "approval_resolved" and step_index is not None:
+            step = self._upsert_step(summary["timeline"], step_index)
+            step["approval_response"] = payload
+            return
+
+        if event_type == "warning":
+            summary.setdefault("warnings", []).append(
+                {
+                    "ts": stamp.isoformat(),
+                    "step_index": step_index,
+                    "payload": payload,
+                }
+            )
             return
 
         if event_type == "turn_completed":
@@ -420,7 +451,7 @@ class FileDebugRecorder(DebugRecorder):
                 turn_dir / "request.start.json",
                 {
                     "turn_id": turn_id,
-                    "session_ref": raw_payload.get("session_ref"),
+                    "thread_id": raw_payload.get("thread_id"),
                     "user_message": raw_payload.get("user_message"),
                     "player": raw_payload.get("player"),
                     "server_env": raw_payload.get("server_env"),
@@ -442,6 +473,7 @@ class FileDebugRecorder(DebugRecorder):
                     "type": "final_reply",
                     "status": "completed" if event_type == "turn_completed" else "failed",
                     "final_reply": raw_payload.get("final_reply"),
+                    "thread_id": raw_payload.get("thread_id"),
                     "pending_confirmation_id": raw_payload.get("pending_confirmation_id"),
                     "pending_confirmation_effect_summary": raw_payload.get("pending_confirmation_effect_summary"),
                     "task_id": raw_payload.get("task_id"),
@@ -459,37 +491,33 @@ class FileDebugRecorder(DebugRecorder):
         stamp: datetime,
         step_index: int | None,
     ) -> dict[str, Any] | None:
-        if event_type == "capability_finished" and raw_payload.get("status") == "awaiting_bridge_result":
-            continuation_id = raw_payload.get("continuation_id")
-            if not continuation_id:
-                return None
+        if event_type == "tool_requested":
             return {
                 "ts": stamp.isoformat(),
                 "step_index": step_index,
-                "type": "action_request_batch",
-                "continuation_id": continuation_id,
-                "action_request_batch": [
-                    {
-                        "continuation_id": continuation_id,
-                        "intent_id": raw_payload.get("intent_id"),
-                        "capability_id": raw_payload.get("capability_id"),
-                        "risk_class": raw_payload.get("risk_class"),
-                        "effect_summary": raw_payload.get("effect_summary"),
-                        "preconditions": raw_payload.get("preconditions") or [],
-                        "arguments": raw_payload.get("arguments") or {},
-                        "requires_confirmation": bool(raw_payload.get("requires_confirmation")),
-                    }
-                ],
+                "type": "tool_request",
+                "tool_call": raw_payload,
             }
-
-        if event_type == "turn_yielded":
+        if event_type == "tool_result":
             return {
                 "ts": stamp.isoformat(),
                 "step_index": step_index,
-                "type": "progress_update",
-                "continuation_id": raw_payload.get("continuation_id"),
-                "reason": raw_payload.get("reason"),
-                "trace_events": raw_payload.get("trace_events") or [],
+                "type": "tool_result",
+                "tool_result": raw_payload,
+            }
+        if event_type == "approval_requested":
+            return {
+                "ts": stamp.isoformat(),
+                "step_index": step_index,
+                "type": "approval_request",
+                "approval": raw_payload,
+            }
+        if event_type == "approval_resolved":
+            return {
+                "ts": stamp.isoformat(),
+                "step_index": step_index,
+                "type": "approval_response",
+                "approval": raw_payload,
             }
         return None
 
@@ -552,7 +580,7 @@ class FileDebugRecorder(DebugRecorder):
             "version": CAPTURE_VERSION,
             "turn": {
                 "turn_id": turn.get("turn_id"),
-                "session_ref": turn.get("session_ref"),
+                "thread_id": turn.get("thread_id"),
                 "started_at": turn.get("started_at"),
                 "ended_at": turn.get("ended_at"),
                 "status": turn.get("status"),
@@ -602,6 +630,14 @@ class FileDebugRecorder(DebugRecorder):
                 if not isinstance(payload, dict):
                     continue
                 capability_id = payload.get("capability_id")
+                if isinstance(capability_id, str) and capability_id and capability_id not in seen:
+                    seen.add(capability_id)
+                    ordered.append(capability_id)
+            for key in ("tool_request", "tool_result"):
+                payload = step.get(key)
+                if not isinstance(payload, dict):
+                    continue
+                capability_id = payload.get("capability_id") or payload.get("tool_id")
                 if isinstance(capability_id, str) and capability_id and capability_id not in seen:
                     seen.add(capability_id)
                     ordered.append(capability_id)
@@ -684,7 +720,7 @@ class FileDebugRecorder(DebugRecorder):
             return
         entries[turn_id] = {
             "turn_id": turn_id,
-            "session_ref": turn.get("session_ref"),
+            "thread_id": turn.get("thread_id"),
             "player_name": player.get("name"),
             "user_message": user_input.get("user_message"),
             "status": turn.get("status"),

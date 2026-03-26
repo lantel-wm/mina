@@ -18,7 +18,7 @@ class TaskManager:
             if existing is not None:
                 return self.task_state_from_record(existing)
 
-        reusable = self._store.get_latest_task(request.session_ref)
+        reusable = self._store.get_latest_thread_task(request.thread_id)
         if reusable is not None:
             summary = dict(reusable.get("summary", {}))
             summary.update(
@@ -43,8 +43,8 @@ class TaskManager:
             refreshed = self._store.get_task(reusable["task_id"]) or reusable
             return self.task_state_from_record(refreshed)
 
-        task_record = self._store.create_task(
-            request.session_ref,
+        task_record = self._store.create_thread_task(
+            request.thread_id,
             request.player.name,
             request.user_message,
             task_type="conversation_thread",
@@ -71,7 +71,7 @@ class TaskManager:
     ) -> TaskState | None:
         if pending_confirmation is not None:
             return None
-        active_task = self._store.get_active_task(request.session_ref)
+        active_task = self._store.get_active_thread_task(request.thread_id)
         if active_task is None:
             return None
         if current_task_id is not None and active_task["task_id"] == current_task_id:
@@ -217,7 +217,7 @@ class TaskManager:
     def _should_preserve_existing_goal(self, request: TurnStartRequest) -> bool:
         if not self._is_brief_follow_up(request.user_message):
             return False
-        session_summary = self._store.get_session_summary(request.session_ref)
+        session_summary = self._store.get_thread_summary(request.thread_id)
         if session_summary is None:
             return False
         metadata = session_summary.get("metadata")

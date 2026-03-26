@@ -127,7 +127,6 @@ class CapabilityRegistry:
     ) -> dict[str, Any]:
         bridge_capability_id = capability.bridge_target_id or capability.descriptor.id
         return {
-            "continuation_id": "",
             "intent_id": str(uuid.uuid4()),
             "capability_id": bridge_capability_id,
             "risk_class": capability.descriptor.risk_class,
@@ -462,14 +461,14 @@ class CapabilityRegistry:
 
     def _artifact_search(self, arguments: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
         query = str(arguments.get("query", "")).strip()
-        task_results = self._store.search_artifacts(
-            state.request.session_ref,
+        task_results = self._store.search_thread_artifacts(
+            state.request.thread_id,
             query,
             task_id=state.turn_state.task.task_id,
             limit=self._settings.max_retrieval_results,
         )
-        session_results = self._store.search_artifacts(
-            state.request.session_ref,
+        session_results = self._store.search_thread_artifacts(
+            state.request.thread_id,
             query,
             task_id=None,
             limit=max(self._settings.max_retrieval_results * 2, self._settings.max_retrieval_results),
@@ -490,7 +489,7 @@ class CapabilityRegistry:
 
     def _memory_search(self, arguments: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
         query = str(arguments.get("query", "")).strip()
-        return {"results": self._store.search_memories(state.request.session_ref, query, limit=self._settings.max_retrieval_results)}
+        return {"results": self._store.search_thread_memories(state.request.thread_id, query, limit=self._settings.max_retrieval_results)}
 
     def _task_inspect(self, _: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
         task = self._store.get_task(state.turn_state.task.task_id) or state.turn_state.task.model_dump()

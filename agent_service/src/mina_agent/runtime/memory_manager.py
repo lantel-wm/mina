@@ -25,7 +25,7 @@ class MemoryManager:
         pending_confirmation_resolved: str | None = None,
     ) -> None:
         writes = self._memory_policy.derive_writes(
-            session_ref=request.session_ref,
+            thread_id=request.thread_id,
             task=turn_state.task,
             user_message=request.user_message,
             final_reply=final_reply,
@@ -35,8 +35,8 @@ class MemoryManager:
             status=status,
         )
         for semantic in writes.semantic_writes:
-            self._store.add_semantic_memory(
-                request.session_ref,
+            self._store.add_thread_semantic_memory(
+                request.thread_id,
                 semantic["memory_type"],
                 semantic["memory_key"],
                 semantic["value"],
@@ -45,8 +45,8 @@ class MemoryManager:
                 metadata=semantic.get("metadata"),
             )
         for episode in writes.episodic_writes:
-            self._store.add_episodic_memory(
-                request.session_ref,
+            self._store.add_thread_episodic_memory(
+                request.thread_id,
                 episode["summary"],
                 tags=list(episode.get("tags", [])),
                 task_id=episode.get("task_id"),
@@ -54,7 +54,7 @@ class MemoryManager:
                 metadata=episode.get("metadata"),
             )
         if writes.session_summary is not None:
-            existing_summary = self._store.get_session_summary(request.session_ref)
+            existing_summary = self._store.get_thread_summary(request.thread_id)
             existing_metadata = dict(existing_summary.get("metadata", {})) if existing_summary is not None else {}
             merged_metadata = dict(existing_metadata)
             merged_metadata.update(writes.session_summary)
@@ -80,8 +80,8 @@ class MemoryManager:
                     or bool(existing_summary.get("metadata", {}).get("older_turn_count"))
                 )
             )
-            self._store.upsert_session_summary(
-                request.session_ref,
+            self._store.upsert_thread_summary(
+                request.thread_id,
                 (
                     existing_summary["summary"]
                     if preserve_existing_summary and existing_summary is not None

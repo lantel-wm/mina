@@ -1,12 +1,12 @@
 package mina.execution;
 
-import com.google.gson.internal.LinkedTreeMap;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
 import mina.MinaMod;
-import mina.bridge.AgentServiceClient;
-import mina.bridge.BridgeModels;
-import mina.capability.CapabilityDefinition;
+import mina.bridge.AppServerClient;
+import mina.bridge.AppServerModels;
 import mina.capability.CapabilityExecutorRegistry;
-import mina.capability.CapabilityResult;
 import mina.chat.MinaChatRenderer;
 import mina.chat.MinaChatRenderer.ActionTracePresentation;
 import mina.chat.MinaChatRenderer.ChipTone;
@@ -18,7 +18,6 @@ import mina.context.RecentEventTracker;
 import mina.context.TurnContext;
 import mina.policy.ExecutionGuard;
 import mina.policy.ExecutionGuard.Decision;
-import mina.policy.PlayerRole;
 import mina.util.ServerExecutor;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.minecraft.server.command.ServerCommandSource;
@@ -28,49 +27,66 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeoutException;
 
 public final class TurnCoordinator {
+    private static final Set<String> APPROVAL_YES = Set.of(
+            "yes", "y", "ok", "okay", "sure", "confirm", "go", "go ahead",
+            "继续", "可以", "好", "好的", "确认", "行", "同意", "开始吧"
+    );
+    private static final Set<String> APPROVAL_NO = Set.of(
+            "no", "n", "stop", "cancel", "don't", "不要", "不用", "取消", "算了", "先别", "停", "拒绝"
+    );
+
     private final MinaConfig config;
-    private final AgentServiceClient agentServiceClient;
+    private final AppServerClient appServerClient;
     private final GameContextCollector contextCollector;
     private final CapabilityExecutorRegistry capabilityRegistry;
     private final ExecutionGuard executionGuard;
     private final PendingTurnRegistry pendingTurnRegistry;
-    private final PendingConfirmationRegistry pendingConfirmationRegistry;
+    private final PendingApprovalRegistry pendingApprovalRegistry;
     private final RecentEventTracker recentEventTracker;
     private final DevTurnLog devTurnLog;
     private final ExecutorService ioExecutor;
+    private final Gson gson;
 
     public TurnCoordinator(
             MinaConfig config,
-            AgentServiceClient agentServiceClient,
+            AppServerClient appServerClient,
             GameContextCollector contextCollector,
             CapabilityExecutorRegistry capabilityRegistry,
             ExecutionGuard executionGuard,
             PendingTurnRegistry pendingTurnRegistry,
-            PendingConfirmationRegistry pendingConfirmationRegistry,
+            PendingApprovalRegistry pendingApprovalRegistry,
             RecentEventTracker recentEventTracker,
             DevTurnLog devTurnLog,
             ExecutorService ioExecutor
     ) {
         this.config = config;
-        this.agentServiceClient = agentServiceClient;
+        this.appServerClient = appServerClient;
         this.contextCollector = contextCollector;
         this.capabilityRegistry = capabilityRegistry;
         this.executionGuard = executionGuard;
         this.pendingTurnRegistry = pendingTurnRegistry;
-        this.pendingConfirmationRegistry = pendingConfirmationRegistry;
+        this.pendingApprovalRegistry = pendingApprovalRegistry;
         this.recentEventTracker = recentEventTracker;
         this.devTurnLog = devTurnLog;
         this.ioExecutor = ioExecutor;
+        this.gson = new GsonBuilder().serializeNulls().create();
     }
 
     public boolean submitTurn(ServerCommandSource source, String userMessage, Runnable acceptedCallback) throws CommandSyntaxException {
         ServerPlayerEntity player = source.getPlayerOrThrow();
         UUID playerId = player.getUuid();
+        PendingApprovalRegistry.PendingApproval pendingApproval = pendingApprovalRegistry.get(playerId);
+        if (pendingApproval != null) {
+            return handleApprovalReply(source, player, userMessage, pendingApproval, acceptedCallback);
+        }
+
         String turnId = UUID.randomUUID().toString();
         String sessionRef = player.getUuidAsString();
         String playerName = player.getName().getString();
@@ -88,6 +104,37 @@ public final class TurnCoordinator {
         return true;
     }
 
+    private boolean handleApprovalReply(
+            ServerCommandSource source,
+            ServerPlayerEntity player,
+            String userMessage,
+            PendingApprovalRegistry.PendingApproval pendingApproval,
+            Runnable acceptedCallback
+    ) {
+        String normalized = userMessage == null ? "" : userMessage.trim().toLowerCase();
+        if (!APPROVAL_YES.contains(normalized) && !APPROVAL_NO.contains(normalized)) {
+            source.sendError(MinaChatRenderer.commandError("这一步需要你明确回复“确认/取消”之类的话。"));
+            return false;
+        }
+
+        acceptedCallback.run();
+        boolean approved = APPROVAL_YES.contains(normalized);
+        pendingApproval.decisionFuture().complete(new PendingApprovalRegistry.ApprovalDecision(approved, userMessage.trim()));
+        pendingApprovalRegistry.clear(player.getUuid());
+
+        MinaChatRenderer.sendActionTrace(
+                player,
+                new ActionTracePresentation(
+                        approved ? "已确认" : "已取消",
+                        approved ? ChipTone.SUCCESS : ChipTone.WARNING,
+                        approved ? "继续执行" : "取消执行",
+                        pendingApproval.effectSummary(),
+                        List.of(new SecondaryChip("确认已处理", approved ? ChipTone.SUCCESS : ChipTone.WARNING))
+                )
+        );
+        return true;
+    }
+
     private void runTurn(
             UUID playerId,
             String sessionRef,
@@ -98,79 +145,120 @@ public final class TurnCoordinator {
             Instant startedAt
     ) {
         long turnStartedAtNanos = System.nanoTime();
+        AppServerClient.TurnStream stream = null;
         try {
             TurnContext turnContext = ServerExecutor.call(server, () -> collectTurnContext(playerId, server)).join();
             sessionRef = turnContext.sessionRef();
             playerName = turnContext.playerPayload().name;
-            BridgeModels.TurnStartRequest startRequest = toStartRequest(turnContext, turnId, userMessage);
-            BridgeModels.TurnResponse response = agentServiceClient.startTurn(startRequest);
-            syncPendingConfirmation(turnContext.sessionRef(), response);
 
-            int continuationDepth = 0;
+            appServerClient.ensureThread(sessionRef, turnContext.playerPayload().uuid, turnContext.playerPayload().name);
+            AppServerModels.TurnStartParams startParams = toTurnStartParams(turnContext, turnId, userMessage);
+            stream = appServerClient.startTurn(startParams);
+
             int actionCount = 0;
-            List<String> executedCapabilityIds = new ArrayList<>();
+            boolean approvalSeen = false;
+            StringBuilder assistantBuffer = new StringBuilder();
 
-            while (response != null) {
-                deliverResponseTraceEvents(server, playerId, response);
-
-                if (response.isFinalReply()) {
-                    devTurnLog.recordCompleted(
-                            turnId,
-                            sessionRef,
-                            playerName,
-                            userMessage,
-                            startedAt,
-                            Instant.now(),
-                            response.final_reply
-                    );
-                    deliverReply(
-                            server,
-                            playerId,
-                            buildReplyPresentation(response, turnStartedAtNanos, actionCount, continuationDepth, executedCapabilityIds)
-                    );
-                    return;
-                }
-
-                if (response.isProgressUpdate()) {
-                    if (response.continuation_id == null || response.continuation_id.isBlank()) {
-                        throw new IllegalStateException("Agent service returned a progress update without a continuation id.");
+            while (true) {
+                AppServerClient.AppServerEvent event = stream.take(config.requestTimeout());
+                switch (event.method()) {
+                    case "item/assistantMessage/delta" -> {
+                        AppServerModels.ItemDeltaPayload delta = gson.fromJson(event.params(), AppServerModels.ItemDeltaPayload.class);
+                        if (delta.delta != null) {
+                            assistantBuffer.append(delta.delta);
+                        }
                     }
-                    BridgeModels.TurnResumeRequest resumeRequest = new BridgeModels.TurnResumeRequest();
-                    resumeRequest.turn_id = turnId;
-                    response = agentServiceClient.resumeTurn(response.continuation_id, resumeRequest);
-                    syncPendingConfirmation(turnContext.sessionRef(), response);
-                    continue;
+                    case "item/toolCall/requested" -> {
+                        AppServerModels.ToolCallRequestPayload toolCall = gson.fromJson(event.params(), AppServerModels.ToolCallRequestPayload.class);
+                        actionCount++;
+                        int currentActionCount = actionCount;
+                        deliverActionTrace(server, playerId, actionStartedPresentation(toolCall, currentActionCount));
+                        AppServerModels.ToolResultParams actionResult = ServerExecutor.call(
+                                server,
+                                () -> executeAction(server, playerId, toolCall, currentActionCount)
+                        ).join();
+                        deliverActionTrace(server, playerId, actionFinishedPresentation(toolCall, actionResult, currentActionCount));
+                        stream.sendToolResult(actionResult);
+                    }
+                    case "approval/requested" -> {
+                        approvalSeen = true;
+                        AppServerModels.ApprovalRequestPayload approvalRequest = gson.fromJson(event.params(), AppServerModels.ApprovalRequestPayload.class);
+                        PendingApprovalRegistry.PendingApproval pendingApproval = pendingApprovalRegistry.put(
+                                playerId,
+                                approvalRequest.thread_id,
+                                approvalRequest.turn_id,
+                                approvalRequest.approval_id,
+                                approvalRequest.effect_summary
+                        );
+                        deliverActionTrace(server, playerId, approvalRequestedPresentation(approvalRequest));
+                        PendingApprovalRegistry.ApprovalDecision decision = pendingApproval.decisionFuture().get();
+                        AppServerModels.ApprovalResponseParams response = new AppServerModels.ApprovalResponseParams();
+                        response.thread_id = approvalRequest.thread_id;
+                        response.turn_id = approvalRequest.turn_id;
+                        response.approval_id = approvalRequest.approval_id;
+                        response.approved = decision.approved();
+                        response.reason = decision.reason();
+                        stream.sendApprovalResponse(response);
+                    }
+                    case "warning" -> {
+                        AppServerModels.WarningPayload warning = gson.fromJson(event.params(), AppServerModels.WarningPayload.class);
+                        deliverActionTrace(server, playerId, warningPresentation(warning));
+                    }
+                    case "turn/completed" -> {
+                        JsonObject turn = event.params().getAsJsonObject("turn");
+                        String finalReply = turn != null && turn.has("final_reply")
+                                ? turn.get("final_reply").getAsString()
+                                : assistantBuffer.toString();
+                        devTurnLog.recordCompleted(
+                                turnId,
+                                sessionRef,
+                                playerName,
+                                userMessage,
+                                startedAt,
+                                Instant.now(),
+                                finalReply
+                        );
+                        deliverReply(
+                                server,
+                                playerId,
+                                buildReplyPresentation(finalReply, turnStartedAtNanos, actionCount, approvalSeen)
+                        );
+                        return;
+                    }
+                    case "turn/failed" -> {
+                        String detail = event.params().has("detail") && !event.params().get("detail").isJsonNull()
+                                ? event.params().get("detail").getAsString()
+                                : event.params().has("message") ? event.params().get("message").getAsString() : "Turn failed.";
+                        devTurnLog.recordFailed(
+                                turnId,
+                                sessionRef,
+                                playerName,
+                                userMessage,
+                                startedAt,
+                                Instant.now(),
+                                detail,
+                                null
+                        );
+                        deliverError(server, playerId, "刚刚这一步有点不对，我再处理也许会更稳。原因：" + detail);
+                        return;
+                    }
+                    default -> {
+                    }
                 }
-
-                if (!response.isActionBatch() || response.action_request_batch == null || response.action_request_batch.isEmpty()) {
-                    throw new IllegalStateException("Agent service returned neither a final reply nor an action batch.");
-                }
-
-                if (++continuationDepth > config.maxContinuationDepth()) {
-                    throw new IllegalStateException("Continuation depth exceeded configured limit.");
-                }
-
-                BridgeModels.TurnResumeRequest resumeRequest = new BridgeModels.TurnResumeRequest();
-                resumeRequest.turn_id = turnId;
-
-                for (BridgeModels.ActionRequestPayload actionRequest : response.action_request_batch) {
-                    actionCount++;
-                    int currentActionCount = actionCount;
-                    executedCapabilityIds.add(actionRequest.capability_id);
-                    deliverActionTrace(server, playerId, actionStartedPresentation(actionRequest, currentActionCount));
-                    BridgeModels.ActionResultPayload actionResult = ServerExecutor.call(
-                            server,
-                            () -> executeAction(server, playerId, actionRequest, currentActionCount)
-                    ).join();
-                    deliverActionTrace(server, playerId, actionFinishedPresentation(actionRequest, actionResult, currentActionCount));
-                    resumeRequest.action_results.add(actionResult);
-                }
-
-                response = agentServiceClient.resumeTurn(response.continuation_id, resumeRequest);
-                syncPendingConfirmation(turnContext.sessionRef(), response);
             }
-
-            throw new IllegalStateException("Agent service returned an empty response.");
+        } catch (TimeoutException exception) {
+            MinaMod.LOGGER.error("Mina turn {} timed out waiting for app-server events", turnId, exception);
+            devTurnLog.recordFailed(
+                    turnId,
+                    sessionRef,
+                    playerName,
+                    userMessage,
+                    startedAt,
+                    Instant.now(),
+                    exception.getMessage(),
+                    null
+            );
+            deliverError(server, playerId, "Mina 等待处理结果超时了，我这一轮先停下。");
         } catch (Exception exception) {
             MinaMod.LOGGER.error("Mina turn {} failed", turnId, exception);
             devTurnLog.recordFailed(
@@ -185,6 +273,10 @@ public final class TurnCoordinator {
             );
             deliverError(server, playerId, "刚刚这一步有点不对，我再处理也许会更稳。原因：" + exception.getMessage());
         } finally {
+            if (stream != null) {
+                stream.close();
+            }
+            pendingApprovalRegistry.clear(playerId);
             pendingTurnRegistry.close(playerId, turnId);
         }
     }
@@ -198,51 +290,38 @@ public final class TurnCoordinator {
         return contextCollector.collect(player);
     }
 
-    private BridgeModels.TurnStartRequest toStartRequest(TurnContext context, String turnId, String userMessage) {
-        BridgeModels.TurnStartRequest request = new BridgeModels.TurnStartRequest();
-        request.session_ref = context.sessionRef();
-        request.turn_id = turnId;
-        request.player = context.playerPayload();
-        request.server_env = context.serverEnvPayload();
-        request.scoped_snapshot = context.scopedSnapshot();
-        request.visible_capabilities = context.visibleCapabilities().stream()
-                .map(BridgeModels.VisibleCapabilityPayload::fromDefinition)
+    private AppServerModels.TurnStartParams toTurnStartParams(TurnContext context, String turnId, String userMessage) {
+        AppServerModels.TurnStartParams params = new AppServerModels.TurnStartParams();
+        params.thread_id = context.sessionRef();
+        params.turn_id = turnId;
+        params.user_message = userMessage;
+
+        AppServerModels.TurnContextPayload payload = new AppServerModels.TurnContextPayload();
+        payload.player = context.playerPayload();
+        payload.server_env = context.serverEnvPayload();
+        payload.scoped_snapshot = context.scopedSnapshot();
+        payload.tool_specs = context.visibleCapabilities().stream()
+                .map(AppServerModels.ToolSpecPayload::fromDefinition)
                 .toList();
 
-        BridgeModels.LimitsPayload limits = new BridgeModels.LimitsPayload();
+        AppServerModels.LimitsPayload limits = new AppServerModels.LimitsPayload();
         limits.max_agent_steps = config.maxAgentSteps();
         limits.max_bridge_actions_per_turn = config.maxBridgeActionsPerTurn();
         limits.max_continuation_depth = config.maxContinuationDepth();
-        request.limits = limits;
-        request.pending_confirmation = pendingConfirmationRegistry.get(context.sessionRef());
-        request.user_message = userMessage;
-        return request;
+        payload.limits = limits;
+
+        params.context = payload;
+        return params;
     }
 
-    private void syncPendingConfirmation(String sessionRef, BridgeModels.TurnResponse response) {
-        if (response == null) {
-            return;
-        }
-        if (response.pending_confirmation_id != null && !response.pending_confirmation_id.isBlank()) {
-            String effectSummary = response.pending_confirmation_effect_summary;
-            if (effectSummary == null || effectSummary.isBlank()) {
-                effectSummary = response.final_reply;
-            }
-            pendingConfirmationRegistry.put(sessionRef, response.pending_confirmation_id, effectSummary == null ? "" : effectSummary);
-            return;
-        }
-        pendingConfirmationRegistry.clear(sessionRef);
-    }
-
-    private BridgeModels.ActionResultPayload executeAction(
+    private AppServerModels.ToolResultParams executeAction(
             net.minecraft.server.MinecraftServer server,
             UUID playerId,
-            BridgeModels.ActionRequestPayload actionRequest,
+            AppServerModels.ToolCallRequestPayload actionRequest,
             int actionCount
     ) {
         long startedAt = System.nanoTime();
         ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerId);
-
         if (player == null) {
             return rejectedResult(actionRequest, "player_unavailable", false, "Player disconnected.");
         }
@@ -254,22 +333,22 @@ public final class TurnCoordinator {
         }
 
         try {
-            CapabilityResult result = capabilityRegistry.execute(actionRequest.capability_id, player, actionRequest.arguments);
+            var result = capabilityRegistry.execute(actionRequest.tool_id, player, actionRequest.arguments);
             Map<String, Object> actionEvent = new java.util.LinkedHashMap<>();
-            actionEvent.put("capability_id", actionRequest.capability_id);
+            actionEvent.put("tool_id", actionRequest.tool_id);
             actionEvent.put("summary", result.sideEffectSummary());
-            recentEventTracker.recordPlayerEvent(
-                    "mina_action_executed",
-                    player,
-                    actionEvent
-            );
-            BridgeModels.ActionResultPayload payload = new BridgeModels.ActionResultPayload();
-            payload.intent_id = actionRequest.intent_id;
+            recentEventTracker.recordPlayerEvent("mina_action_executed", player, actionEvent);
+
+            AppServerModels.ToolResultParams payload = new AppServerModels.ToolResultParams();
+            payload.thread_id = actionRequest.thread_id;
+            payload.turn_id = actionRequest.turn_id;
+            payload.item_id = actionRequest.item_id;
+            payload.tool_id = actionRequest.tool_id;
             payload.status = "executed";
             payload.observations = result.observations();
             payload.preconditions_passed = true;
             payload.side_effect_summary = result.sideEffectSummary();
-            payload.timing_ms = (System.nanoTime() - startedAt) / 1_000_000L;
+            payload.timing_ms = (int) ((System.nanoTime() - startedAt) / 1_000_000L);
             payload.state_fingerprint = turnContext.stateFingerprint();
             return payload;
         } catch (Exception exception) {
@@ -283,8 +362,8 @@ public final class TurnCoordinator {
         }
     }
 
-    private BridgeModels.ActionResultPayload rejectedResult(
-            BridgeModels.ActionRequestPayload actionRequest,
+    private AppServerModels.ToolResultParams rejectedResult(
+            AppServerModels.ToolCallRequestPayload actionRequest,
             String status,
             boolean preconditionsPassed,
             String message
@@ -292,89 +371,51 @@ public final class TurnCoordinator {
         return rejectedResult(actionRequest, status, preconditionsPassed, message, null);
     }
 
-    private BridgeModels.ActionResultPayload rejectedResult(
-            BridgeModels.ActionRequestPayload actionRequest,
+    private AppServerModels.ToolResultParams rejectedResult(
+            AppServerModels.ToolCallRequestPayload actionRequest,
             String status,
             boolean preconditionsPassed,
             String message,
             String stateFingerprint
     ) {
-        BridgeModels.ActionResultPayload payload = new BridgeModels.ActionResultPayload();
-        payload.intent_id = actionRequest.intent_id;
+        AppServerModels.ToolResultParams payload = new AppServerModels.ToolResultParams();
+        payload.thread_id = actionRequest.thread_id;
+        payload.turn_id = actionRequest.turn_id;
+        payload.item_id = actionRequest.item_id;
+        payload.tool_id = actionRequest.tool_id;
         payload.status = status;
         payload.observations = Map.of("message", message);
         payload.preconditions_passed = preconditionsPassed;
         payload.side_effect_summary = message;
-        payload.timing_ms = 0L;
+        payload.timing_ms = 0;
         payload.state_fingerprint = stateFingerprint;
         payload.error_message = message;
         return payload;
     }
 
     private ReplyPresentation buildReplyPresentation(
-            BridgeModels.TurnResponse response,
+            String finalReply,
             long turnStartedAt,
             int actionCount,
-            int continuationDepth,
-            List<String> executedCapabilityIds
+            boolean approvalSeen
     ) {
-        boolean requiresConfirmation = response.pending_confirmation_id != null && !response.pending_confirmation_id.isBlank();
         List<SecondaryChip> chips = new ArrayList<>();
-
-        if (requiresConfirmation) {
-            chips.add(new SecondaryChip("需要确认", ChipTone.WARNING));
-            chips.add(new SecondaryChip("高风险计划", ChipTone.WARNING));
-        } else if (actionCount > 0) {
+        if (approvalSeen) {
+            chips.add(new SecondaryChip("已确认", ChipTone.SUCCESS));
+        }
+        if (actionCount > 0) {
             chips.add(new SecondaryChip("已完成", ChipTone.SUCCESS));
             chips.add(new SecondaryChip(actionCount + " 次执行", ChipTone.INFO));
         } else {
             chips.add(new SecondaryChip("已回复", ChipTone.INFO));
             chips.add(new SecondaryChip("纯对话", ChipTone.MUTED));
         }
-
         chips.add(new SecondaryChip(formatElapsed(System.nanoTime() - turnStartedAt), ChipTone.MUTED));
-        if (continuationDepth > 0) {
-            chips.add(new SecondaryChip(continuationDepth + " 轮规划", ChipTone.MUTED));
-        }
-
-        String title = requiresConfirmation ? "需要确认的计划" : buildReplyTitle(executedCapabilityIds);
-        String note = requiresConfirmation
-                ? "你点头之后我再继续。也可以直接让我改一下。"
-                : null;
-        ChipTone noteTone = requiresConfirmation ? ChipTone.WARNING : ChipTone.MUTED;
-
-        return new ReplyPresentation(title, response.final_reply, chips, note, noteTone);
+        String title = actionCount > 0 ? "我替你看到的结果" : "";
+        return new ReplyPresentation(title, finalReply, chips, null, ChipTone.MUTED);
     }
 
-    private String buildReplyTitle(List<String> executedCapabilityIds) {
-        if (executedCapabilityIds == null || executedCapabilityIds.isEmpty()) {
-            return "";
-        }
-
-        String lastCapabilityId = executedCapabilityIds.get(executedCapabilityIds.size() - 1);
-        return switch (lastCapabilityId) {
-            case "game.player_snapshot.read" -> "你的状态";
-            case "game.nearby_entities.read" -> "附近的生物";
-            case "game.target_block.read", "carpet.block_info.read" -> "眼前这个方块";
-            case "server.rules.read" -> "服务器这边的规则";
-            case "carpet.distance.measure" -> "距离结果";
-            case "carpet.mobcaps.read" -> "生物生成情况";
-            default -> "我替你看到的结果";
-        };
-    }
-
-    private String formatElapsed(long elapsedNanos) {
-        long elapsedMs = Math.max(1L, elapsedNanos / 1_000_000L);
-        if (elapsedMs < 1_000L) {
-            return elapsedMs + " ms";
-        }
-
-        long wholeSeconds = elapsedMs / 1_000L;
-        long tenths = (elapsedMs % 1_000L) / 100L;
-        return wholeSeconds + "." + tenths + " s";
-    }
-
-    private ActionTracePresentation actionStartedPresentation(BridgeModels.ActionRequestPayload actionRequest, int actionIndex) {
+    private ActionTracePresentation actionStartedPresentation(AppServerModels.ToolCallRequestPayload actionRequest, int actionIndex) {
         List<SecondaryChip> chips = new ArrayList<>();
         chips.add(new SecondaryChip("第 " + actionIndex + " 步", ChipTone.MUTED));
         chips.add(new SecondaryChip(riskLabel(actionRequest.risk_class), ChipTone.MUTED));
@@ -385,15 +426,15 @@ public final class TurnCoordinator {
         return new ActionTracePresentation(
                 "处理中",
                 ChipTone.INFO,
-                capabilityLabel(actionRequest.capability_id),
-                actionIntentDetail(actionRequest),
+                capabilityLabel(actionRequest.tool_id),
+                nonBlank(actionRequest.effect_summary, "我先替你把这一步看清楚。"),
                 chips
         );
     }
 
     private ActionTracePresentation actionFinishedPresentation(
-            BridgeModels.ActionRequestPayload actionRequest,
-            BridgeModels.ActionResultPayload actionResult,
+            AppServerModels.ToolCallRequestPayload actionRequest,
+            AppServerModels.ToolResultParams actionResult,
             int actionIndex
     ) {
         List<SecondaryChip> chips = new ArrayList<>();
@@ -408,41 +449,53 @@ public final class TurnCoordinator {
         return new ActionTracePresentation(
                 statusLabel(actionResult.status),
                 statusTone(actionResult.status),
-                capabilityLabel(actionRequest.capability_id),
+                capabilityLabel(actionRequest.tool_id),
                 actionResultDetail(actionRequest, actionResult),
                 chips
         );
     }
 
+    private ActionTracePresentation approvalRequestedPresentation(AppServerModels.ApprovalRequestPayload approvalRequest) {
+        return new ActionTracePresentation(
+                "待确认",
+                ChipTone.WARNING,
+                capabilityLabel(approvalRequest.tool_call.tool_id),
+                approvalRequest.effect_summary,
+                List.of(
+                        new SecondaryChip("回复 确认/取消", ChipTone.WARNING),
+                        new SecondaryChip(riskLabel(approvalRequest.risk_class), ChipTone.MUTED)
+                )
+        );
+    }
+
+    private ActionTracePresentation warningPresentation(AppServerModels.WarningPayload warning) {
+        return new ActionTracePresentation(
+                "已提醒",
+                ChipTone.WARNING,
+                nonBlank(warning.message, "Mina 提醒"),
+                warning.detail,
+                List.of()
+        );
+    }
+
     private String capabilityLabel(String capabilityId) {
         return switch (capabilityId) {
+            case "world.player_state.read" -> "看看你的状态";
+            case "world.threats.read" -> "看看附近的威胁";
+            case "world.poi.read" -> "找找附近的目标";
             case "game.player_snapshot.read" -> "看看你的状态";
             case "game.nearby_entities.read" -> "看看附近有哪些生物";
-            case "game.target_block.read" -> "看看你正在看的方块";
-            case "server.rules.read" -> "看看服务器规则";
-            case "carpet.block_info.read" -> "看看这个方块的详细信息";
+            case "game.target_block.read", "carpet.block_info.read" -> "看看你正在看的方块";
+            case "server.rules.read", "carpet.rules.read" -> "看看服务器规则";
             case "carpet.distance.measure" -> "测量距离";
             case "carpet.mobcaps.read" -> "看看生物生成情况";
             default -> capabilityId;
         };
     }
 
-    private String actionIntentDetail(BridgeModels.ActionRequestPayload actionRequest) {
-        return switch (actionRequest.capability_id) {
-            case "game.player_snapshot.read" -> "我会替你看看生命、饥饿、坐标和手里的东西。";
-            case "game.nearby_entities.read" -> "我会替你看看附近有哪些生物，它们离你多远。";
-            case "game.target_block.read" -> "我会替你看看你现在盯着的方块。";
-            case "server.rules.read" -> "我会替你看看服务器这边现在的规则。";
-            case "carpet.block_info.read" -> "我会替你把这个方块的细节看清楚。";
-            case "carpet.distance.measure" -> "我会替你量一下这里到目标位置的距离。";
-            case "carpet.mobcaps.read" -> "我会替你看看这个维度现在的生物生成情况。";
-            default -> "我先替你把这一步看清楚。";
-        };
-    }
-
     private String actionResultDetail(
-            BridgeModels.ActionRequestPayload actionRequest,
-            BridgeModels.ActionResultPayload actionResult
+            AppServerModels.ToolCallRequestPayload actionRequest,
+            AppServerModels.ToolResultParams actionResult
     ) {
         return switch (actionResult.status) {
             case "executed" -> nonBlank(actionResult.side_effect_summary, executedResultFallback());
@@ -453,7 +506,7 @@ public final class TurnCoordinator {
             case "precondition_failed" -> "刚刚情况变了，我先不乱动这一步。";
             case "player_unavailable" -> "你已经不在这里了，这一步就先停下。";
             case "execution_failed" -> nonBlank(actionResult.error_message, "刚刚这一步没有做好，我再换个办法会更稳。");
-            default -> nonBlank(actionResult.error_message, nonBlank(actionResult.side_effect_summary, actionIntentDetail(actionRequest)));
+            default -> nonBlank(actionResult.error_message, nonBlank(actionResult.side_effect_summary, actionRequest.effect_summary));
         };
     }
 
@@ -505,6 +558,16 @@ public final class TurnCoordinator {
         return primary != null && !primary.isBlank() ? primary : fallback;
     }
 
+    private String formatElapsed(long elapsedNanos) {
+        long elapsedMs = Math.max(1L, elapsedNanos / 1_000_000L);
+        if (elapsedMs < 1_000L) {
+            return elapsedMs + " ms";
+        }
+        long wholeSeconds = elapsedMs / 1_000L;
+        long tenths = (elapsedMs % 1_000L) / 100L;
+        return wholeSeconds + "." + tenths + " s";
+    }
+
     private void deliverReply(net.minecraft.server.MinecraftServer server, UUID playerId, ReplyPresentation presentation) {
         server.execute(() -> {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerId);
@@ -532,54 +595,6 @@ public final class TurnCoordinator {
             MinaChatRenderer.sendActionTrace(player, presentation);
             return null;
         }).join();
-    }
-
-    private void deliverResponseTraceEvents(
-            net.minecraft.server.MinecraftServer server,
-            UUID playerId,
-            BridgeModels.TurnResponse response
-    ) {
-        if (response.trace_events == null || response.trace_events.isEmpty()) {
-            return;
-        }
-
-        for (BridgeModels.TraceEventPayload traceEvent : response.trace_events) {
-            deliverActionTrace(server, playerId, fromTraceEvent(traceEvent));
-        }
-    }
-
-    private ActionTracePresentation fromTraceEvent(BridgeModels.TraceEventPayload traceEvent) {
-        List<SecondaryChip> chips = new ArrayList<>();
-        if (traceEvent.secondary != null) {
-            for (BridgeModels.TraceChipPayload chip : traceEvent.secondary) {
-                if (chip == null || chip.label == null || chip.label.isBlank()) {
-                    continue;
-                }
-                chips.add(new SecondaryChip(chip.label, chipTone(chip.tone)));
-            }
-        }
-
-        return new ActionTracePresentation(
-                nonBlank(traceEvent.status_label, "已更新"),
-                chipTone(traceEvent.status_tone),
-                nonBlank(traceEvent.title, "Mina 步骤"),
-                traceEvent.detail,
-                chips
-        );
-    }
-
-    private ChipTone chipTone(String raw) {
-        if (raw == null) {
-            return ChipTone.MUTED;
-        }
-
-        return switch (raw.trim().toLowerCase()) {
-            case "success" -> ChipTone.SUCCESS;
-            case "info" -> ChipTone.INFO;
-            case "warning" -> ChipTone.WARNING;
-            case "error" -> ChipTone.ERROR;
-            default -> ChipTone.MUTED;
-        };
     }
 
     private void deliverError(net.minecraft.server.MinecraftServer server, UUID playerId, String message) {

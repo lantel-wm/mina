@@ -54,7 +54,7 @@ class PendingConfirmationPayload(MinaBaseModel):
 
 
 class TurnStartRequest(MinaBaseModel):
-    session_ref: str
+    thread_id: str
     turn_id: str
     player: PlayerPayload
     server_env: ServerEnvPayload
@@ -69,56 +69,6 @@ class PreconditionPayload(MinaBaseModel):
     path: str
     expected: Any
     reason: str | None = None
-
-
-class ActionRequestPayload(MinaBaseModel):
-    continuation_id: str
-    intent_id: str
-    capability_id: str
-    risk_class: str
-    effect_summary: str
-    preconditions: list[PreconditionPayload] = Field(default_factory=list)
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    requires_confirmation: bool = False
-
-
-class ActionResultPayload(MinaBaseModel):
-    intent_id: str
-    status: str
-    observations: dict[str, Any] = Field(default_factory=dict)
-    preconditions_passed: bool
-    side_effect_summary: str
-    timing_ms: int
-    state_fingerprint: str | None = None
-    error_message: str | None = None
-
-
-class TurnResumeRequest(MinaBaseModel):
-    turn_id: str
-    action_results: list[ActionResultPayload]
-
-
-class TraceChipPayload(MinaBaseModel):
-    label: str
-    tone: str
-
-
-class TraceEventPayload(MinaBaseModel):
-    status_label: str
-    status_tone: str
-    title: str
-    detail: str | None = None
-    secondary: list[TraceChipPayload] = Field(default_factory=list)
-
-
-class TurnResponse(MinaBaseModel):
-    type: Literal["final_reply", "action_request_batch", "progress_update"]
-    final_reply: str | None = None
-    continuation_id: str | None = None
-    action_request_batch: list[ActionRequestPayload] | None = None
-    pending_confirmation_id: str | None = None
-    pending_confirmation_effect_summary: str | None = None
-    trace_events: list[TraceEventPayload] = Field(default_factory=list)
 
 
 class CapabilityDescriptor(MinaBaseModel):

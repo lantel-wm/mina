@@ -1,6 +1,6 @@
 package mina;
 
-import mina.bridge.AgentServiceClient;
+import mina.bridge.AppServerClient;
 import mina.capability.CarpetObservationBackend;
 import mina.capability.CapabilityExecutorRegistry;
 import mina.capability.DefaultCarpetObservationBackend;
@@ -20,7 +20,7 @@ import mina.context.ThreatAssessmentProvider;
 import mina.context.WorldStateProvider;
 import mina.execution.DevTurnLog;
 import mina.execution.PendingTurnRegistry;
-import mina.execution.PendingConfirmationRegistry;
+import mina.execution.PendingApprovalRegistry;
 import mina.execution.TurnCoordinator;
 import mina.policy.ExecutionGuard;
 import mina.policy.PermissionResolver;
@@ -38,7 +38,6 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import net.fabricmc.loader.api.FabricLoader;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -50,12 +49,12 @@ public final class MinaRuntime {
     private MinaConfig config;
     private ExecutorService ioExecutor;
     private PendingTurnRegistry pendingTurns;
-    private PendingConfirmationRegistry pendingConfirmations;
+    private PendingApprovalRegistry pendingApprovals;
     private PermissionResolver permissionResolver;
     private CapabilityExecutorRegistry capabilityRegistry;
     private GameContextCollector contextCollector;
     private RecentEventTracker recentEventTracker;
-    private AgentServiceClient agentServiceClient;
+    private AppServerClient appServerClient;
     private ExecutionGuard executionGuard;
     private TurnCoordinator turnCoordinator;
     private DevTurnLog devTurnLog;
@@ -80,7 +79,7 @@ public final class MinaRuntime {
                 new MinaThreadFactory()
         );
         this.pendingTurns = new PendingTurnRegistry();
-        this.pendingConfirmations = new PendingConfirmationRegistry();
+        this.pendingApprovals = new PendingApprovalRegistry();
         this.permissionResolver = new PermissionResolver(config);
         ObservationTextResolver observationTextResolver = new ObservationTextResolver(config.observationLanguage());
         this.recentEventTracker = new RecentEventTracker(
@@ -140,7 +139,7 @@ public final class MinaRuntime {
                 config.enableExperimentalCapabilities(),
                 config.enableDynamicScripting()
         );
-        this.agentServiceClient = new AgentServiceClient(config);
+        this.appServerClient = new AppServerClient(config);
         this.executionGuard = new ExecutionGuard(config, permissionResolver);
         this.devTurnLog = DevTurnLog.forRunDirectory(
                 minecraftServer.getRunDirectory(),
@@ -148,12 +147,12 @@ public final class MinaRuntime {
         );
         this.turnCoordinator = new TurnCoordinator(
                 config,
-                agentServiceClient,
+                appServerClient,
                 contextCollector,
                 capabilityRegistry,
                 executionGuard,
                 pendingTurns,
-                pendingConfirmations,
+                pendingApprovals,
                 recentEventTracker,
                 devTurnLog,
                 ioExecutor
@@ -168,16 +167,19 @@ public final class MinaRuntime {
         }
 
         pendingTurns.closeAll();
-        pendingConfirmations.clearAll();
+        pendingApprovals.clearAll();
         turnCoordinator = null;
         executionGuard = null;
-        agentServiceClient = null;
+        if (appServerClient != null) {
+            appServerClient.close();
+        }
+        appServerClient = null;
         contextCollector = null;
         capabilityRegistry = null;
         permissionResolver = null;
         devTurnLog = null;
         pendingTurns = null;
-        pendingConfirmations = null;
+        pendingApprovals = null;
         recentEventTracker = null;
 
         if (ioExecutor != null) {

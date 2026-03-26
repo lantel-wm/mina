@@ -756,7 +756,7 @@ def recent_turns(args: argparse.Namespace) -> int:
         entry
         for entry in entries
         if (not args.player or entry.get("player_name") == args.player)
-        and (not args.session or entry.get("session_ref") == args.session)
+        and (not args.session or entry.get("thread_id") == args.session)
     ]
     for entry in filtered[-args.limit:]:
         print(

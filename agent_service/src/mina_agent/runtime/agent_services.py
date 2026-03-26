@@ -8,7 +8,6 @@ from mina_agent.debug import DebugRecorder
 from mina_agent.memory.store import Store
 from mina_agent.policy.policy_engine import PolicyEngine
 from mina_agent.runtime.capability_registry import CapabilityRegistry
-from mina_agent.runtime.confirmation_resolver import ConfirmationResolver
 from mina_agent.runtime.context_engine import ContextEngine
 from mina_agent.runtime.context_manager import ContextManager
 from mina_agent.runtime.decision_engine import DecisionEngine
@@ -31,7 +30,6 @@ class AgentServices:
     capability_registry: CapabilityRegistry
     execution_orchestrator: ExecutionOrchestrator
     memory_policy: MemoryPolicy
-    confirmation_resolver: ConfirmationResolver
     context_manager: ContextManager | None = None
     context_engine: ContextEngine | None = None
     deliberation_engine: DeliberationEngine | None = None

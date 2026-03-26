@@ -25,7 +25,7 @@ class HeadlessCliTests(unittest.TestCase):
                         json.dumps(
                             {
                                 "turn_id": "turn-a",
-                                "session_ref": "session-1",
+                                "thread_id": "session-1",
                                 "player_name": "Steve",
                                 "user_message": "hello",
                                 "status": "completed",
@@ -37,7 +37,7 @@ class HeadlessCliTests(unittest.TestCase):
                         json.dumps(
                             {
                                 "turn_id": "turn-b",
-                                "session_ref": "session-2",
+                                "thread_id": "session-2",
                                 "player_name": "Alex",
                                 "user_message": "world",
                                 "status": "completed",

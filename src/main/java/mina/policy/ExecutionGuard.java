@@ -2,7 +2,7 @@ package mina.policy;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import mina.bridge.BridgeModels;
+import mina.bridge.AppServerModels;
 import mina.capability.CapabilityDefinition;
 import mina.config.MinaConfig;
 import mina.context.TurnContext;
@@ -26,7 +26,7 @@ public final class ExecutionGuard {
     public Decision evaluate(
             ServerPlayerEntity player,
             TurnContext context,
-            BridgeModels.ActionRequestPayload actionRequest,
+            AppServerModels.ToolCallRequestPayload actionRequest,
             int actionCount
     ) {
         if (actionCount > config.maxBridgeActionsPerTurn()) {
@@ -43,7 +43,7 @@ public final class ExecutionGuard {
             return new Decision(false, true, "confirmation_required", "This action requires natural-language confirmation.");
         }
 
-        if (!isVisible(context.visibleCapabilities(), actionRequest.capability_id)) {
+        if (!isVisible(context.visibleCapabilities(), actionRequest.tool_id)) {
             return new Decision(false, true, "capability_hidden", "The requested capability is not visible in the current context.");
         }
 
@@ -59,12 +59,12 @@ public final class ExecutionGuard {
         return visibleCapabilities.stream().anyMatch(definition -> definition.id().equals(capabilityId));
     }
 
-    private boolean preconditionsPass(List<BridgeModels.PreconditionPayload> preconditions, Map<String, Object> snapshot) {
+    private boolean preconditionsPass(List<AppServerModels.PreconditionPayload> preconditions, Map<String, Object> snapshot) {
         if (preconditions == null || preconditions.isEmpty()) {
             return true;
         }
 
-        for (BridgeModels.PreconditionPayload precondition : preconditions) {
+        for (AppServerModels.PreconditionPayload precondition : preconditions) {
             Object actual = resolvePath(snapshot, precondition.path);
             if (!Objects.equals(gson.toJson(actual), gson.toJson(precondition.expected))) {
                 return false;

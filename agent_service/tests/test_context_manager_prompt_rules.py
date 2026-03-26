@@ -58,7 +58,7 @@ class ContextManagerPromptRuleTests(unittest.TestCase):
             preview={"summary": "delegate summary", "delegate_result": {"role": "plan"}},
             artifact_ref=ArtifactRef(
                 artifact_id="artifact_1",
-                session_ref="session_1",
+                thread_id="session_1",
                 kind="delegate_result",
                 path="/tmp/artifact.json",
                 summary="delegate summary",
