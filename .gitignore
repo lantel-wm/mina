@@ -21,16 +21,7 @@ htmlcov/
 config/mina.properties
 eula.txt
 agent_service/config.local.json
-agent_service/data/audit/
-agent_service/data/debug/
-agent_service/data/*.db
-agent_service/data/*.sqlite*
-agent_service/data/knowledge/
-agent_service/data/knowledge_cache/
-agent_service/data/knowledge/changelogs/
-agent_service/data/memory/
-agent_service/data/sessions/
-agent_service/data/tasks/
+agent_service/data/
 tmp/
 var/
 
