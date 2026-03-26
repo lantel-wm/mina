@@ -1,0 +1,15 @@
+{
+  "page_id": 1,
+  "ns": 0,
+  "title": "钻石镐",
+  "rev_id": 101,
+  "timestamp": "2026-03-20T12:34:56Z",
+  "wikitext": "{{信息框/物品\n| stackable = 否\n| durability = 1561\n}}\n'''钻石镐'''是一种[[工具]]，可用于开采[[钻石矿石]]。<ref>来源</ref>\n== 获取 ==\n可通过[[工作台]]合成。\n== 用途 ==\n用于开采[[黑曜石]]。\n[[Category:工具]]\n[[Category:可合成物品]]\n",
+  "categories_raw": [
+    "工具",
+    "可合成物品"
+  ],
+  "source_url": "https://example.test/wiki/%E9%92%BB%E7%9F%B3%E9%95%90",
+  "redirect_target": null,
+  "crawl_time": "2026-03-23T10:00:00Z"
+}

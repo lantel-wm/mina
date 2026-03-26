@@ -1,0 +1,25 @@
+wiki:
+  base_url: "https://zh.minecraft.wiki"
+  api_path: "/api.php"
+  user_agent: "MinaWikiMirror/0.1 (contact: zhaozhiyu60@gmail.com)"
+  timeout_sec: 30
+  maxlag: 1
+
+crawl:
+  namespace: 0
+  page_batch_size: 30
+  retry_times: 5
+  retry_backoff_sec: 2
+  save_raw_json: true
+
+parse:
+  extract_infobox: true
+  extract_sections: true
+  extract_links: true
+  extract_categories: true
+
+storage:
+  raw_dir: "data/raw/pages"
+  processed_dir: "data/processed/pages"
+  sqlite_path: "data/processed/sqlite/wiki.db"
+  checkpoints_dir: "data/raw/checkpoints"

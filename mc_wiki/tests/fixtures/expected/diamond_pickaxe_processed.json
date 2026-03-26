@@ -1,0 +1,64 @@
+{
+  "categories": [
+    "工具",
+    "可合成物品"
+  ],
+  "infobox": {
+    "durability": "1561",
+    "stackable": "否"
+  },
+  "is_redirect": false,
+  "ns": 0,
+  "normalized_title": "钻石镐",
+  "page_id": 1,
+  "plain_text": "钻石镐是一种工具，可用于开采钻石矿石。\n获取\n可通过工作台合成。\n用途\n用于开采黑曜石。",
+  "redirect_target": null,
+  "rev_id": 101,
+  "sections": [
+    {
+      "level": 1,
+      "ord": 1,
+      "text": "可通过工作台合成。",
+      "title": "获取"
+    },
+    {
+      "level": 1,
+      "ord": 2,
+      "text": "用于开采黑曜石。",
+      "title": "用途"
+    }
+  ],
+  "source_ref": {
+    "rev_id": 101,
+    "source_url": "https://example.test/wiki/%E9%92%BB%E7%9F%B3%E9%95%90",
+    "timestamp": "2026-03-20T12:34:56Z"
+  },
+  "templates": [
+    {
+      "name": "信息框/物品",
+      "params": {
+        "durability": "1561",
+        "stackable": "否"
+      }
+    }
+  ],
+  "title": "钻石镐",
+  "wikilinks": [
+    {
+      "display_text": "工具",
+      "target_title": "工具"
+    },
+    {
+      "display_text": "钻石矿石",
+      "target_title": "钻石矿石"
+    },
+    {
+      "display_text": "工作台",
+      "target_title": "工作台"
+    },
+    {
+      "display_text": "黑曜石",
+      "target_title": "黑曜石"
+    }
+  ]
+}

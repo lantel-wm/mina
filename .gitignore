@@ -36,3 +36,6 @@ var/
 
 # reference repos for coding agent
 reference
+
+# logs
+logs/
