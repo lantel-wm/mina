@@ -66,9 +66,16 @@ class TurnSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     actor_id: str
-    message: str
+    mode: Literal["player_message", "observe_companion"] = "player_message"
+    message: str | None = None
     setup_commands_before: list[str] = Field(default_factory=list)
     assertions_override: ScenarioAssertions | None = None
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "TurnSpec":
+        if self.mode == "player_message" and not str(self.message or "").strip():
+            raise ValueError("player_message turns require a non-empty message")
+        return self
 
 
 class HeadlessScenario(BaseModel):

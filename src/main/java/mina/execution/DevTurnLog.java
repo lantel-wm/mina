@@ -40,6 +40,18 @@ public final class DevTurnLog {
             String userMessage,
             Instant startedAt
     ) {
+        recordAccepted(turnId, threadId, playerName, userMessage, startedAt, "user", null);
+    }
+
+    public void recordAccepted(
+            String turnId,
+            String threadId,
+            String playerName,
+            String userMessage,
+            Instant startedAt,
+            String turnKind,
+            String companionSignalKind
+    ) {
         append(record(
                 turnId,
                 threadId,
@@ -49,7 +61,9 @@ public final class DevTurnLog {
                 startedAt,
                 null,
                 null,
-                null
+                null,
+                turnKind,
+                companionSignalKind
         ));
     }
 
@@ -62,6 +76,20 @@ public final class DevTurnLog {
             Instant endedAt,
             String finalReplyPreview
     ) {
+        recordCompleted(turnId, threadId, playerName, userMessage, startedAt, endedAt, finalReplyPreview, "user", null);
+    }
+
+    public void recordCompleted(
+            String turnId,
+            String threadId,
+            String playerName,
+            String userMessage,
+            Instant startedAt,
+            Instant endedAt,
+            String finalReplyPreview,
+            String turnKind,
+            String companionSignalKind
+    ) {
         append(record(
                 turnId,
                 threadId,
@@ -71,7 +99,9 @@ public final class DevTurnLog {
                 startedAt,
                 endedAt,
                 null,
-                finalReplyPreview
+                finalReplyPreview,
+                turnKind,
+                companionSignalKind
         ));
     }
 
@@ -85,6 +115,21 @@ public final class DevTurnLog {
             String error,
             String finalReplyPreview
     ) {
+        recordFailed(turnId, threadId, playerName, userMessage, startedAt, endedAt, error, finalReplyPreview, "user", null);
+    }
+
+    public void recordFailed(
+            String turnId,
+            String threadId,
+            String playerName,
+            String userMessage,
+            Instant startedAt,
+            Instant endedAt,
+            String error,
+            String finalReplyPreview,
+            String turnKind,
+            String companionSignalKind
+    ) {
         append(record(
                 turnId,
                 threadId,
@@ -94,7 +139,9 @@ public final class DevTurnLog {
                 startedAt,
                 endedAt,
                 error,
-                finalReplyPreview
+                finalReplyPreview,
+                turnKind,
+                companionSignalKind
         ));
     }
 
@@ -107,7 +154,9 @@ public final class DevTurnLog {
             Instant startedAt,
             Instant endedAt,
             String error,
-            String finalReplyPreview
+            String finalReplyPreview,
+            String turnKind,
+            String companionSignalKind
     ) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("turn_id", turnId);
@@ -115,6 +164,8 @@ public final class DevTurnLog {
         payload.put("player_name", playerName);
         payload.put("user_message", userMessage);
         payload.put("status", status);
+        payload.put("turn_kind", turnKind);
+        payload.put("companion_signal_kind", companionSignalKind);
         payload.put("started_at", startedAt == null ? null : startedAt.toString());
         payload.put("ended_at", endedAt == null ? null : endedAt.toString());
         payload.put("error", truncate(error));

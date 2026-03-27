@@ -1,0 +1,28 @@
+{
+  "suite": "real",
+  "scenario_id": "real_companion_proactive_danger_warning",
+  "scenario_category": "companion",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "mode": "observe_companion",
+      "message": "observe proactive danger companion turn",
+      "setup_commands_before": [
+        "damage Steve 7 generic"
+      ]
+    }
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": [],
+    "forbidden_capability_ids": [],
+    "confirmation_expected": false
+  }
+}

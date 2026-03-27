@@ -1,0 +1,28 @@
+{
+  "suite": "real",
+  "scenario_id": "real_companion_proactive_advancement_celebration",
+  "scenario_category": "companion",
+  "world_template": "overworld_day_spawn",
+  "status": "runnable_now",
+  "expectation": "target_state",
+  "actors": [
+    {"actor_id": "player", "name": "Steve", "role": "read_only"}
+  ],
+  "turns": [
+    {
+      "actor_id": "player",
+      "mode": "observe_companion",
+      "message": "observe proactive advancement celebration",
+      "setup_commands_before": [
+        "advancement grant Steve only minecraft:story/mine_stone"
+      ]
+    }
+  ],
+  "assertions": {
+    "expected_final_status": "completed",
+    "forbidden_statuses": ["failed"],
+    "required_capability_ids": [],
+    "forbidden_capability_ids": [],
+    "confirmation_expected": false
+  }
+}

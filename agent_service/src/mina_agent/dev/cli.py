@@ -64,6 +64,8 @@ REVIEW_BUNDLE_FILENAMES = frozenset(
 class TurnRunResult:
     turn_id: str
     thread_id: str
+    turn_kind: str
+    companion_signal_kind: str | None
     actor_id: str
     message: str
     bundle_dir: Path
@@ -622,39 +624,61 @@ def run_scenario(
     debug_dir: Path,
     timeout: float,
 ) -> tuple[list[TurnRunResult], int]:
-    for actor in scenario.actors:
-        ensure_actor_spawned(server, actor, known_actors)
-    for command in scenario.setup_commands:
-        server.send_line(command)
-        time.sleep(0.2)
-
     results: list[TurnRunResult] = []
     current_offset = dev_log_offset
+    suite_setup_done = False
     for turn_index, turn in enumerate(scenario.turns):
         actor = scenario.actor(turn.actor_id)
+        if not suite_setup_done:
+            for known_actor in scenario.actors:
+                ensure_actor_spawned(server, known_actor, known_actors)
+            for command in scenario.setup_commands:
+                server.send_line(command)
+                time.sleep(0.2)
+            suite_setup_done = True
+        turn_mode = getattr(turn, "mode", "player_message")
+        turn_label = truncate_for_status(turn.message or turn_mode)
         log_status(
             f"Scenario {scenario.scenario_id}: turn {turn_index + 1}/{len(scenario.turns)} "
-            f"as {actor.name}: {truncate_for_status(turn.message)}"
+            f"as {actor.name}: {turn_label}"
         )
+        current_offset = read_jsonl_offset(dev_log_path)
         for command in turn.setup_commands_before:
             server.send_line(command)
             time.sleep(0.2)
-        normalized_message = normalize_message(turn.message)
-        current_offset = read_jsonl_offset(dev_log_path)
-        server.send_line(f"execute as {actor.name} run mina {normalized_message}")
-        accepted, current_offset = wait_for_dev_log_entry(
-            dev_log_path,
-            current_offset,
-            timeout,
-            lambda entry: (
-                entry.get("status") == "accepted"
-                and entry.get("player_name") == actor.name
-                and entry.get("user_message") == normalized_message
-            ),
-            "accepted turn",
-            "missing_accepted_turn",
-            progress_label=f"Scenario {scenario.scenario_id}: waiting for accepted turn {turn_index + 1}",
-        )
+        if turn_mode == "player_message":
+            normalized_message = normalize_message(turn.message or "")
+            server.send_line(f"execute as {actor.name} run mina {normalized_message}")
+            accepted, current_offset = wait_for_dev_log_entry(
+                dev_log_path,
+                current_offset,
+                timeout,
+                lambda entry: (
+                    entry.get("status") == "accepted"
+                    and entry.get("player_name") == actor.name
+                    and entry.get("user_message") == normalized_message
+                ),
+                "accepted turn",
+                "missing_accepted_turn",
+                progress_label=f"Scenario {scenario.scenario_id}: waiting for accepted turn {turn_index + 1}",
+            )
+        elif turn_mode == "observe_companion":
+            normalized_message = turn.message or "<observe_companion>"
+            accepted, current_offset = wait_for_dev_log_entry(
+                dev_log_path,
+                current_offset,
+                timeout,
+                lambda entry: (
+                    entry.get("status") == "accepted"
+                    and entry.get("player_name") == actor.name
+                    and entry.get("turn_kind") == "proactive_companion"
+                ),
+                "accepted proactive companion turn",
+                "missing_accepted_turn",
+                progress_label=f"Scenario {scenario.scenario_id}: waiting for proactive companion turn {turn_index + 1}",
+            )
+        else:
+            raise RuntimeError(f"startup_failure: unsupported turn mode {turn_mode}")
         turn_id = str(accepted["turn_id"])
         log_status(f"Scenario {scenario.scenario_id}: accepted turn {turn_index + 1} -> {turn_id}")
         completed, current_offset = wait_for_dev_log_entry(
@@ -682,6 +706,12 @@ def run_scenario(
         turn_result = TurnRunResult(
             turn_id=turn_id,
             thread_id=thread_id,
+            turn_kind=str(accepted.get("turn_kind") or completed.get("turn_kind") or "user"),
+            companion_signal_kind=(
+                str(accepted.get("companion_signal_kind") or completed.get("companion_signal_kind"))
+                if (accepted.get("companion_signal_kind") or completed.get("companion_signal_kind")) is not None
+                else None
+            ),
             actor_id=turn.actor_id,
             message=normalized_message,
             bundle_dir=bundle_dir,

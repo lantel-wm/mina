@@ -108,7 +108,7 @@ public final class TurnCoordinator {
             companionCoordinator.onPlayerUserMessage(player, userMessage);
         }
         acceptedCallback.run();
-        devTurnLog.recordAccepted(turnId, sessionRef, playerName, userMessage, startedAt);
+        devTurnLog.recordAccepted(turnId, sessionRef, playerName, userMessage, startedAt, "user", null);
         ioExecutor.submit(() -> runTurn(
                 playerId,
                 sessionRef,
@@ -141,7 +141,18 @@ public final class TurnCoordinator {
         serverPlayer(server, playerId).ifPresent(player ->
                 recentEventTracker.recordTurnEvent("mina_proactive_companion", player, syntheticUserMessage)
         );
-        devTurnLog.recordAccepted(turnId, sessionRef, playerName, syntheticUserMessage, startedAt);
+        String signalKind = companionTrigger != null && companionTrigger.primary_signal != null
+                ? companionTrigger.primary_signal.kind
+                : null;
+        devTurnLog.recordAccepted(
+                turnId,
+                sessionRef,
+                playerName,
+                syntheticUserMessage,
+                startedAt,
+                "proactive_companion",
+                signalKind
+        );
         ioExecutor.submit(() -> runTurn(
                 playerId,
                 sessionRef,
@@ -270,7 +281,9 @@ public final class TurnCoordinator {
                                 userMessage,
                                 startedAt,
                                 Instant.now(),
-                                finalReply
+                                finalReply,
+                                proactiveCompanion ? "proactive_companion" : "user",
+                                companionTrigger != null && companionTrigger.primary_signal != null ? companionTrigger.primary_signal.kind : null
                         );
                         deliverReply(
                                 server,
@@ -291,7 +304,9 @@ public final class TurnCoordinator {
                                 startedAt,
                                 Instant.now(),
                                 detail,
-                                null
+                                null,
+                                proactiveCompanion ? "proactive_companion" : "user",
+                                companionTrigger != null && companionTrigger.primary_signal != null ? companionTrigger.primary_signal.kind : null
                         );
                         deliverError(server, playerId, "刚刚这一步有点不对，我再处理也许会更稳。原因：" + detail);
                         return;
@@ -310,7 +325,9 @@ public final class TurnCoordinator {
                     startedAt,
                     Instant.now(),
                     exception.getMessage(),
-                    null
+                    null,
+                    proactiveCompanion ? "proactive_companion" : "user",
+                    companionTrigger != null && companionTrigger.primary_signal != null ? companionTrigger.primary_signal.kind : null
             );
             deliverError(server, playerId, "Mina 等待处理结果超时了，我这一轮先停下。");
         } catch (Exception exception) {
@@ -323,7 +340,9 @@ public final class TurnCoordinator {
                     startedAt,
                     Instant.now(),
                     exception.getMessage(),
-                    null
+                    null,
+                    proactiveCompanion ? "proactive_companion" : "user",
+                    companionTrigger != null && companionTrigger.primary_signal != null ? companionTrigger.primary_signal.kind : null
             );
             deliverError(server, playerId, "刚刚这一步有点不对，我再处理也许会更稳。原因：" + exception.getMessage());
         } finally {

@@ -294,6 +294,104 @@ class HeadlessCliTests(unittest.TestCase):
                 self.assertEqual(results[0].thread_id, "thread-1")
                 self.assertIn("execute as Steve run mina hello Mina", server.commands[0])
 
+    def test_run_scenario_can_observe_proactive_companion_turn(self) -> None:
+        scenario = HeadlessScenario.model_validate(
+            {
+                "suite": "real",
+                "scenario_id": "observe_companion_case",
+                "world_template": "overworld_day_spawn",
+                "actors": [{"actor_id": "player", "name": "Steve", "role": "read_only"}],
+                "turns": [
+                    {
+                        "actor_id": "player",
+                        "mode": "observe_companion",
+                        "message": "wait for proactive companion",
+                        "setup_commands_before": ["damage Steve 7 generic"],
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dev_log = root / "turns.jsonl"
+            dev_log.write_text("", encoding="utf-8")
+            bundle_dir = root / "bundle"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "response.final.json").write_text(
+                json.dumps(
+                    {"status": "completed", "final_reply": "小心一点，我在。", "turn": {"thread_id": "thread-1"}},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (bundle_dir / "scenario.capture.json").write_text(
+                json.dumps({"thread_id": "thread-1", "selected_capability_ids": []}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            class _FakeServer:
+                def __init__(self) -> None:
+                    self.commands: list[str] = []
+
+                def send_line(self, command: str) -> None:
+                    self.commands.append(command)
+                    if command == "damage Steve 7 generic":
+                        dev_log.write_text(
+                            "".join(
+                                [
+                                    json.dumps(
+                                        {
+                                            "turn_id": "turn-proactive-1",
+                                            "thread_id": "thread-1",
+                                            "turn_kind": "proactive_companion",
+                                            "companion_signal_kind": "danger_warning",
+                                            "status": "accepted",
+                                            "player_name": "Steve",
+                                            "user_message": "Produce one brief companion-first proactive message.",
+                                            "started_at": "2026-03-23T03:00:00Z",
+                                        }
+                                    )
+                                    + "\n",
+                                    json.dumps(
+                                        {
+                                            "turn_id": "turn-proactive-1",
+                                            "thread_id": "thread-1",
+                                            "turn_kind": "proactive_companion",
+                                            "companion_signal_kind": "danger_warning",
+                                            "status": "completed",
+                                            "player_name": "Steve",
+                                            "user_message": "Produce one brief companion-first proactive message.",
+                                            "ended_at": "2026-03-23T03:00:01Z",
+                                        }
+                                    )
+                                    + "\n",
+                                ]
+                            ),
+                            encoding="utf-8",
+                        )
+
+            server = _FakeServer()
+            with (
+                mock.patch("mina_agent.dev.cli.ensure_actor_spawned"),
+                mock.patch("mina_agent.dev.cli.wait_for_bundle", return_value=bundle_dir),
+            ):
+                results, final_offset = cli.run_scenario(
+                    scenario=scenario,
+                    server=server,
+                    known_actors=set(),
+                    dev_log_path=dev_log,
+                    dev_log_offset=0,
+                    debug_dir=root,
+                    timeout=1.0,
+                )
+                self.assertEqual(final_offset, dev_log.stat().st_size)
+
+        self.assertEqual(results[0].thread_id, "thread-1")
+        self.assertEqual(results[0].turn_kind, "proactive_companion")
+        self.assertEqual(results[0].companion_signal_kind, "danger_warning")
+        self.assertEqual(server.commands[0], "damage Steve 7 generic")
+
     def test_run_functional_returns_nonzero_when_any_case_fails(self) -> None:
         args = argparse.Namespace(
             scenario_dir="unused",
